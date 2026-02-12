@@ -1,7 +1,8 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use agentshield::cli::{Cli, Commands, PolicyAction};
+use agentshield::cli::integrate;
+use agentshield::cli::{Cli, Commands, IntegrateTarget, PolicyAction};
 use agentshield::logging;
 use agentshield::policy::config::AppConfig;
 use agentshield::proxy::ProxyServer;
@@ -49,6 +50,10 @@ async fn main() -> anyhow::Result<()> {
         Commands::Init => {
             cmd_init(&cli.config)?;
         }
+        Commands::Integrate { target } => match target {
+            IntegrateTarget::Openclaw => integrate::cmd_integrate_openclaw()?,
+            IntegrateTarget::Remove => integrate::cmd_integrate_remove()?,
+        },
     }
 
     Ok(())

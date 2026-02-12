@@ -1,3 +1,4 @@
+pub mod integrate;
 pub mod prompt;
 
 use std::path::PathBuf;
@@ -48,6 +49,19 @@ pub enum Commands {
     },
     /// Initialize AgentShield configuration
     Init,
+    /// Integrate with external applications
+    Integrate {
+        #[command(subcommand)]
+        target: IntegrateTarget,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum IntegrateTarget {
+    /// Integrate with OpenClaw (set Telegram proxy)
+    Openclaw,
+    /// Remove integration from OpenClaw
+    Remove,
 }
 
 #[derive(Subcommand)]
