@@ -7,14 +7,17 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use rusqlite::Connection;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tracing::info;
 
+use crate::cli::prompt::AskRequest;
 use crate::policy::config::PolicyConfig;
 
 pub struct ProxyServer {
     listen_addr: String,
     policy: Option<Arc<PolicyConfig>>,
     db: Option<Arc<Mutex<Connection>>>,
+    ask_tx: Option<mpsc::Sender<AskRequest>>,
 }
 
 impl ProxyServer {
@@ -23,6 +26,7 @@ impl ProxyServer {
             listen_addr,
             policy: None,
             db: None,
+            ask_tx: None,
         }
     }
 
@@ -36,6 +40,11 @@ impl ProxyServer {
         self
     }
 
+    pub fn with_ask_channel(mut self, ask_tx: mpsc::Sender<AskRequest>) -> Self {
+        self.ask_tx = Some(ask_tx);
+        self
+    }
+
     /// Start the proxy server and return the actual bound address.
     pub async fn start(&self) -> Result<SocketAddr> {
         let listener = TcpListener::bind(&self.listen_addr).await?;
@@ -44,8 +53,9 @@ impl ProxyServer {
 
         let policy = self.policy.clone();
         let db = self.db.clone();
+        let ask_tx = self.ask_tx.clone();
         tokio::spawn(async move {
-            connect::accept_loop(listener, policy, db).await;
+            connect::accept_loop(listener, policy, db, ask_tx).await;
         });
 
         Ok(local_addr)

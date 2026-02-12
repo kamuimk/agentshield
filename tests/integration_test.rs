@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use agentshield::cli::prompt::{self, PromptRequest};
+use agentshield::cli::prompt::{self, AskRequest, PromptRequest};
 use agentshield::logging;
 use agentshield::policy::config::{Action, AppConfig, PolicyConfig, Rule};
 use agentshield::policy::evaluator::{self, RequestInfo};
@@ -443,4 +443,104 @@ async fn proxy_logs_requests_to_sqlite() {
 
     let allowed = logs.iter().find(|l| l.domain == "example.com").unwrap();
     assert_eq!(allowed.action, "allow");
+}
+
+// ===== ASK channel infrastructure =====
+
+#[tokio::test]
+async fn ask_channel_sends_request_on_ask_policy() {
+    let policy = PolicyConfig {
+        default: Action::Deny,
+        rules: vec![Rule {
+            name: "ask-example".to_string(),
+            domains: vec!["example.com".to_string()],
+            methods: None,
+            action: Action::Ask,
+            note: None,
+        }],
+    };
+
+    let (ask_tx, mut ask_rx) = tokio::sync::mpsc::channel::<AskRequest>(10);
+
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_policy(policy)
+        .with_ask_channel(ask_tx);
+    let addr = server.start().await.unwrap();
+
+    // Send CONNECT to example.com (ASK rule)
+    let connect_handle = tokio::spawn(async move {
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = [0u8; 1024];
+        let n = stream.read(&mut buf).await.unwrap();
+        String::from_utf8_lossy(&buf[..n]).to_string()
+    });
+
+    // Receive the ASK request on the channel and approve it
+    let ask_req = tokio::time::timeout(std::time::Duration::from_secs(5), ask_rx.recv())
+        .await
+        .expect("Timeout waiting for ASK request")
+        .expect("Channel closed");
+
+    assert_eq!(ask_req.domain, "example.com");
+    assert_eq!(ask_req.method, "CONNECT");
+    // Approve the request
+    ask_req.respond(true);
+
+    let response = connect_handle.await.unwrap();
+    // Should get 200 (approved) not 403 (denied)
+    assert!(
+        response.contains("200"),
+        "Expected 200 after approval, got: {}",
+        response
+    );
+}
+
+#[tokio::test]
+async fn ask_channel_deny_returns_403() {
+    let policy = PolicyConfig {
+        default: Action::Deny,
+        rules: vec![Rule {
+            name: "ask-example".to_string(),
+            domains: vec!["example.com".to_string()],
+            methods: None,
+            action: Action::Ask,
+            note: None,
+        }],
+    };
+
+    let (ask_tx, mut ask_rx) = tokio::sync::mpsc::channel::<AskRequest>(10);
+
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_policy(policy)
+        .with_ask_channel(ask_tx);
+    let addr = server.start().await.unwrap();
+
+    let connect_handle = tokio::spawn(async move {
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = [0u8; 1024];
+        let n = stream.read(&mut buf).await.unwrap();
+        String::from_utf8_lossy(&buf[..n]).to_string()
+    });
+
+    // Deny the request
+    let ask_req = tokio::time::timeout(std::time::Duration::from_secs(5), ask_rx.recv())
+        .await
+        .expect("Timeout waiting for ASK request")
+        .expect("Channel closed");
+    ask_req.respond(false);
+
+    let response = connect_handle.await.unwrap();
+    assert!(
+        response.contains("403"),
+        "Expected 403 after denial, got: {}",
+        response
+    );
 }

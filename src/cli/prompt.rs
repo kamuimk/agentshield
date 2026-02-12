@@ -2,6 +2,7 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 
 use anyhow::Result;
+use tokio::sync::oneshot;
 
 use crate::policy::config::{Action, Rule};
 
@@ -21,6 +22,35 @@ pub struct PromptRequest {
     pub domain: String,
     pub path: String,
     pub body: Option<String>,
+}
+
+/// A request sent from the proxy to the main thread asking for approval.
+pub struct AskRequest {
+    pub domain: String,
+    pub method: String,
+    pub path: String,
+    response_tx: oneshot::Sender<bool>,
+}
+
+impl AskRequest {
+    pub fn new(domain: String, method: String, path: String) -> (Self, oneshot::Receiver<bool>) {
+        let (tx, rx) = oneshot::channel();
+        (
+            Self {
+                domain,
+                method,
+                path,
+                response_tx: tx,
+            },
+            rx,
+        )
+    }
+
+    /// Send the approval decision back to the proxy.
+    pub fn respond(self, allowed: bool) {
+        // Ignore error if receiver was dropped
+        let _ = self.response_tx.send(allowed);
+    }
 }
 
 /// Display the approval prompt and return the user's decision.

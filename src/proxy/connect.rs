@@ -3,8 +3,10 @@ use std::sync::{Arc, Mutex};
 use rusqlite::Connection;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
+use crate::cli::prompt::AskRequest;
 use crate::logging;
 use crate::policy::config::{Action, PolicyConfig};
 use crate::policy::evaluator::{self, RequestInfo};
@@ -14,6 +16,7 @@ pub async fn accept_loop(
     listener: TcpListener,
     policy: Option<Arc<PolicyConfig>>,
     db: Option<Arc<Mutex<Connection>>>,
+    ask_tx: Option<mpsc::Sender<AskRequest>>,
 ) {
     loop {
         match listener.accept().await {
@@ -21,8 +24,11 @@ pub async fn accept_loop(
                 info!("New connection from {}", peer_addr);
                 let policy = policy.clone();
                 let db = db.clone();
+                let ask_tx = ask_tx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, policy.as_deref(), db.as_ref()).await
+                    if let Err(e) =
+                        handle_connection(stream, policy.as_deref(), db.as_ref(), ask_tx.as_ref())
+                            .await
                     {
                         error!("Error handling connection from {}: {}", peer_addr, e);
                     }
@@ -67,6 +73,7 @@ async fn handle_connection(
     mut client: TcpStream,
     policy: Option<&PolicyConfig>,
     db: Option<&Arc<Mutex<Connection>>>,
+    ask_tx: Option<&mpsc::Sender<AskRequest>>,
 ) -> anyhow::Result<()> {
     let mut buf = vec![0u8; 8192];
     let n = client.read(&mut buf).await?;
@@ -78,10 +85,37 @@ async fn handle_connection(
     let first_line = request.lines().next().unwrap_or("");
 
     if first_line.starts_with("CONNECT ") {
-        handle_connect(&mut client, first_line, policy, db).await
+        handle_connect(&mut client, first_line, policy, db, ask_tx).await
     } else {
-        handle_http_request(&mut client, &buf[..n], policy, db).await
+        handle_http_request(&mut client, &buf[..n], policy, db, ask_tx).await
     }
+}
+
+/// Send an ASK request through the channel and wait for the response.
+/// Returns true if allowed, false if denied. Defaults to deny on timeout or error.
+async fn ask_and_wait(
+    ask_tx: Option<&mpsc::Sender<AskRequest>>,
+    domain: &str,
+    method: &str,
+    path: &str,
+) -> bool {
+    if let Some(tx) = ask_tx {
+        let (req, rx) = AskRequest::new(
+            domain.to_string(),
+            method.to_string(),
+            path.to_string(),
+        );
+        if tx.send(req).await.is_ok() {
+            // Wait up to 30 seconds for a response
+            match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+                Ok(Ok(allowed)) => return allowed,
+                Ok(Err(_)) => warn!("ASK response channel closed for {}", domain),
+                Err(_) => warn!("ASK timeout (30s) for {} - defaulting to deny", domain),
+            }
+        }
+    }
+    // No channel or error: default to allow (backward compat when no channel)
+    ask_tx.is_none()
 }
 
 /// Handle CONNECT method for HTTPS tunneling.
@@ -90,6 +124,7 @@ async fn handle_connect(
     first_line: &str,
     policy: Option<&PolicyConfig>,
     db: Option<&Arc<Mutex<Connection>>>,
+    ask_tx: Option<&mpsc::Sender<AskRequest>>,
 ) -> anyhow::Result<()> {
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     if parts.len() < 2 {
@@ -122,7 +157,18 @@ async fn handle_connect(
             }
             Action::Ask => {
                 info!("ASK CONNECT to {} - {}", target, result.reason);
-                log_to_db(db, "CONNECT", domain, "/", "ask", &result.reason);
+                let allowed = ask_and_wait(ask_tx, domain, "CONNECT", "/").await;
+                if allowed {
+                    log_to_db(db, "CONNECT", domain, "/", "allow", "approved via ASK");
+                } else {
+                    log_to_db(db, "CONNECT", domain, "/", "deny", "denied via ASK");
+                    let response = format!(
+                        "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: {}\r\n\r\n",
+                        "denied via ASK prompt"
+                    );
+                    client.write_all(response.as_bytes()).await?;
+                    return Ok(());
+                }
             }
             Action::Allow => {
                 info!("ALLOWED CONNECT to {} - {}", target, result.reason);
@@ -169,6 +215,7 @@ async fn handle_http_request(
     raw_request: &[u8],
     policy: Option<&PolicyConfig>,
     db: Option<&Arc<Mutex<Connection>>>,
+    ask_tx: Option<&mpsc::Sender<AskRequest>>,
 ) -> anyhow::Result<()> {
     let request_str = String::from_utf8_lossy(raw_request);
     let first_line = request_str.lines().next().unwrap_or("");
@@ -206,7 +253,18 @@ async fn handle_http_request(
             }
             Action::Ask => {
                 info!("ASK {} {} - {}", method, uri, result.reason);
-                log_to_db(db, method, &host, &path, "ask", &result.reason);
+                let allowed = ask_and_wait(ask_tx, &host, method, &path).await;
+                if allowed {
+                    log_to_db(db, method, &host, &path, "allow", "approved via ASK");
+                } else {
+                    log_to_db(db, method, &host, &path, "deny", "denied via ASK");
+                    let response = format!(
+                        "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: {}\r\n\r\n",
+                        "denied via ASK prompt"
+                    );
+                    client.write_all(response.as_bytes()).await?;
+                    return Ok(());
+                }
             }
             Action::Allow => {
                 info!("ALLOWED {} {} - {}", method, uri, result.reason);
