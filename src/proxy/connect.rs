@@ -1,15 +1,21 @@
+use std::sync::Arc;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
+use crate::policy::config::{Action, PolicyConfig};
+use crate::policy::evaluator::{self, RequestInfo};
+
 /// Main accept loop: accept incoming connections and handle them.
-pub async fn accept_loop(listener: TcpListener) {
+pub async fn accept_loop(listener: TcpListener, policy: Option<Arc<PolicyConfig>>) {
     loop {
         match listener.accept().await {
             Ok((stream, peer_addr)) => {
                 info!("New connection from {}", peer_addr);
+                let policy = policy.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream).await {
+                    if let Err(e) = handle_connection(stream, policy.as_deref()).await {
                         error!("Error handling connection from {}: {}", peer_addr, e);
                     }
                 });
@@ -21,9 +27,11 @@ pub async fn accept_loop(listener: TcpListener) {
     }
 }
 
-/// Handle a single client connection. Reads the first line to determine
-/// if it's a CONNECT request (HTTPS tunnel) or a regular HTTP request.
-async fn handle_connection(mut client: TcpStream) -> anyhow::Result<()> {
+/// Handle a single client connection.
+async fn handle_connection(
+    mut client: TcpStream,
+    policy: Option<&PolicyConfig>,
+) -> anyhow::Result<()> {
     let mut buf = vec![0u8; 8192];
     let n = client.read(&mut buf).await?;
     if n == 0 {
@@ -34,16 +42,18 @@ async fn handle_connection(mut client: TcpStream) -> anyhow::Result<()> {
     let first_line = request.lines().next().unwrap_or("");
 
     if first_line.starts_with("CONNECT ") {
-        handle_connect(&mut client, first_line).await
+        handle_connect(&mut client, first_line, policy).await
     } else {
-        handle_http_request(&mut client, &buf[..n]).await
+        handle_http_request(&mut client, &buf[..n], policy).await
     }
 }
 
 /// Handle CONNECT method for HTTPS tunneling.
-/// Establishes a TCP tunnel between client and remote server.
-async fn handle_connect(client: &mut TcpStream, first_line: &str) -> anyhow::Result<()> {
-    // Parse "CONNECT host:port HTTP/1.1"
+async fn handle_connect(
+    client: &mut TcpStream,
+    first_line: &str,
+    policy: Option<&PolicyConfig>,
+) -> anyhow::Result<()> {
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     if parts.len() < 2 {
         let response = "HTTP/1.1 400 Bad Request\r\n\r\n";
@@ -52,16 +62,43 @@ async fn handle_connect(client: &mut TcpStream, first_line: &str) -> anyhow::Res
     }
 
     let target = parts[1]; // e.g. "example.com:443"
+    let domain = target.split(':').next().unwrap_or(target);
+
+    // Policy evaluation for CONNECT (domain-level only)
+    if let Some(policy) = policy {
+        let req_info = RequestInfo {
+            domain: domain.to_string(),
+            method: "CONNECT".to_string(),
+            path: "/".to_string(),
+        };
+        let result = evaluator::evaluate(&req_info, policy);
+        match result.action {
+            Action::Deny => {
+                warn!("BLOCKED CONNECT to {} - {}", target, result.reason);
+                let response = format!(
+                    "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: {}\r\n\r\n",
+                    result.reason
+                );
+                client.write_all(response.as_bytes()).await?;
+                return Ok(());
+            }
+            Action::Ask => {
+                // For now, treat ASK as allow (interactive prompt is handled elsewhere)
+                info!("ASK CONNECT to {} - {}", target, result.reason);
+            }
+            Action::Allow => {
+                info!("ALLOWED CONNECT to {} - {}", target, result.reason);
+            }
+        }
+    }
+
     info!("CONNECT tunnel to {}", target);
 
-    // Try to connect to the remote server
     match TcpStream::connect(target).await {
         Ok(mut remote) => {
-            // Send 200 to client indicating tunnel is established
             let response = "HTTP/1.1 200 Connection Established\r\n\r\n";
             client.write_all(response.as_bytes()).await?;
 
-            // Bidirectional copy between client and remote
             let (mut client_read, mut client_write) = tokio::io::split(client);
             let (mut remote_read, mut remote_write) = tokio::io::split(&mut remote);
 
@@ -88,11 +125,14 @@ async fn handle_connect(client: &mut TcpStream, first_line: &str) -> anyhow::Res
 }
 
 /// Handle plain HTTP requests by forwarding to the target server.
-async fn handle_http_request(client: &mut TcpStream, raw_request: &[u8]) -> anyhow::Result<()> {
+async fn handle_http_request(
+    client: &mut TcpStream,
+    raw_request: &[u8],
+    policy: Option<&PolicyConfig>,
+) -> anyhow::Result<()> {
     let request_str = String::from_utf8_lossy(raw_request);
     let first_line = request_str.lines().next().unwrap_or("");
 
-    // Parse "GET http://example.com/path HTTP/1.1"
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     if parts.len() < 2 {
         let response = "HTTP/1.1 400 Bad Request\r\n\r\n";
@@ -100,19 +140,44 @@ async fn handle_http_request(client: &mut TcpStream, raw_request: &[u8]) -> anyh
         return Ok(());
     }
 
+    let method = parts[0];
     let uri = parts[1];
-    info!("HTTP request to {}", uri);
-
-    // Parse the host and port from the absolute URI
     let (host, port) = parse_host_port(uri)?;
+    let path = parse_path(uri);
+
+    // Policy evaluation for HTTP
+    if let Some(policy) = policy {
+        let req_info = RequestInfo {
+            domain: host.clone(),
+            method: method.to_string(),
+            path: path.clone(),
+        };
+        let result = evaluator::evaluate(&req_info, policy);
+        match result.action {
+            Action::Deny => {
+                warn!("BLOCKED {} {} - {}", method, uri, result.reason);
+                let response = format!(
+                    "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: {}\r\n\r\n",
+                    result.reason
+                );
+                client.write_all(response.as_bytes()).await?;
+                return Ok(());
+            }
+            Action::Ask => {
+                info!("ASK {} {} - {}", method, uri, result.reason);
+            }
+            Action::Allow => {
+                info!("ALLOWED {} {} - {}", method, uri, result.reason);
+            }
+        }
+    }
+
+    info!("HTTP {} to {}", method, uri);
     let target = format!("{}:{}", host, port);
 
     match TcpStream::connect(&target).await {
         Ok(mut remote) => {
-            // Forward the raw request
             remote.write_all(raw_request).await?;
-
-            // Read and forward the response
             let mut response_buf = vec![0u8; 65536];
             let n = remote.read(&mut response_buf).await?;
             if n > 0 {
@@ -149,6 +214,23 @@ fn parse_host_port(uri: &str) -> anyhow::Result<(String, u16)> {
     }
 }
 
+/// Parse the path from an absolute URI
+fn parse_path(uri: &str) -> String {
+    let without_scheme = if let Some(rest) = uri.strip_prefix("http://") {
+        rest
+    } else if let Some(rest) = uri.strip_prefix("https://") {
+        rest
+    } else {
+        uri
+    };
+
+    if let Some(pos) = without_scheme.find('/') {
+        without_scheme[pos..].to_string()
+    } else {
+        "/".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +254,15 @@ mod tests {
         let (host, port) = parse_host_port("https://api.anthropic.com/v1/messages").unwrap();
         assert_eq!(host, "api.anthropic.com");
         assert_eq!(port, 80);
+    }
+
+    #[test]
+    fn test_parse_path() {
+        assert_eq!(parse_path("http://example.com/foo/bar"), "/foo/bar");
+        assert_eq!(parse_path("http://example.com"), "/");
+        assert_eq!(
+            parse_path("https://api.github.com/repos/user/repo"),
+            "/repos/user/repo"
+        );
     }
 }
