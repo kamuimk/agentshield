@@ -196,6 +196,9 @@ async fn handle_http_request(
 
 /// Parse host and port from an absolute URI like "http://example.com:8080/path"
 fn parse_host_port(uri: &str) -> anyhow::Result<(String, u16)> {
+    let is_https = uri.starts_with("https://");
+    let default_port: u16 = if is_https { 443 } else { 80 };
+
     let without_scheme = if let Some(rest) = uri.strip_prefix("http://") {
         rest
     } else if let Some(rest) = uri.strip_prefix("https://") {
@@ -207,10 +210,10 @@ fn parse_host_port(uri: &str) -> anyhow::Result<(String, u16)> {
     let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
 
     if let Some((host, port_str)) = host_port.rsplit_once(':') {
-        let port: u16 = port_str.parse().unwrap_or(80);
+        let port: u16 = port_str.parse().unwrap_or(default_port);
         Ok((host.to_string(), port))
     } else {
-        Ok((host_port.to_string(), 80))
+        Ok((host_port.to_string(), default_port))
     }
 }
 
@@ -253,7 +256,7 @@ mod tests {
     fn test_parse_host_port_https() {
         let (host, port) = parse_host_port("https://api.anthropic.com/v1/messages").unwrap();
         assert_eq!(host, "api.anthropic.com");
-        assert_eq!(port, 80);
+        assert_eq!(port, 443);
     }
 
     #[test]

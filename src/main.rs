@@ -61,7 +61,8 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
     println!("Default policy: {:?}", config.policy.default);
     println!("Rules loaded: {}", config.policy.rules.len());
 
-    let server = ProxyServer::new(config.proxy.listen.clone());
+    let server = ProxyServer::new(config.proxy.listen.clone())
+        .with_policy(config.policy.clone());
     let addr = server.start().await?;
     println!("Proxy running on {}", addr);
     println!("Set HTTPS_PROXY=http://{} to route traffic through AgentShield", addr);
