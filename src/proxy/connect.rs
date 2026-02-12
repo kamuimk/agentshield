@@ -220,11 +220,30 @@ async fn handle_http_request(
 
     match TcpStream::connect(&target).await {
         Ok(mut remote) => {
-            remote.write_all(raw_request).await?;
-            let mut response_buf = vec![0u8; 65536];
-            let n = remote.read(&mut response_buf).await?;
-            if n > 0 {
-                client.write_all(&response_buf[..n]).await?;
+            // Inject Connection: close header so remote server closes after response
+            let request_str = String::from_utf8_lossy(raw_request);
+            let modified = if !request_str.to_lowercase().contains("connection:") {
+                request_str.replacen("\r\n\r\n", "\r\nConnection: close\r\n\r\n", 1)
+            } else {
+                request_str.to_string()
+            };
+            remote.write_all(modified.as_bytes()).await?;
+            // Stream the full response back to client with timeout
+            let copy_result = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                tokio::io::copy(&mut remote, client),
+            )
+            .await;
+            match copy_result {
+                Ok(Ok(bytes)) => {
+                    info!("Streamed {} bytes from {}", bytes, target);
+                }
+                Ok(Err(e)) => {
+                    warn!("Error streaming response from {}: {}", target, e);
+                }
+                Err(_) => {
+                    warn!("Timeout streaming response from {}", target);
+                }
             }
         }
         Err(e) => {
