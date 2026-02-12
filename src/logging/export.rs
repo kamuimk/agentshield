@@ -1,5 +1,6 @@
-use anyhow::Result;
 use rusqlite::Connection;
+
+use crate::error::Result;
 use serde::Serialize;
 
 use super::RequestLog;

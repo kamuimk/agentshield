@@ -1,7 +1,8 @@
 pub mod export;
 
-use anyhow::Result;
 use rusqlite::Connection;
+
+use crate::error::Result;
 
 /// A single logged request record.
 #[derive(Debug, Clone)]

@@ -1,7 +1,8 @@
 use std::path::Path;
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
+
+use crate::error::Result;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

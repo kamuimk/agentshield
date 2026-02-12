@@ -74,7 +74,7 @@ async fn handle_connection(
     policy: Option<&PolicyConfig>,
     db: Option<&Arc<Mutex<Connection>>>,
     ask_tx: Option<&mpsc::Sender<AskRequest>>,
-) -> anyhow::Result<()> {
+) -> crate::error::Result<()> {
     let mut buf = vec![0u8; 8192];
     let n = client.read(&mut buf).await?;
     if n == 0 {
@@ -121,7 +121,7 @@ async fn handle_connect(
     policy: Option<&PolicyConfig>,
     db: Option<&Arc<Mutex<Connection>>>,
     ask_tx: Option<&mpsc::Sender<AskRequest>>,
-) -> anyhow::Result<()> {
+) -> crate::error::Result<()> {
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     if parts.len() < 2 {
         let response = "HTTP/1.1 400 Bad Request\r\n\r\n";
@@ -221,7 +221,7 @@ async fn handle_http_request(
     policy: Option<&PolicyConfig>,
     db: Option<&Arc<Mutex<Connection>>>,
     ask_tx: Option<&mpsc::Sender<AskRequest>>,
-) -> anyhow::Result<()> {
+) -> crate::error::Result<()> {
     let request_str = String::from_utf8_lossy(raw_request);
     let first_line = request_str.lines().next().unwrap_or("");
 
@@ -339,7 +339,7 @@ fn validate_domain(domain: &str) -> bool {
 }
 
 /// Parse host and port from an absolute URI like "http://example.com:8080/path"
-fn parse_host_port(uri: &str) -> anyhow::Result<(String, u16)> {
+fn parse_host_port(uri: &str) -> crate::error::Result<(String, u16)> {
     let is_https = uri.starts_with("https://");
     let default_port: u16 = if is_https { 443 } else { 80 };
 

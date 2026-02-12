@@ -1,8 +1,9 @@
 use std::io::{BufRead, Write};
 use std::path::Path;
 
-use anyhow::Result;
 use tokio::sync::oneshot;
+
+use crate::error::Result;
 
 use crate::policy::config::{Action, Rule};
 

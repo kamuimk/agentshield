@@ -4,8 +4,9 @@ pub mod tls;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
 use rusqlite::Connection;
+
+use crate::error::Result;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::info;
