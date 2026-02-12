@@ -2,159 +2,137 @@
   "master": {
     "tasks": [
       {
-        "id": "1",
-        "title": "Project Scaffolding and Dependencies Setup",
-        "description": "Initialize Rust project structure with Cargo.toml dependencies and directory layout as specified in PRD.",
-        "details": "Run `cargo init agentshield --bin`; Add dependencies to Cargo.toml: hyper = '1.4', tokio = { version = '1.40', features = ['full'] }, rustls = '0.23', clap = { version = '4.5', features = ['derive'] }, rusqlite = { version = '0.32', features = ['bundled'] }, toml = '0.8', serde = { version = '1.0', features = ['derive'] }, anyhow = '1.0'. Create directory structure: src/{main,proxy{mod,tls,connect},policy{mod,config,evaluator},dlp{mod,patterns},log{mod,export},cli{mod,prompt}}. Add LICENSE (Apache 2.0), README.md, CONTRIBUTING.md, templates/openclaw-default.toml.",
-        "testStrategy": "cargo check; cargo build; Verify directory structure matches PRD; cargo test --no-run to validate dependencies.",
+        "id": "11",
+        "title": "Implement SQLite logging integration in ProxyServer",
+        "description": "Extend ProxyServer with DB path injection and integrate SQLite connection sharing via Arc<Mutex<Connection>>",
+        "details": "1. Add `with_db_path(self, path: PathBuf) -> Self` method to ProxyServer struct in src/proxy/mod.rs\n2. Modify accept_loop to open rusqlite::Connection and wrap in Arc<Mutex<Connection>> before spawning handlers\n3. Pass Arc<Mutex<Connection>> to handle_connect() and handle_http_request() via handler context\n4. Update cmd_start() in src/main.rs to call proxy.with_db_path(db_path)\n5. Ensure DB schema has requests table: timestamp, method, host, path, action, policy_matched",
+        "testStrategy": "Integration test: Start proxy with test DB path, send HTTP request through proxy, verify SQLite DB contains log entry with correct fields using rusqlite query",
         "priority": "high",
         "dependencies": [],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-12T02:58:56.028Z"
+        "updatedAt": "2026-02-12T06:11:14.235Z"
       },
       {
-        "id": "2",
-        "title": "Basic HTTP/HTTPS Proxy with CONNECT Tunneling",
-        "description": "Implement core transparent proxy listening on 127.0.0.1:18080 supporting HTTP CONNECT for HTTPS tunneling.",
-        "details": "In src/proxy/mod.rs: use tokio::net::TcpListener; hyper::service::service_fn for request handling. Implement CONNECT method: parse domain from CONNECT request, forward to upstream if allowed (stub policy), return 200 OK. Handle HTTP requests by forwarding full payload. Use tokio for async. Configurable listen addr from TOML. Support transparent mode via HTTPS_PROXY env.",
-        "testStrategy": "curl -x http://127.0.0.1:18080 https://api.anthropic.com; Verify CONNECT tunnel works; Test with `cargo run` and manual proxy traffic.",
+        "id": "12",
+        "title": "Add logging calls after policy evaluation",
+        "description": "Implement logging::log_request() calls in handle_connect() and handle_http_request() after policy evaluation",
+        "details": "1. Create src/logging/mod.rs with pub fn log_request(conn: &Mutex<Connection>, req: &RequestInfo) -> anyhow::Result<()> using rusqlite\n2. RequestInfo struct: timestamp, method, host, path, action (allow/deny/ask), policy_name\n3. In handle_connect() and handle_http_request(), after policy::evaluate(), call logging::log_request(&db_lock, &req_info).await\n4. Use tracing::info!(\"Logged request to DB\") on success",
+        "testStrategy": "Unit test log_request() function with mock Connection. Integration test: verify different policy actions (allow/deny/ask) logged correctly in DB",
         "priority": "high",
         "dependencies": [
-          "1"
+          "11"
         ],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-12T03:02:16.543Z"
+        "updatedAt": "2026-02-12T06:11:14.961Z"
       },
       {
-        "id": "3",
-        "title": "TOML Policy Configuration Parser",
-        "description": "Parse agentshield.toml with proxy.listen, policy.default, and policy.rules arrays.",
-        "details": "In src/policy/config.rs: #[derive(Deserialize)] struct Config { proxy: ProxyConfig, policy: PolicyConfig, .. }; PolicyConfig { default: String, rules: Vec<Rule> }; Rule { name: String, domains: Vec<String>, methods: Option<Vec<String>>, action: String }. Use toml::from_str. Validate config schema. Load from ~/.agentshield/agentshield.toml or ./agentshield.toml.",
-        "testStrategy": "Unit tests: parse valid/invalid TOML samples including openclaw-default.toml; cargo test policy::config.",
+        "id": "13",
+        "title": "Implement HTTP response streaming with tokio::io::copy",
+        "description": "Replace 64KB fixed buffer read in handle_http_request() with bidirectional streaming using tokio::io::copy",
+        "details": "1. In src/proxy/connect.rs handle_http_request(): after sending request to remote, use tokio::io::copy(&mut remote_stream, &mut client_stream).await\n2. Follow same pattern as CONNECT tunneling: request -> copy remote->client\n3. Handle errors with proper connection cleanup using tokio::select! for timeout\n4. Add tracing spans for streaming operations: tracing::info_span!(\"streaming_response\")",
+        "testStrategy": "Test with >64KB response payload (generate test server returning 100KB response), verify full response received by client without truncation",
+        "priority": "high",
+        "dependencies": [],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-12T06:24:03.959Z"
+      },
+      {
+        "id": "14",
+        "title": "Implement ASK channel infrastructure",
+        "description": "Add mpsc channel for proxy-to-main thread ASK requests with AskRequest struct and oneshot response",
+        "details": "1. Define AskRequest { host: String, path: String, method: String, sender: oneshot::Sender<bool> }\n2. Add with_ask_channel(self, tx: mpsc::Sender<AskRequest>) -> Self to ProxyServer\n3. In policy evaluator, when ASK action matched, send to ask_tx with timeout\n4. Default deny after 30s timeout using tokio::time::timeout\n5. Update cmd_start() to create channel and pass to proxy",
+        "testStrategy": "Unit test: send AskRequest through channel, verify receiver gets struct correctly. Integration test: policy ASK rule triggers channel send",
+        "priority": "high",
+        "dependencies": [],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-12T06:26:28.242Z"
+      },
+      {
+        "id": "15",
+        "title": "Implement terminal ASK prompt handler",
+        "description": "Main thread stdin/stdout handler for ASK requests with AllowOnce/AddRule/Deny options",
+        "details": "1. In src/cli/prompt.rs: async fn handle_ask_requests(mut rx: mpsc::Receiver<AskRequest>)\n2. Use crossterm or similar for formatted terminal UI showing request details\n3. Parse user input: 'y'->allow, 'n'->deny, 'a'->add rule to config.toml\n4. For AddRule: append to config [rules] section and reload policy engine\n5. Send response via oneshot::Sender, timeout 30s -> deny\n6. Spawn this task from cmd_start()",
+        "testStrategy": "Mock stdin input test: simulate 'y'/'n' inputs, verify oneshot response sent correctly. Verify config.toml updated on 'a' input",
         "priority": "high",
         "dependencies": [
-          "1"
+          "14"
         ],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-12T03:03:39.832Z"
+        "updatedAt": "2026-02-12T06:26:28.969Z"
       },
       {
-        "id": "4",
-        "title": "Policy Evaluator Engine",
-        "description": "Implement domain/method-based policy evaluation with default-deny logic returning ALLOW/DENY/ASK.",
-        "details": "In src/policy/evaluator.rs: fn evaluate(req: &Request, config: &Config) -> Action. Match rules sequentially: check domains (exact/wildcard), methods. Default to config.policy.default. Actions: enum Action { Allow, Deny, Ask }. For deny: respond 403 with 'X-AgentShield-Reason' header. For ask: block and trigger prompt.",
-        "testStrategy": "Unit tests covering all rule matches, default deny, method filtering, github-read/write scenarios from template.",
+        "id": "16",
+        "title": "Create comprehensive README.md",
+        "description": "Write complete README with project description, quick start, policy examples, architecture diagram",
+        "details": "1. One-line description + badges (build, license)\n2. Quick Start: cargo install, agent-shield init, edit config.toml, agent-shield start\n3. Policy file examples (TOML format)\n4. Mermaid architecture diagram showing proxy->policy->logging->notification flow\n5. 'What AgentShield is NOT' section\n6. Contributing guidelines, code of conduct link",
+        "testStrategy": "Manual review: ensure all sections complete, links work, mermaid renders correctly on GitHub",
+        "priority": "medium",
+        "dependencies": [],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-12T06:28:45.725Z"
+      },
+      {
+        "id": "17",
+        "title": "Setup GitHub Actions CI workflow",
+        "description": "Create .github/workflows/ci.yml for automatic test/lint/format on PR/push",
+        "details": "1. Use dtolnay/rust-toolchain@stable action\n2. Steps: cargo fmt --check, cargo clippy -- -D warnings, cargo test --all\n3. ubuntu-latest runner\n4. Cache cargo registry and target dir\n5. Fail-fast: true\n6. Trigger: push, pull_request",
+        "testStrategy": "Push to test branch, verify CI runs successfully on GitHub Actions",
+        "priority": "medium",
+        "dependencies": [],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-12T06:48:18.263Z"
+      },
+      {
+        "id": "18",
+        "title": "Define DLP trait interfaces and RegexScanner",
+        "description": "Create DlpScanner trait, DlpFinding struct, Severity enum, and basic RegexScanner implementation",
+        "details": "1. src/dlp/mod.rs: pub trait DlpScanner { async fn scan(&self, payload: &[u8]) -> Vec<DlpFinding>; }\n2. #[derive(Serialize)] struct DlpFinding { pattern_name: String, matched_text: String, severity: Severity }\n3. #[derive(Clone, Copy)] enum Severity { Low, Medium, High, Critical }\n4. src/dlp/patterns.rs: RegexScanner struct with HashMap<String, Regex>\n5. impl DlpScanner for RegexScanner with async scan() matching API keys, emails, etc.",
+        "testStrategy": "Unit tests: RegexScanner detects API key pattern 'sk-...', email patterns, verify DlpFinding fields correct",
+        "priority": "medium",
+        "dependencies": [],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-12T06:50:05.414Z"
+      },
+      {
+        "id": "19",
+        "title": "Implement unified error handling with thiserror",
+        "description": "Replace anyhow in library code with AgentShieldError enum, keep anyhow only in main.rs",
+        "details": "1. src/error.rs: #[derive(thiserror::Error, Debug)] pub enum AgentShieldError { #[error(\"Policy error: {0}\")] Policy(String), #[error(\"Database error\")] Database(#[from] rusqlite::Error), #[error(\"Proxy error\")] Proxy(String), ... }\n2. Update all lib.rs modules Result<T, anyhow::Error> -> Result<T, AgentShieldError>\n3. main.rs: use anyhow::Context; map AgentShieldError to anyhow::Error\n4. Add From<AgentShieldError> for anyhow::Error",
+        "testStrategy": "Compile test: ensure all modules compile with new error types. Unit test error variants propagate correctly",
+        "priority": "medium",
+        "dependencies": [],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-12T06:52:38.241Z"
+      },
+      {
+        "id": "20",
+        "title": "Add Host header injection defense",
+        "description": "Implement domain/port validation in parse_host_port() to prevent header injection",
+        "details": "1. src/proxy/connect.rs: fn validate_domain(domain: &str) -> bool { regex: ^[a-zA-Z0-9.-]+$ }\n2. fn validate_port(port: u16) -> bool { (1..=65535).contains(&port) }\n3. In parse_host_port(): extract host/port, validate both, reject invalid with 400 Bad Request\n4. CONNECT: add config option allowed_ports: vec![443, 8443] default\n5. Log rejected requests with action: 'invalid-host'",
+        "testStrategy": "Fuzz test: invalid domains (@, /, \\x00), invalid ports (0, 65536, -1), verify 400 response and logging",
         "priority": "high",
         "dependencies": [
-          "2",
-          "3"
+          "11"
         ],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-12T03:08:00.075Z"
-      },
-      {
-        "id": "5",
-        "title": "SQLite Logging System",
-        "description": "Create SQLite database for request logging with CLI export capabilities.",
-        "details": "In src/log/mod.rs: rusqlite::Connection; CREATE TABLE requests (id INTEGER PRIMARY KEY, timestamp TEXT, method TEXT, domain TEXT, path TEXT, action TEXT, reason TEXT); fn log_request(conn: &Connection, req: &Request, action: &Action, reason: &str). In src/log/export.rs: JSON/CSV export queries. Init DB at ~/.agentshield/agentshield.db.",
-        "testStrategy": "Insert test records; Query via CLI stub; Verify schema and JSON export format matches PRD spec.",
-        "priority": "medium",
-        "dependencies": [
-          "1"
-        ],
-        "status": "in-progress",
-        "subtasks": [],
-        "updatedAt": "2026-02-12T03:08:07.714Z"
-      },
-      {
-        "id": "6",
-        "title": "Interactive Approval Prompt System",
-        "description": "Display terminal prompts for ASK actions with options to allow once/add rule/deny/inspect.",
-        "details": "In src/cli/prompt.rs: crossterm or dialoguer for TUI prompt. Show request details (method, domain, path). On [r]: append rule to agentshield.toml. On [i]: dump request body (if available). Use tokio::select! for non-blocking proxy wait. Atomic file writes for config updates.",
-        "testStrategy": "Integration test: trigger ASK, select options, verify config updated and proxy unblocks.",
-        "priority": "medium",
-        "dependencies": [
-          "2",
-          "4"
-        ],
-        "status": "pending",
-        "subtasks": []
-      },
-      {
-        "id": "7",
-        "title": "Core CLI Commands Implementation",
-        "description": "Implement agentshield CLI with clap: start, stop, status, logs, policy subcommands.",
-        "details": "In src/main.rs and src/cli/mod.rs: #[clap] subcommands. start: spawn proxy task (daemon via daemonize crate or systemd). logs --tail N: query SQLite. policy show/add/template. Use pidfile for daemon management. status: active connections, stats from DB.",
-        "testStrategy": "`cargo run -- start`; `cargo run -- logs`; Verify daemon lifecycle and log output.",
-        "priority": "medium",
-        "dependencies": [
-          "2",
-          "3",
-          "4",
-          "5"
-        ],
-        "status": "pending",
-        "subtasks": []
-      },
-      {
-        "id": "8",
-        "title": "Policy Templates System",
-        "description": "Implement agentshield init and policy template commands with openclaw-default.toml.",
-        "details": "Copy templates/openclaw-default.toml to config dir on `policy template openclaw-default`. init: create config dir, DB, CA stub, apply default template. Interactive policy add.",
-        "testStrategy": "`agentshield init`; `agentshield policy template openclaw-default`; Verify generated TOML matches PRD example.",
-        "priority": "medium",
-        "dependencies": [
-          "3",
-          "5",
-          "7"
-        ],
-        "status": "pending",
-        "subtasks": []
-      },
-      {
-        "id": "9",
-        "title": "Integration and OpenClaw Testing Setup",
-        "description": "Verify proxy integration with OpenClaw Gateway via HTTPS_PROXY and test traffic patterns.",
-        "details": "Document OpenClaw config: gateway.proxy = 'http://127.0.0.1:18080'. Test with real OpenClaw instance: anthropic-api allow, github-write ASK. Add tests/integration_test.rs with mock OpenClaw requests.",
-        "testStrategy": "Run OpenClaw with proxy; Verify requests logged, policies applied per openclaw-default.toml; No false blocks on allowed domains.",
-        "priority": "medium",
-        "dependencies": [
-          "2",
-          "4",
-          "7",
-          "8"
-        ],
-        "status": "pending",
-        "subtasks": []
-      },
-      {
-        "id": "10",
-        "title": "Unit and Integration Tests",
-        "description": "Add comprehensive tests for proxy, policy, logging, CLI as per project structure.",
-        "details": "tests/proxy_test.rs: mock CONNECT/HTTP. tests/policy_test.rs: rule evaluation. tests/integration_test.rs: full proxy+policy+log flow. Use httpmock or wiremock for upstream simulation. CI with GitHub Actions stub.",
-        "testStrategy": "`cargo test --all`; Achieve 90%+ coverage; Test edge cases: invalid domains, MITM stub, concurrent requests.",
-        "priority": "low",
-        "dependencies": [
-          "2",
-          "3",
-          "4",
-          "5",
-          "6",
-          "7"
-        ],
-        "status": "pending",
-        "subtasks": []
+        "updatedAt": "2026-02-12T06:28:00.767Z"
       }
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2026-02-12T03:08:07.714Z",
+      "lastModified": "2026-02-12T06:52:38.241Z",
       "taskCount": 10,
-      "completedCount": 4,
+      "completedCount": 10,
       "tags": [
         "master"
       ]
