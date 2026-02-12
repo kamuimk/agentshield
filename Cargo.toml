@@ -21,6 +21,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 bytes = "1"
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"
