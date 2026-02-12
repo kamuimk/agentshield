@@ -132,11 +132,7 @@ async fn policy_allows_whitelisted_domain_connect() {
     let n = stream.read(&mut buf).await.unwrap();
     let response = String::from_utf8_lossy(&buf[..n]);
     // Should get 200 (tunnel established) since example.com is allowed
-    assert!(
-        response.contains("200"),
-        "Expected 200, got: {}",
-        response
-    );
+    assert!(response.contains("200"), "Expected 200, got: {}", response);
 }
 
 #[tokio::test]
@@ -163,8 +159,7 @@ async fn openclaw_policy_allows_anthropic() {
     let template = include_str!("../templates/openclaw-default.toml");
     let config: AppConfig = toml::from_str(template).unwrap();
 
-    let server =
-        ProxyServer::new("127.0.0.1:0".to_string()).with_policy(config.policy.clone());
+    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(config.policy.clone());
     let addr = server.start().await.unwrap();
 
     // api.anthropic.com should be allowed

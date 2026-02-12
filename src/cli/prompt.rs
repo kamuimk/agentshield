@@ -62,13 +62,12 @@ pub fn prompt_decision<R: BufRead, W: Write>(
 ) -> Result<PromptDecision> {
     writeln!(writer)?;
     writeln!(writer, "┌────────────────────────────────────────────────┐")?;
-    writeln!(writer, "│  AgentShield: New outbound request              │")?;
-    writeln!(writer, "├────────────────────────────────────────────────┤")?;
     writeln!(
         writer,
-        "│  {} {}{}",
-        req.method, req.domain, req.path
+        "│  AgentShield: New outbound request              │"
     )?;
+    writeln!(writer, "├────────────────────────────────────────────────┤")?;
+    writeln!(writer, "│  {} {}{}", req.method, req.domain, req.path)?;
     writeln!(writer, "│                                                │")?;
     writeln!(writer, "│  [a] Allow once                                │")?;
     writeln!(writer, "│  [r] Add rule (always allow this pattern)      │")?;

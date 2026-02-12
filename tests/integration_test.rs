@@ -42,7 +42,12 @@ fn openclaw_template_has_required_rules() {
     let content = include_str!("../templates/openclaw-default.toml");
     let config: AppConfig = toml::from_str(content).unwrap();
 
-    let names: Vec<&str> = config.policy.rules.iter().map(|r| r.name.as_str()).collect();
+    let names: Vec<&str> = config
+        .policy
+        .rules
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
     assert!(names.contains(&"anthropic-api"));
     assert!(names.contains(&"github-read"));
     assert!(names.contains(&"github-write"));
@@ -110,10 +115,7 @@ async fn e2e_openclaw_full_flow() {
 
 async fn assert_connect_result(proxy_addr: SocketAddr, target: &str, expected_status: &str) {
     let mut stream = TcpStream::connect(proxy_addr).await.unwrap();
-    let req = format!(
-        "CONNECT {} HTTP/1.1\r\nHost: {}\r\n\r\n",
-        target, target
-    );
+    let req = format!("CONNECT {} HTTP/1.1\r\nHost: {}\r\n\r\n", target, target);
     stream.write_all(req.as_bytes()).await.unwrap();
 
     let mut buf = [0u8; 1024];
@@ -130,10 +132,7 @@ async fn assert_connect_result(proxy_addr: SocketAddr, target: &str, expected_st
 
 async fn assert_connect_not_blocked(proxy_addr: SocketAddr, target: &str) {
     let mut stream = TcpStream::connect(proxy_addr).await.unwrap();
-    let req = format!(
-        "CONNECT {} HTTP/1.1\r\nHost: {}\r\n\r\n",
-        target, target
-    );
+    let req = format!("CONNECT {} HTTP/1.1\r\nHost: {}\r\n\r\n", target, target);
     stream.write_all(req.as_bytes()).await.unwrap();
 
     let mut buf = [0u8; 1024];
@@ -155,7 +154,11 @@ fn evaluator_multiple_domains_in_single_rule() {
         default: Action::Deny,
         rules: vec![Rule {
             name: "multi-domain".to_string(),
-            domains: vec!["a.com".to_string(), "b.com".to_string(), "c.com".to_string()],
+            domains: vec![
+                "a.com".to_string(),
+                "b.com".to_string(),
+                "c.com".to_string(),
+            ],
             methods: None,
             action: Action::Allow,
             note: None,
@@ -325,15 +328,13 @@ fn prompt_add_rule_roundtrip() {
 async fn proxy_handles_concurrent_connections() {
     let policy = PolicyConfig {
         default: Action::Deny,
-        rules: vec![
-            Rule {
-                name: "allow-example".to_string(),
-                domains: vec!["example.com".to_string()],
-                methods: None,
-                action: Action::Allow,
-                note: None,
-            },
-        ],
+        rules: vec![Rule {
+            name: "allow-example".to_string(),
+            domains: vec!["example.com".to_string()],
+            methods: None,
+            action: Action::Allow,
+            note: None,
+        }],
     };
 
     let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(policy);
@@ -435,7 +436,11 @@ async fn proxy_logs_requests_to_sqlite() {
     // Verify SQLite has both log entries
     let db_lock = db.lock().unwrap();
     let logs = logging::query_recent(&db_lock, 10).unwrap();
-    assert!(logs.len() >= 2, "Expected at least 2 logs, got {}", logs.len());
+    assert!(
+        logs.len() >= 2,
+        "Expected at least 2 logs, got {}",
+        logs.len()
+    );
 
     // Most recent first
     let denied = logs.iter().find(|l| l.domain == "evil.com").unwrap();

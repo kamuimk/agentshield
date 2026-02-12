@@ -59,7 +59,7 @@ pub fn export_csv(conn: &Connection) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logging::{log_request, open_memory_db, RequestLog};
+    use crate::logging::{RequestLog, log_request, open_memory_db};
 
     fn sample_log(domain: &str) -> RequestLog {
         RequestLog {

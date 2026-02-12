@@ -50,20 +50,20 @@ fn log_to_db(
     action: &str,
     reason: &str,
 ) {
-    if let Some(db) = db {
-        if let Ok(conn) = db.lock() {
-            let log = logging::RequestLog {
-                id: None,
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                method: method.to_string(),
-                domain: domain.to_string(),
-                path: path.to_string(),
-                action: action.to_string(),
-                reason: reason.to_string(),
-            };
-            if let Err(e) = logging::log_request(&conn, &log) {
-                warn!("Failed to log request to DB: {}", e);
-            }
+    if let Some(db) = db
+        && let Ok(conn) = db.lock()
+    {
+        let log = logging::RequestLog {
+            id: None,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            method: method.to_string(),
+            domain: domain.to_string(),
+            path: path.to_string(),
+            action: action.to_string(),
+            reason: reason.to_string(),
+        };
+        if let Err(e) = logging::log_request(&conn, &log) {
+            warn!("Failed to log request to DB: {}", e);
         }
     }
 }
@@ -100,11 +100,7 @@ async fn ask_and_wait(
     path: &str,
 ) -> bool {
     if let Some(tx) = ask_tx {
-        let (req, rx) = AskRequest::new(
-            domain.to_string(),
-            method.to_string(),
-            path.to_string(),
-        );
+        let (req, rx) = AskRequest::new(domain.to_string(), method.to_string(), path.to_string());
         if tx.send(req).await.is_ok() {
             // Wait up to 30 seconds for a response
             match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
@@ -245,8 +241,7 @@ async fn handle_http_request(
     if !validate_domain(&host) {
         warn!("Invalid domain in HTTP request: {}", host);
         log_to_db(db, method, &host, &path, "deny", "invalid domain");
-        let response =
-            "HTTP/1.1 400 Bad Request\r\nX-AgentShield-Reason: invalid domain\r\n\r\n";
+        let response = "HTTP/1.1 400 Bad Request\r\nX-AgentShield-Reason: invalid domain\r\n\r\n";
         client.write_all(response.as_bytes()).await?;
         return Ok(());
     }

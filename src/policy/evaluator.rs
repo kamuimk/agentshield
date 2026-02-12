@@ -41,10 +41,10 @@ fn matches_rule(req: &RequestInfo, rule: &Rule) -> bool {
     let domain_matches = rule.domains.iter().any(|d| {
         if d == "*" {
             true
-        } else if d.starts_with("*.") {
+        } else if let Some(stripped) = d.strip_prefix("*.") {
             // Wildcard subdomain match: "*.example.com" matches "foo.example.com"
             let suffix = &d[1..]; // ".example.com"
-            req.domain.ends_with(suffix) || req.domain == d[2..]
+            req.domain.ends_with(suffix) || req.domain == stripped
         } else {
             req.domain == *d
         }
@@ -74,7 +74,12 @@ mod tests {
         PolicyConfig { default, rules }
     }
 
-    fn make_rule(name: &str, domains: Vec<&str>, methods: Option<Vec<&str>>, action: Action) -> Rule {
+    fn make_rule(
+        name: &str,
+        domains: Vec<&str>,
+        methods: Option<Vec<&str>>,
+        action: Action,
+    ) -> Rule {
         Rule {
             name: name.to_string(),
             domains: domains.into_iter().map(|s| s.to_string()).collect(),
@@ -105,7 +110,12 @@ mod tests {
     fn allow_matching_domain() {
         let policy = make_policy(
             Action::Deny,
-            vec![make_rule("anthropic", vec!["api.anthropic.com"], None, Action::Allow)],
+            vec![make_rule(
+                "anthropic",
+                vec!["api.anthropic.com"],
+                None,
+                Action::Allow,
+            )],
         );
         let req = make_req("api.anthropic.com", "POST", "/v1/messages");
         let result = evaluate(&req, &policy);
@@ -117,7 +127,12 @@ mod tests {
     fn deny_non_matching_domain() {
         let policy = make_policy(
             Action::Deny,
-            vec![make_rule("anthropic", vec!["api.anthropic.com"], None, Action::Allow)],
+            vec![make_rule(
+                "anthropic",
+                vec!["api.anthropic.com"],
+                None,
+                Action::Allow,
+            )],
         );
         let req = make_req("evil.com", "GET", "/steal");
         let result = evaluate(&req, &policy);
@@ -129,7 +144,12 @@ mod tests {
     fn method_filtering_allows_get() {
         let policy = make_policy(
             Action::Deny,
-            vec![make_rule("github-read", vec!["api.github.com"], Some(vec!["GET"]), Action::Allow)],
+            vec![make_rule(
+                "github-read",
+                vec!["api.github.com"],
+                Some(vec!["GET"]),
+                Action::Allow,
+            )],
         );
         let req = make_req("api.github.com", "GET", "/repos/user/repo");
         let result = evaluate(&req, &policy);
@@ -140,7 +160,12 @@ mod tests {
     fn method_filtering_denies_post() {
         let policy = make_policy(
             Action::Deny,
-            vec![make_rule("github-read", vec!["api.github.com"], Some(vec!["GET"]), Action::Allow)],
+            vec![make_rule(
+                "github-read",
+                vec!["api.github.com"],
+                Some(vec!["GET"]),
+                Action::Allow,
+            )],
         );
         let req = make_req("api.github.com", "POST", "/repos/user/repo");
         let result = evaluate(&req, &policy);
@@ -152,8 +177,18 @@ mod tests {
         let policy = make_policy(
             Action::Deny,
             vec![
-                make_rule("github-read", vec!["api.github.com"], Some(vec!["GET"]), Action::Allow),
-                make_rule("github-write", vec!["api.github.com"], Some(vec!["POST", "PUT", "DELETE"]), Action::Ask),
+                make_rule(
+                    "github-read",
+                    vec!["api.github.com"],
+                    Some(vec!["GET"]),
+                    Action::Allow,
+                ),
+                make_rule(
+                    "github-write",
+                    vec!["api.github.com"],
+                    Some(vec!["POST", "PUT", "DELETE"]),
+                    Action::Ask,
+                ),
             ],
         );
         let req = make_req("api.github.com", "POST", "/repos/user/repo/pulls");
@@ -178,7 +213,12 @@ mod tests {
         let policy = make_policy(
             Action::Deny,
             vec![
-                make_rule("specific", vec!["api.github.com"], Some(vec!["GET"]), Action::Allow),
+                make_rule(
+                    "specific",
+                    vec!["api.github.com"],
+                    Some(vec!["GET"]),
+                    Action::Allow,
+                ),
                 make_rule("catch-all", vec!["*"], None, Action::Deny),
             ],
         );

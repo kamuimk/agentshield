@@ -71,7 +71,10 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
         .with_db(db_arc);
     let addr = server.start().await?;
     println!("Proxy running on {}", addr);
-    println!("Set HTTPS_PROXY=http://{} to route traffic through AgentShield", addr);
+    println!(
+        "Set HTTPS_PROXY=http://{} to route traffic through AgentShield",
+        addr
+    );
 
     // Keep running until interrupted
     tokio::signal::ctrl_c().await?;
@@ -140,8 +143,8 @@ fn cmd_logs(tail: usize, export: bool, format: &str) -> anyhow::Result<()> {
             println!("No log entries found.");
         } else {
             println!(
-                "{:<20} {:<8} {:<30} {:<30} {:<8} {}",
-                "TIMESTAMP", "METHOD", "DOMAIN", "PATH", "ACTION", "REASON"
+                "{:<20} {:<8} {:<30} {:<30} {:<8} REASON",
+                "TIMESTAMP", "METHOD", "DOMAIN", "PATH", "ACTION"
             );
             println!("{}", "─".repeat(120));
             for log in &logs {

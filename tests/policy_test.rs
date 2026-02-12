@@ -61,10 +61,7 @@ fn parse_full_config_with_rules() {
 
     let rule1 = &config.policy.rules[1];
     assert_eq!(rule1.name, "github-readonly");
-    assert_eq!(
-        rule1.methods.as_ref().unwrap(),
-        &vec!["GET".to_string()]
-    );
+    assert_eq!(rule1.methods.as_ref().unwrap(), &vec!["GET".to_string()]);
     assert_eq!(rule1.action, Action::Allow);
 
     let rule2 = &config.policy.rules[2];
@@ -88,7 +85,12 @@ fn parse_openclaw_template() {
     assert!(config.policy.rules.len() >= 7);
 
     // Verify specific rules exist
-    let rule_names: Vec<&str> = config.policy.rules.iter().map(|r| r.name.as_str()).collect();
+    let rule_names: Vec<&str> = config
+        .policy
+        .rules
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
     assert!(rule_names.contains(&"anthropic-api"));
     assert!(rule_names.contains(&"github-read"));
     assert!(rule_names.contains(&"github-write"));
