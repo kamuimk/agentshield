@@ -1,0 +1,32 @@
+# Claude Code Default Policy Template
+# Claude Code 사용에 필요한 최소한의 허용 룰
+
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+[[policy.rules]]
+name = "anthropic-api"
+domains = ["api.anthropic.com"]
+action = "allow"
+
+[[policy.rules]]
+name = "github-read"
+domains = ["api.github.com", "github.com"]
+methods = ["GET"]
+action = "allow"
+
+[[policy.rules]]
+name = "github-write"
+domains = ["api.github.com"]
+methods = ["POST", "PUT", "PATCH", "DELETE"]
+action = "ask"
+
+[[policy.rules]]
+name = "npm-registry"
+domains = ["registry.npmjs.org"]
+methods = ["GET"]
+action = "allow"

@@ -1,0 +1,159 @@
+{
+  "master": {
+    "tasks": [
+      {
+        "id": "1",
+        "title": "Project Scaffolding and Dependencies Setup",
+        "description": "Initialize Rust project structure with Cargo.toml dependencies and directory layout as specified in PRD.",
+        "details": "Run `cargo init agentshield --bin`; Add dependencies to Cargo.toml: hyper = '1.4', tokio = { version = '1.40', features = ['full'] }, rustls = '0.23', clap = { version = '4.5', features = ['derive'] }, rusqlite = { version = '0.32', features = ['bundled'] }, toml = '0.8', serde = { version = '1.0', features = ['derive'] }, anyhow = '1.0'. Create directory structure: src/{main,proxy{mod,tls,connect},policy{mod,config,evaluator},dlp{mod,patterns},log{mod,export},cli{mod,prompt}}. Add LICENSE (Apache 2.0), README.md, CONTRIBUTING.md, templates/openclaw-default.toml.",
+        "testStrategy": "cargo check; cargo build; Verify directory structure matches PRD; cargo test --no-run to validate dependencies.",
+        "priority": "high",
+        "dependencies": [],
+        "status": "in-progress",
+        "subtasks": [],
+        "updatedAt": "2026-02-12T02:51:05.507Z"
+      },
+      {
+        "id": "2",
+        "title": "Basic HTTP/HTTPS Proxy with CONNECT Tunneling",
+        "description": "Implement core transparent proxy listening on 127.0.0.1:18080 supporting HTTP CONNECT for HTTPS tunneling.",
+        "details": "In src/proxy/mod.rs: use tokio::net::TcpListener; hyper::service::service_fn for request handling. Implement CONNECT method: parse domain from CONNECT request, forward to upstream if allowed (stub policy), return 200 OK. Handle HTTP requests by forwarding full payload. Use tokio for async. Configurable listen addr from TOML. Support transparent mode via HTTPS_PROXY env.",
+        "testStrategy": "curl -x http://127.0.0.1:18080 https://api.anthropic.com; Verify CONNECT tunnel works; Test with `cargo run` and manual proxy traffic.",
+        "priority": "high",
+        "dependencies": [
+          "1"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "3",
+        "title": "TOML Policy Configuration Parser",
+        "description": "Parse agentshield.toml with proxy.listen, policy.default, and policy.rules arrays.",
+        "details": "In src/policy/config.rs: #[derive(Deserialize)] struct Config { proxy: ProxyConfig, policy: PolicyConfig, .. }; PolicyConfig { default: String, rules: Vec<Rule> }; Rule { name: String, domains: Vec<String>, methods: Option<Vec<String>>, action: String }. Use toml::from_str. Validate config schema. Load from ~/.agentshield/agentshield.toml or ./agentshield.toml.",
+        "testStrategy": "Unit tests: parse valid/invalid TOML samples including openclaw-default.toml; cargo test policy::config.",
+        "priority": "high",
+        "dependencies": [
+          "1"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "4",
+        "title": "Policy Evaluator Engine",
+        "description": "Implement domain/method-based policy evaluation with default-deny logic returning ALLOW/DENY/ASK.",
+        "details": "In src/policy/evaluator.rs: fn evaluate(req: &Request, config: &Config) -> Action. Match rules sequentially: check domains (exact/wildcard), methods. Default to config.policy.default. Actions: enum Action { Allow, Deny, Ask }. For deny: respond 403 with 'X-AgentShield-Reason' header. For ask: block and trigger prompt.",
+        "testStrategy": "Unit tests covering all rule matches, default deny, method filtering, github-read/write scenarios from template.",
+        "priority": "high",
+        "dependencies": [
+          "2",
+          "3"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "5",
+        "title": "SQLite Logging System",
+        "description": "Create SQLite database for request logging with CLI export capabilities.",
+        "details": "In src/log/mod.rs: rusqlite::Connection; CREATE TABLE requests (id INTEGER PRIMARY KEY, timestamp TEXT, method TEXT, domain TEXT, path TEXT, action TEXT, reason TEXT); fn log_request(conn: &Connection, req: &Request, action: &Action, reason: &str). In src/log/export.rs: JSON/CSV export queries. Init DB at ~/.agentshield/agentshield.db.",
+        "testStrategy": "Insert test records; Query via CLI stub; Verify schema and JSON export format matches PRD spec.",
+        "priority": "medium",
+        "dependencies": [
+          "1"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "6",
+        "title": "Interactive Approval Prompt System",
+        "description": "Display terminal prompts for ASK actions with options to allow once/add rule/deny/inspect.",
+        "details": "In src/cli/prompt.rs: crossterm or dialoguer for TUI prompt. Show request details (method, domain, path). On [r]: append rule to agentshield.toml. On [i]: dump request body (if available). Use tokio::select! for non-blocking proxy wait. Atomic file writes for config updates.",
+        "testStrategy": "Integration test: trigger ASK, select options, verify config updated and proxy unblocks.",
+        "priority": "medium",
+        "dependencies": [
+          "2",
+          "4"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "7",
+        "title": "Core CLI Commands Implementation",
+        "description": "Implement agentshield CLI with clap: start, stop, status, logs, policy subcommands.",
+        "details": "In src/main.rs and src/cli/mod.rs: #[clap] subcommands. start: spawn proxy task (daemon via daemonize crate or systemd). logs --tail N: query SQLite. policy show/add/template. Use pidfile for daemon management. status: active connections, stats from DB.",
+        "testStrategy": "`cargo run -- start`; `cargo run -- logs`; Verify daemon lifecycle and log output.",
+        "priority": "medium",
+        "dependencies": [
+          "2",
+          "3",
+          "4",
+          "5"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "8",
+        "title": "Policy Templates System",
+        "description": "Implement agentshield init and policy template commands with openclaw-default.toml.",
+        "details": "Copy templates/openclaw-default.toml to config dir on `policy template openclaw-default`. init: create config dir, DB, CA stub, apply default template. Interactive policy add.",
+        "testStrategy": "`agentshield init`; `agentshield policy template openclaw-default`; Verify generated TOML matches PRD example.",
+        "priority": "medium",
+        "dependencies": [
+          "3",
+          "5",
+          "7"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "9",
+        "title": "Integration and OpenClaw Testing Setup",
+        "description": "Verify proxy integration with OpenClaw Gateway via HTTPS_PROXY and test traffic patterns.",
+        "details": "Document OpenClaw config: gateway.proxy = 'http://127.0.0.1:18080'. Test with real OpenClaw instance: anthropic-api allow, github-write ASK. Add tests/integration_test.rs with mock OpenClaw requests.",
+        "testStrategy": "Run OpenClaw with proxy; Verify requests logged, policies applied per openclaw-default.toml; No false blocks on allowed domains.",
+        "priority": "medium",
+        "dependencies": [
+          "2",
+          "4",
+          "7",
+          "8"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "10",
+        "title": "Unit and Integration Tests",
+        "description": "Add comprehensive tests for proxy, policy, logging, CLI as per project structure.",
+        "details": "tests/proxy_test.rs: mock CONNECT/HTTP. tests/policy_test.rs: rule evaluation. tests/integration_test.rs: full proxy+policy+log flow. Use httpmock or wiremock for upstream simulation. CI with GitHub Actions stub.",
+        "testStrategy": "`cargo test --all`; Achieve 90%+ coverage; Test edge cases: invalid domains, MITM stub, concurrent requests.",
+        "priority": "low",
+        "dependencies": [
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7"
+        ],
+        "status": "pending",
+        "subtasks": []
+      }
+    ],
+    "metadata": {
+      "version": "1.0.0",
+      "lastModified": "2026-02-12T02:51:05.508Z",
+      "taskCount": 10,
+      "completedCount": 0,
+      "tags": [
+        "master"
+      ]
+    }
+  }
+}

@@ -1,0 +1,12 @@
+# Strict Policy Template
+# 모든 트래픽을 기본 차단하는 엄격한 정책
+
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+[dlp]
+enabled = false

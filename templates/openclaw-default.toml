@@ -1,0 +1,62 @@
+# OpenClaw Default Policy Template
+# OpenClaw Gateway의 일반적인 사용에 필요한 최소한의 허용 룰
+
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+# LLM Provider APIs (필수)
+[[policy.rules]]
+name = "anthropic-api"
+domains = ["api.anthropic.com"]
+action = "allow"
+
+[[policy.rules]]
+name = "openai-api"
+domains = ["api.openai.com"]
+action = "allow"
+
+# Messaging channels (읽기/쓰기 허용)
+[[policy.rules]]
+name = "telegram"
+domains = ["api.telegram.org"]
+action = "allow"
+
+[[policy.rules]]
+name = "discord"
+domains = ["discord.com", "gateway.discord.gg"]
+action = "allow"
+
+[[policy.rules]]
+name = "slack"
+domains = ["slack.com", "api.slack.com"]
+action = "allow"
+
+# Package registries (읽기 전용)
+[[policy.rules]]
+name = "npm-registry"
+domains = ["registry.npmjs.org"]
+methods = ["GET"]
+action = "allow"
+
+# GitHub (읽기는 허용, 쓰기는 승인 필요)
+[[policy.rules]]
+name = "github-read"
+domains = ["api.github.com", "github.com"]
+methods = ["GET"]
+action = "allow"
+
+[[policy.rules]]
+name = "github-write"
+domains = ["api.github.com"]
+methods = ["POST", "PUT", "PATCH", "DELETE"]
+action = "ask"
+
+# Browser/Web access (에이전트 브라우징 - 승인 필요)
+[[policy.rules]]
+name = "web-browsing"
+domains = ["*"]
+action = "ask"
