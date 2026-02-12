@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use agentshield::cli::{Cli, Commands, PolicyAction};
 use agentshield::logging;
@@ -61,8 +62,13 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
     println!("Default policy: {:?}", config.policy.default);
     println!("Rules loaded: {}", config.policy.rules.len());
 
+    let db = db_path();
+    let conn = logging::open_db(&db)?;
+    let db_arc = Arc::new(Mutex::new(conn));
+
     let server = ProxyServer::new(config.proxy.listen.clone())
-        .with_policy(config.policy.clone());
+        .with_policy(config.policy.clone())
+        .with_db(db_arc);
     let addr = server.start().await?;
     println!("Proxy running on {}", addr);
     println!("Set HTTPS_PROXY=http://{} to route traffic through AgentShield", addr);

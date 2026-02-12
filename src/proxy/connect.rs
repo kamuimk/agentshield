@@ -1,21 +1,29 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use rusqlite::Connection;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
+use crate::logging;
 use crate::policy::config::{Action, PolicyConfig};
 use crate::policy::evaluator::{self, RequestInfo};
 
 /// Main accept loop: accept incoming connections and handle them.
-pub async fn accept_loop(listener: TcpListener, policy: Option<Arc<PolicyConfig>>) {
+pub async fn accept_loop(
+    listener: TcpListener,
+    policy: Option<Arc<PolicyConfig>>,
+    db: Option<Arc<Mutex<Connection>>>,
+) {
     loop {
         match listener.accept().await {
             Ok((stream, peer_addr)) => {
                 info!("New connection from {}", peer_addr);
                 let policy = policy.clone();
+                let db = db.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, policy.as_deref()).await {
+                    if let Err(e) = handle_connection(stream, policy.as_deref(), db.as_ref()).await
+                    {
                         error!("Error handling connection from {}: {}", peer_addr, e);
                     }
                 });
@@ -27,10 +35,38 @@ pub async fn accept_loop(listener: TcpListener, policy: Option<Arc<PolicyConfig>
     }
 }
 
+/// Log a request to the database if a DB connection is available.
+fn log_to_db(
+    db: Option<&Arc<Mutex<Connection>>>,
+    method: &str,
+    domain: &str,
+    path: &str,
+    action: &str,
+    reason: &str,
+) {
+    if let Some(db) = db {
+        if let Ok(conn) = db.lock() {
+            let log = logging::RequestLog {
+                id: None,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                method: method.to_string(),
+                domain: domain.to_string(),
+                path: path.to_string(),
+                action: action.to_string(),
+                reason: reason.to_string(),
+            };
+            if let Err(e) = logging::log_request(&conn, &log) {
+                warn!("Failed to log request to DB: {}", e);
+            }
+        }
+    }
+}
+
 /// Handle a single client connection.
 async fn handle_connection(
     mut client: TcpStream,
     policy: Option<&PolicyConfig>,
+    db: Option<&Arc<Mutex<Connection>>>,
 ) -> anyhow::Result<()> {
     let mut buf = vec![0u8; 8192];
     let n = client.read(&mut buf).await?;
@@ -42,9 +78,9 @@ async fn handle_connection(
     let first_line = request.lines().next().unwrap_or("");
 
     if first_line.starts_with("CONNECT ") {
-        handle_connect(&mut client, first_line, policy).await
+        handle_connect(&mut client, first_line, policy, db).await
     } else {
-        handle_http_request(&mut client, &buf[..n], policy).await
+        handle_http_request(&mut client, &buf[..n], policy, db).await
     }
 }
 
@@ -53,6 +89,7 @@ async fn handle_connect(
     client: &mut TcpStream,
     first_line: &str,
     policy: Option<&PolicyConfig>,
+    db: Option<&Arc<Mutex<Connection>>>,
 ) -> anyhow::Result<()> {
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     if parts.len() < 2 {
@@ -75,6 +112,7 @@ async fn handle_connect(
         match result.action {
             Action::Deny => {
                 warn!("BLOCKED CONNECT to {} - {}", target, result.reason);
+                log_to_db(db, "CONNECT", domain, "/", "deny", &result.reason);
                 let response = format!(
                     "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: {}\r\n\r\n",
                     result.reason
@@ -83,11 +121,12 @@ async fn handle_connect(
                 return Ok(());
             }
             Action::Ask => {
-                // For now, treat ASK as allow (interactive prompt is handled elsewhere)
                 info!("ASK CONNECT to {} - {}", target, result.reason);
+                log_to_db(db, "CONNECT", domain, "/", "ask", &result.reason);
             }
             Action::Allow => {
                 info!("ALLOWED CONNECT to {} - {}", target, result.reason);
+                log_to_db(db, "CONNECT", domain, "/", "allow", &result.reason);
             }
         }
     }
@@ -129,6 +168,7 @@ async fn handle_http_request(
     client: &mut TcpStream,
     raw_request: &[u8],
     policy: Option<&PolicyConfig>,
+    db: Option<&Arc<Mutex<Connection>>>,
 ) -> anyhow::Result<()> {
     let request_str = String::from_utf8_lossy(raw_request);
     let first_line = request_str.lines().next().unwrap_or("");
@@ -156,6 +196,7 @@ async fn handle_http_request(
         match result.action {
             Action::Deny => {
                 warn!("BLOCKED {} {} - {}", method, uri, result.reason);
+                log_to_db(db, method, &host, &path, "deny", &result.reason);
                 let response = format!(
                     "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: {}\r\n\r\n",
                     result.reason
@@ -165,9 +206,11 @@ async fn handle_http_request(
             }
             Action::Ask => {
                 info!("ASK {} {} - {}", method, uri, result.reason);
+                log_to_db(db, method, &host, &path, "ask", &result.reason);
             }
             Action::Allow => {
                 info!("ALLOWED {} {} - {}", method, uri, result.reason);
+                log_to_db(db, method, &host, &path, "allow", &result.reason);
             }
         }
     }

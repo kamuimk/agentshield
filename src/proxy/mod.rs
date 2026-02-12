@@ -2,9 +2,10 @@ pub mod connect;
 pub mod tls;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
+use rusqlite::Connection;
 use tokio::net::TcpListener;
 use tracing::info;
 
@@ -13,6 +14,7 @@ use crate::policy::config::PolicyConfig;
 pub struct ProxyServer {
     listen_addr: String,
     policy: Option<Arc<PolicyConfig>>,
+    db: Option<Arc<Mutex<Connection>>>,
 }
 
 impl ProxyServer {
@@ -20,11 +22,17 @@ impl ProxyServer {
         Self {
             listen_addr,
             policy: None,
+            db: None,
         }
     }
 
     pub fn with_policy(mut self, policy: PolicyConfig) -> Self {
         self.policy = Some(Arc::new(policy));
+        self
+    }
+
+    pub fn with_db(mut self, db: Arc<Mutex<Connection>>) -> Self {
+        self.db = Some(db);
         self
     }
 
@@ -35,8 +43,9 @@ impl ProxyServer {
         info!("AgentShield proxy listening on {}", local_addr);
 
         let policy = self.policy.clone();
+        let db = self.db.clone();
         tokio::spawn(async move {
-            connect::accept_loop(listener, policy).await;
+            connect::accept_loop(listener, policy, db).await;
         });
 
         Ok(local_addr)

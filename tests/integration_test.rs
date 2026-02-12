@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -378,4 +379,68 @@ async fn proxy_handles_concurrent_connections() {
             );
         }
     }
+}
+
+// ===== Proxy-Logging integration =====
+
+#[tokio::test]
+async fn proxy_logs_requests_to_sqlite() {
+    let policy = PolicyConfig {
+        default: Action::Deny,
+        rules: vec![Rule {
+            name: "allow-example".to_string(),
+            domains: vec!["example.com".to_string()],
+            methods: None,
+            action: Action::Allow,
+            note: None,
+        }],
+    };
+
+    // Create in-memory DB wrapped in Arc<Mutex>
+    let conn = logging::open_memory_db().unwrap();
+    let db = Arc::new(Mutex::new(conn));
+
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_policy(policy)
+        .with_db(db.clone());
+    let addr = server.start().await.unwrap();
+
+    // 1. Allowed request (CONNECT to example.com)
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf).await.unwrap();
+    let response = String::from_utf8_lossy(&buf[..n]);
+    assert!(response.contains("200"));
+    drop(stream);
+
+    // 2. Denied request (CONNECT to evil.com)
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(b"CONNECT evil.com:443 HTTP/1.1\r\nHost: evil.com:443\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf).await.unwrap();
+    let response = String::from_utf8_lossy(&buf[..n]);
+    assert!(response.contains("403"));
+    drop(stream);
+
+    // Give proxy a moment to write logs
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Verify SQLite has both log entries
+    let db_lock = db.lock().unwrap();
+    let logs = logging::query_recent(&db_lock, 10).unwrap();
+    assert!(logs.len() >= 2, "Expected at least 2 logs, got {}", logs.len());
+
+    // Most recent first
+    let denied = logs.iter().find(|l| l.domain == "evil.com").unwrap();
+    assert_eq!(denied.action, "deny");
+
+    let allowed = logs.iter().find(|l| l.domain == "example.com").unwrap();
+    assert_eq!(allowed.action, "allow");
 }
