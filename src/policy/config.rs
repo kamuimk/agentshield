@@ -1,1 +1,59 @@
-// TOML config parser
+use std::path::Path;
+
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Action {
+    Allow,
+    Deny,
+    Ask,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProxyConfig {
+    pub listen: String,
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Rule {
+    pub name: String,
+    pub domains: Vec<String>,
+    #[serde(default)]
+    pub methods: Option<Vec<String>>,
+    pub action: Action,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PolicyConfig {
+    pub default: Action,
+    #[serde(default)]
+    pub rules: Vec<Rule>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DlpConfig {
+    pub enabled: bool,
+    #[serde(default)]
+    pub patterns: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AppConfig {
+    pub proxy: ProxyConfig,
+    pub policy: PolicyConfig,
+    #[serde(default)]
+    pub dlp: Option<DlpConfig>,
+}
+
+impl AppConfig {
+    pub fn load_from_path(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let config: AppConfig = toml::from_str(&content)?;
+        Ok(config)
+    }
+}
