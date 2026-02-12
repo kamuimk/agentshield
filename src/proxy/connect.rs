@@ -136,6 +136,15 @@ async fn handle_connect(
     let target = parts[1]; // e.g. "example.com:443"
     let domain = target.split(':').next().unwrap_or(target);
 
+    // Validate domain to prevent header injection
+    if !validate_domain(domain) {
+        warn!("Invalid domain in CONNECT: {}", domain);
+        log_to_db(db, "CONNECT", domain, "/", "deny", "invalid domain");
+        let response = "HTTP/1.1 400 Bad Request\r\nX-AgentShield-Reason: invalid domain\r\n\r\n";
+        client.write_all(response.as_bytes()).await?;
+        return Ok(());
+    }
+
     // Policy evaluation for CONNECT (domain-level only)
     if let Some(policy) = policy {
         let req_info = RequestInfo {
@@ -232,6 +241,16 @@ async fn handle_http_request(
     let (host, port) = parse_host_port(uri)?;
     let path = parse_path(uri);
 
+    // Validate domain to prevent header injection
+    if !validate_domain(&host) {
+        warn!("Invalid domain in HTTP request: {}", host);
+        log_to_db(db, method, &host, &path, "deny", "invalid domain");
+        let response =
+            "HTTP/1.1 400 Bad Request\r\nX-AgentShield-Reason: invalid domain\r\n\r\n";
+        client.write_all(response.as_bytes()).await?;
+        return Ok(());
+    }
+
     // Policy evaluation for HTTP
     if let Some(policy) = policy {
         let req_info = RequestInfo {
@@ -314,6 +333,16 @@ async fn handle_http_request(
     Ok(())
 }
 
+/// Validate that a domain name contains only safe characters.
+fn validate_domain(domain: &str) -> bool {
+    if domain.is_empty() || domain.len() > 253 {
+        return false;
+    }
+    domain
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
 /// Parse host and port from an absolute URI like "http://example.com:8080/path"
 fn parse_host_port(uri: &str) -> anyhow::Result<(String, u16)> {
     let is_https = uri.starts_with("https://");
@@ -387,5 +416,24 @@ mod tests {
             parse_path("https://api.github.com/repos/user/repo"),
             "/repos/user/repo"
         );
+    }
+
+    #[test]
+    fn test_validate_domain_valid() {
+        assert!(validate_domain("example.com"));
+        assert!(validate_domain("api.anthropic.com"));
+        assert!(validate_domain("my-service.example.com"));
+        assert!(validate_domain("localhost"));
+        assert!(validate_domain("192.168.1.1"));
+    }
+
+    #[test]
+    fn test_validate_domain_invalid() {
+        assert!(!validate_domain(""));
+        assert!(!validate_domain("evil.com/../../etc/passwd"));
+        assert!(!validate_domain("evil@attacker.com"));
+        assert!(!validate_domain("evil.com:443\r\nInjected: header"));
+        assert!(!validate_domain("domain with spaces"));
+        assert!(!validate_domain("evil.com\0null"));
     }
 }
