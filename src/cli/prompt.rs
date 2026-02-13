@@ -175,10 +175,16 @@ pub fn append_rule_to_config(config_path: &Path, rule: &Rule) -> Result<()> {
     Ok(())
 }
 
-/// Handle the inspect action: display the request body.
+/// Maximum bytes to display when inspecting a request body.
+const MAX_BODY_DISPLAY: usize = 4096;
+
+/// Handle the inspect action: display the request body with truncation.
 pub fn handle_inspect<W: Write>(req: &PromptRequest, writer: &mut W) -> Result<()> {
     writeln!(writer, "\n--- Request Payload ---")?;
     match &req.body {
+        Some(body) if body.len() > MAX_BODY_DISPLAY => {
+            writeln!(writer, "{} ... (truncated, showing {}/{} bytes)", &body[..MAX_BODY_DISPLAY], MAX_BODY_DISPLAY, body.len())?;
+        }
         Some(body) => writeln!(writer, "{}", body)?,
         None => writeln!(writer, "(no body available)")?,
     }
@@ -342,5 +348,39 @@ default = "deny"
         handle_inspect(&req, &mut output).unwrap();
         let output_str = String::from_utf8(output).unwrap();
         assert!(output_str.contains("no body available"));
+    }
+
+    #[test]
+    fn handle_inspect_truncates_large_body() {
+        let large_body = "x".repeat(5000);
+        let req = PromptRequest {
+            method: "POST".to_string(),
+            domain: "example.com".to_string(),
+            path: "/".to_string(),
+            body: Some(large_body),
+        };
+        let mut output = Vec::new();
+        handle_inspect(&req, &mut output).unwrap();
+        let output_str = String::from_utf8(output).unwrap();
+        // Should contain truncation indicator
+        assert!(output_str.contains("truncated"));
+        // Should NOT contain the full 5000 chars
+        assert!(output_str.len() < 5000);
+    }
+
+    #[test]
+    fn handle_inspect_does_not_truncate_small_body() {
+        let small_body = "x".repeat(2000);
+        let req = PromptRequest {
+            method: "POST".to_string(),
+            domain: "example.com".to_string(),
+            path: "/".to_string(),
+            body: Some(small_body.clone()),
+        };
+        let mut output = Vec::new();
+        handle_inspect(&req, &mut output).unwrap();
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(!output_str.contains("truncated"));
+        assert!(output_str.contains(&small_body));
     }
 }
