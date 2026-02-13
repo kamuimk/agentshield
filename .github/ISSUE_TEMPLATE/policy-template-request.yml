@@ -1,0 +1,33 @@
+name: "Policy Template Request"
+description: "Suggest a new policy template for a specific AI agent or use case"
+title: "[Template] "
+labels: ["policy-template", "enhancement"]
+body:
+  - type: input
+    id: agent
+    attributes:
+      label: AI Agent / Use Case
+      description: "Which agent or scenario is this template for?"
+      placeholder: "e.g., Cursor, Aider, AutoGPT, MCP Server"
+    validations:
+      required: true
+
+  - type: textarea
+    id: domains
+    attributes:
+      label: Required Domains
+      description: |
+        List the domains this agent needs to access, with the suggested action for each.
+      placeholder: |
+        - api.openai.com → allow
+        - api.github.com (GET) → allow
+        - api.github.com (POST/PUT) → ask
+        - pypi.org → allow (GET only)
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: "Any notes — specific ports, known egress patterns, DLP considerations, etc."

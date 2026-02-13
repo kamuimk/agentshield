@@ -1,0 +1,54 @@
+name: "Bug Report"
+description: "Report a bug or unexpected behavior"
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: "What happened? What did you expect to happen?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: "Minimal steps to trigger the bug."
+      placeholder: |
+        1. Set policy to ...
+        2. Run `curl -x http://127.0.0.1:18080 ...`
+        3. Expected 403, got 200
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Config (agentshield.toml)
+      description: "Relevant parts of your config (redact any tokens)."
+      render: toml
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "Output from `agentshield logs` or terminal stderr."
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: AgentShield Version
+      placeholder: "v0.3.0"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS / Environment
+      placeholder: "macOS 15.3 / Ubuntu 24.04 / WSL2"
+    validations:
+      required: true

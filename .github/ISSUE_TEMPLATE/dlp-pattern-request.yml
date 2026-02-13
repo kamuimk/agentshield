@@ -1,0 +1,84 @@
+name: "DLP Pattern Request"
+description: "Suggest a new DLP pattern to detect API keys or sensitive data"
+title: "[DLP Pattern] "
+labels: ["dlp-pattern", "enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping expand AgentShield's DLP coverage!
+        Please provide as much detail as possible about the API key or sensitive data format.
+
+  - type: input
+    id: provider
+    attributes:
+      label: Provider / Service Name
+      description: "e.g., Stripe, Datadog, Azure OpenAI"
+      placeholder: "Stripe"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - AI Provider API Key
+        - Cloud Infrastructure Key
+        - Payment / Financial
+        - Database Credential
+        - Messaging / Communication
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: format
+    attributes:
+      label: Key Format
+      description: |
+        Describe the key format. Include:
+        - Fixed prefix (if any)
+        - Character set (alphanumeric, hex, base64, etc.)
+        - Approximate length
+        - Example (use a **fake/revoked** key, never a real one)
+      placeholder: |
+        Prefix: sk_live_ or sk_test_
+        Characters: alphanumeric
+        Length: 24+ characters after prefix
+        Example: sk_test_EXAMPLE_FAKE_KEY_HERE
+    validations:
+      required: true
+
+  - type: textarea
+    id: regex
+    attributes:
+      label: Suggested Regex (optional)
+      description: "If you have a regex pattern, share it here."
+      placeholder: "sk_(?:live|test)_[A-Za-z0-9]{24,}"
+      render: text
+
+  - type: input
+    id: docs
+    attributes:
+      label: Documentation Link
+      description: "Link to official docs describing the key format (helps us verify)."
+      placeholder: "https://docs.stripe.com/keys"
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Suggested Severity
+      description: "How sensitive is this credential?"
+      options:
+        - Critical (direct billing / data access)
+        - High (broad API access)
+        - Medium (limited scope)
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: "Any other details — known false positive risks, key rotation patterns, etc."
