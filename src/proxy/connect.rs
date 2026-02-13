@@ -1,3 +1,16 @@
+//! Connection handling for the proxy server.
+//!
+//! This module implements the core request processing pipeline:
+//!
+//! 1. **Accept** incoming TCP connections ([`accept_loop`])
+//! 2. **Parse** the first line to distinguish `CONNECT` (HTTPS) from plain HTTP
+//! 3. **Validate** the target domain against injection attacks
+//! 4. **Check system allowlist** — bypass policy for pre-approved domains
+//! 5. **Evaluate policy** — allow, deny, or prompt the user (ASK)
+//! 6. **DLP scan** — inspect request bodies for secrets/PII (HTTP only)
+//! 7. **Forward** the request to the upstream server
+//! 8. **Log** the decision to SQLite and optionally send notifications
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -99,7 +112,8 @@ fn notify_event(notifier: &Option<Arc<dyn Notifier>>, event: NotificationEvent) 
     }
 }
 
-/// Handle a single client connection.
+/// Handle a single client connection by reading the first request line and
+/// dispatching to [`handle_connect`] (HTTPS) or [`handle_http_request`] (HTTP).
 async fn handle_connection(
     mut client: TcpStream,
     policy: Option<&PolicyConfig>,
@@ -168,6 +182,10 @@ async fn ask_and_wait(
 }
 
 /// Handle CONNECT method for HTTPS tunneling.
+///
+/// Establishes a TCP tunnel between the client and the target server after
+/// validating the domain, checking the system allowlist, and evaluating policy.
+/// For CONNECT requests, DLP scanning is not possible since the payload is encrypted.
 async fn handle_connect(
     client: &mut TcpStream,
     first_line: &str,
@@ -301,6 +319,10 @@ async fn handle_connect(
 }
 
 /// Handle plain HTTP requests by forwarding to the target server.
+///
+/// Unlike CONNECT tunneling, plain HTTP requests expose the full request body,
+/// enabling DLP scanning for secrets and PII before forwarding. Critical DLP
+/// findings block the request; non-critical findings are logged as warnings.
 #[allow(clippy::too_many_arguments)]
 async fn handle_http_request(
     client: &mut TcpStream,

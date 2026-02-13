@@ -1,9 +1,22 @@
+//! OpenClaw integration for AgentShield.
+//!
+//! Provides commands to route [OpenClaw](https://openclaw.ai)'s Telegram traffic
+//! through the AgentShield proxy by modifying `~/.openclaw/openclaw.json` and
+//! restarting the OpenClaw gateway daemon via `launchctl`.
+//!
+//! - [`cmd_integrate_openclaw`] — set the Telegram proxy and restart the daemon
+//! - [`cmd_integrate_remove`] — remove the proxy setting and restart the daemon
+
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Default AgentShield proxy URL used for OpenClaw integration.
 const DEFAULT_PROXY_URL: &str = "http://127.0.0.1:18080";
+/// OpenClaw configuration filename.
 const OPENCLAW_CONFIG_FILENAME: &str = "openclaw.json";
+/// OpenClaw directory name under `$HOME`.
 const OPENCLAW_DIR: &str = ".openclaw";
+/// macOS launchd label for the OpenClaw gateway daemon.
 const LAUNCHD_LABEL: &str = "ai.openclaw.gateway";
 
 /// Detect the OpenClaw config file path (~/.openclaw/openclaw.json)

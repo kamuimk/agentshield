@@ -1,3 +1,8 @@
+//! AgentShield CLI entry point.
+//!
+//! Parses command-line arguments via [`clap`] and dispatches to the appropriate
+//! handler: `start`, `stop`, `status`, `logs`, `policy`, `init`, or `integrate`.
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -14,10 +19,12 @@ use agentshield::proxy::ProxyServer;
 use clap::Parser;
 use tracing::info;
 
+/// Return the path to the SQLite log database (`~/.agentshield/agentshield.db`).
 fn db_path() -> std::path::PathBuf {
     dirs_path().join("agentshield.db")
 }
 
+/// Return (and lazily create) the AgentShield data directory (`~/.agentshield/`).
 fn dirs_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let dir = std::path::PathBuf::from(home).join(".agentshield");
@@ -65,6 +72,15 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Start the proxy server with the given configuration.
+///
+/// This function orchestrates the full startup sequence:
+/// 1. Load and validate the TOML configuration
+/// 2. Open a SQLite connection pool for request logging
+/// 3. Set up an async channel for interactive ASK prompts (stdin/stdout)
+/// 4. Optionally enable the system allowlist, DLP scanner, and Telegram notifier
+/// 5. Bind the TCP listener and enter the accept loop
+/// 6. Block until Ctrl-C is received
 async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
     let config = AppConfig::load_from_path(config_path)?;
     info!("AgentShield starting...");
@@ -150,6 +166,7 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Stop a running AgentShield instance by removing its PID file.
 fn cmd_stop() -> anyhow::Result<()> {
     info!("Stopping AgentShield proxy...");
     let pid_path = dirs_path().join("agentshield.pid");
@@ -163,6 +180,7 @@ fn cmd_stop() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Display a summary of logged requests (total, allowed, denied, asked).
 fn cmd_status() -> anyhow::Result<()> {
     let db = db_path();
     if db.exists() {
@@ -185,6 +203,7 @@ fn cmd_status() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// View recent request logs or export all logs as JSON/CSV.
 fn cmd_logs(tail: usize, export: bool, format: &str) -> anyhow::Result<()> {
     let db = db_path();
     if !db.exists() {
@@ -226,6 +245,7 @@ fn cmd_logs(tail: usize, export: bool, format: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Display the current policy configuration (default action and all rules).
 fn cmd_policy_show(config_path: &Path) -> anyhow::Result<()> {
     let config = AppConfig::load_from_path(config_path)?;
     println!("Current Policy ({})", config_path.display());
@@ -249,12 +269,16 @@ fn cmd_policy_show(config_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Placeholder for interactive policy rule addition (not yet implemented).
 fn cmd_policy_add() -> anyhow::Result<()> {
     println!("Interactive policy rule addition is not yet implemented.");
     println!("Edit agentshield.toml directly or use 'agentshield policy template'.");
     Ok(())
 }
 
+/// Apply a built-in policy template to the config file.
+///
+/// Available templates: `openclaw-default`, `claude-code-default`, `strict`.
 fn cmd_policy_template(config_path: &Path, name: &str) -> anyhow::Result<()> {
     let template_content = match name {
         "openclaw-default" => include_str!("../templates/openclaw-default.toml"),
@@ -272,6 +296,7 @@ fn cmd_policy_template(config_path: &Path, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Initialize AgentShield: create data directory, database, and default config.
 fn cmd_init(config_path: &Path) -> anyhow::Result<()> {
     info!("Initializing AgentShield...");
 

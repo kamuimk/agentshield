@@ -1,3 +1,10 @@
+//! HTTP/HTTPS proxy server.
+//!
+//! [`ProxyServer`] is configured via a builder pattern and spawns an async
+//! accept loop that handles both plain HTTP forwarding and HTTPS CONNECT tunneling.
+//! Each connection is processed against the policy engine, DLP scanner, and
+//! system allowlist before being forwarded to the upstream server.
+
 pub mod connect;
 pub mod tls;
 
@@ -15,6 +22,16 @@ use crate::dlp::DlpScanner;
 use crate::notification::Notifier;
 use crate::policy::config::PolicyConfig;
 
+/// The main proxy server, configured via builder methods.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let server = ProxyServer::new("127.0.0.1:18080".to_string())
+///     .with_policy(policy_config)
+///     .with_db(pool);
+/// let addr = server.start().await?;
+/// ```
 pub struct ProxyServer {
     listen_addr: String,
     policy: Option<Arc<PolicyConfig>>,
@@ -26,6 +43,7 @@ pub struct ProxyServer {
 }
 
 impl ProxyServer {
+    /// Create a new proxy server that will listen on the given address.
     pub fn new(listen_addr: String) -> Self {
         Self {
             listen_addr,
@@ -38,26 +56,31 @@ impl ProxyServer {
         }
     }
 
+    /// Attach a policy configuration for request evaluation.
     pub fn with_policy(mut self, policy: PolicyConfig) -> Self {
         self.policy = Some(Arc::new(policy));
         self
     }
 
+    /// Attach a SQLite connection pool for request logging.
     pub fn with_db(mut self, db: DbPool) -> Self {
         self.db = Some(db);
         self
     }
 
+    /// Attach an async channel for sending ASK prompts to the CLI handler.
     pub fn with_ask_channel(mut self, ask_tx: mpsc::Sender<AskRequest>) -> Self {
         self.ask_tx = Some(ask_tx);
         self
     }
 
+    /// Attach a DLP scanner for inspecting request bodies.
     pub fn with_dlp(mut self, scanner: Arc<dyn DlpScanner>) -> Self {
         self.dlp_scanner = Some(scanner);
         self
     }
 
+    /// Attach a system allowlist; matching domains bypass policy evaluation.
     pub fn with_system_allowlist(mut self, allowlist: Vec<String>) -> Self {
         if !allowlist.is_empty() {
             self.system_allowlist = Some(Arc::new(allowlist));
@@ -65,6 +88,7 @@ impl ProxyServer {
         self
     }
 
+    /// Attach a notification backend for deny/DLP event alerts.
     pub fn with_notifier(mut self, notifier: Arc<dyn Notifier>) -> Self {
         self.notifier = Some(notifier);
         self

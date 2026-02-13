@@ -1,3 +1,8 @@
+//! Log export in JSON and CSV formats.
+//!
+//! Provides [`export_json`] and [`export_csv`] for exporting all logged requests
+//! from the SQLite database. Used by the `agentshield logs --export` command.
+
 use rusqlite::Connection;
 
 use crate::error::Result;
@@ -5,6 +10,7 @@ use serde::Serialize;
 
 use super::RequestLog;
 
+/// Serializable log entry for JSON export.
 #[derive(Debug, Serialize)]
 struct LogEntry {
     id: i64,

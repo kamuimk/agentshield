@@ -1,3 +1,19 @@
+//! Notification system for security-relevant events.
+//!
+//! AgentShield can send real-time alerts when requests are denied or DLP findings
+//! are detected. Notifications use a **fire-and-forget** pattern: they are spawned
+//! as background tasks and never block the proxy's request processing.
+//!
+//! The [`Notifier`] trait abstracts over notification backends. Currently, the
+//! only implementation is [`telegram::TelegramNotifier`].
+//!
+//! # Supported Events
+//!
+//! - [`NotificationEvent::RequestDenied`] — a request was blocked by policy
+//! - [`NotificationEvent::DlpFinding`] — sensitive data detected in a request body
+//! - [`NotificationEvent::ProxyStarted`] — proxy server started
+//! - [`NotificationEvent::ProxyShutdown`] — proxy server shutting down
+
 pub mod telegram;
 
 use crate::error::Result;
@@ -5,32 +21,40 @@ use crate::error::Result;
 /// Events that can trigger notifications.
 #[derive(Debug, Clone)]
 pub enum NotificationEvent {
+    /// A request was denied by the policy engine or ASK prompt.
     RequestDenied {
         domain: String,
         method: String,
         path: String,
         reason: String,
     },
+    /// The DLP scanner detected sensitive data in a request body.
     DlpFinding {
         domain: String,
         method: String,
         pattern_name: String,
         severity: String,
     },
+    /// The proxy server has started listening.
     ProxyStarted {
         listen_addr: String,
     },
+    /// The proxy server is shutting down.
     ProxyShutdown,
 }
 
-/// Trait for notification backends.
+/// Trait for notification backends (e.g., Telegram, Slack, email).
+///
+/// Implementations must be `Send + Sync` for use across async tasks.
 #[async_trait::async_trait]
 pub trait Notifier: Send + Sync {
+    /// Send a notification for the given event.
     async fn notify(&self, event: &NotificationEvent) -> Result<()>;
+    /// Return the backend name (e.g., `"telegram"`).
     fn name(&self) -> &str;
 }
 
-/// Format an event into a human-readable message.
+/// Format a [`NotificationEvent`] into a human-readable Markdown message.
 pub fn format_message(event: &NotificationEvent) -> String {
     match event {
         NotificationEvent::RequestDenied {

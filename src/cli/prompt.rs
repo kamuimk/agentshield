@@ -1,3 +1,15 @@
+//! Interactive approval prompt for ASK policy actions.
+//!
+//! When a policy rule evaluates to [`Action::Ask`],
+//! the proxy sends an [`AskRequest`] through an async channel to the main thread,
+//! which displays a TUI prompt via [`prompt_decision`] and returns the user's choice.
+//!
+//! The prompt supports four actions:
+//! - **Allow once** — permit this single request
+//! - **Add rule** — auto-generate a permanent allow rule and append to config
+//! - **Deny** — block the request
+//! - **Inspect** — view the request payload before deciding
+
 use std::io::{BufRead, Write};
 use std::path::Path;
 
@@ -7,33 +19,48 @@ use crate::error::Result;
 
 use crate::policy::config::{Action, Rule};
 
-/// User's decision from the approval prompt.
+/// The user's decision from the interactive approval prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptDecision {
+    /// Allow this single request without creating a persistent rule.
     AllowOnce,
+    /// Allow and auto-generate a persistent allow rule in the config file.
     AddRule,
+    /// Block the request (default for unknown input — fail-closed).
     Deny,
+    /// Display the request payload for inspection before deciding.
     Inspect,
 }
 
-/// Information about the request being prompted.
+/// Information about the request being prompted to the user.
 #[derive(Debug, Clone)]
 pub struct PromptRequest {
+    /// HTTP method (e.g., `"POST"`).
     pub method: String,
+    /// Target domain (e.g., `"api.github.com"`).
     pub domain: String,
+    /// Request path (e.g., `"/repos/user/repo/pulls"`).
     pub path: String,
+    /// Optional request body for inspection.
     pub body: Option<String>,
 }
 
-/// A request sent from the proxy to the main thread asking for approval.
+/// A request sent from the proxy to the CLI thread for interactive approval.
+///
+/// Contains a oneshot channel for returning the boolean decision (true = allow).
 pub struct AskRequest {
+    /// Target domain.
     pub domain: String,
+    /// HTTP method.
     pub method: String,
+    /// Request path.
     pub path: String,
+    /// Channel to send the approval decision back to the proxy.
     response_tx: oneshot::Sender<bool>,
 }
 
 impl AskRequest {
+    /// Create a new ASK request and return the receiver for the response.
     pub fn new(domain: String, method: String, path: String) -> (Self, oneshot::Receiver<bool>) {
         let (tx, rx) = oneshot::channel();
         (

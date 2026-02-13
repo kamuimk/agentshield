@@ -1,22 +1,40 @@
+//! Regex-based DLP pattern scanner.
+//!
+//! Ships with built-in patterns for detecting common secrets and credentials:
+//!
+//! | Category | Patterns |
+//! |----------|----------|
+//! | AI Provider Keys | OpenAI, Anthropic, Google AI, HuggingFace, Cohere, Replicate, Mistral, Groq, Together, Fireworks |
+//! | Cloud Keys | AWS Access Key |
+//! | Generic | `api_key=...` patterns |
+//! | Credentials | Private key headers, GitHub PAT |
+//! | PII | Email addresses |
+//!
+//! All matched text is automatically **redacted** in findings (first 4 + last 4 chars)
+//! to avoid leaking secrets in logs.
+
 use std::collections::HashMap;
 
 use regex::Regex;
 
 use super::{DlpFinding, DlpScanner, Severity};
 
-/// A pattern definition with its regex and severity.
+/// Internal pattern definition pairing a compiled regex with its severity.
 struct PatternDef {
     regex: Regex,
     severity: Severity,
 }
 
-/// A DLP scanner that uses regex patterns to detect sensitive data.
+/// A DLP scanner that matches request payloads against a set of regex patterns.
+///
+/// Use [`RegexScanner::new()`] for all built-in patterns, or
+/// [`RegexScanner::with_patterns()`] for a specific subset.
 pub struct RegexScanner {
     patterns: HashMap<String, PatternDef>,
 }
 
 impl RegexScanner {
-    /// Create a new RegexScanner with built-in patterns.
+    /// Create a new `RegexScanner` with all built-in patterns.
     pub fn new() -> Self {
         let mut patterns = HashMap::new();
 
@@ -165,7 +183,9 @@ impl RegexScanner {
         Self { patterns }
     }
 
-    /// Create a RegexScanner with only the specified pattern names (subset of built-in).
+    /// Create a `RegexScanner` with only the specified pattern names (subset of built-in).
+    ///
+    /// Patterns not found in the built-in set are silently ignored.
     pub fn with_patterns(pattern_names: &[String]) -> Self {
         let all = Self::new();
         let patterns = all

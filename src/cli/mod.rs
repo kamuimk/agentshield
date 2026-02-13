@@ -1,3 +1,12 @@
+//! Command-line interface definitions for AgentShield.
+//!
+//! Uses [`clap`] derive macros to define the CLI structure. The main entry point
+//! is [`Cli`], which dispatches to subcommands defined in [`Commands`].
+//!
+//! Submodules:
+//! - [`prompt`] — Interactive approval prompt for ASK actions
+//! - [`integrate`] — OpenClaw integration (set/remove Telegram proxy)
+
 pub mod integrate;
 pub mod prompt;
 
@@ -5,6 +14,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+/// Top-level CLI arguments parsed by `clap`.
 #[derive(Parser)]
 #[command(name = "agentshield")]
 #[command(about = "AI Agent Egress Firewall - Default-deny egress control for AI agents")]
@@ -18,6 +28,7 @@ pub struct Cli {
     pub command: Commands,
 }
 
+/// Available CLI subcommands.
 #[derive(Subcommand)]
 pub enum Commands {
     /// Start the proxy server
@@ -56,6 +67,7 @@ pub enum Commands {
     },
 }
 
+/// Targets for the `integrate` subcommand.
 #[derive(Subcommand)]
 pub enum IntegrateTarget {
     /// Integrate with OpenClaw (set Telegram proxy)
@@ -64,6 +76,7 @@ pub enum IntegrateTarget {
     Remove,
 }
 
+/// Actions for the `policy` subcommand.
 #[derive(Subcommand)]
 pub enum PolicyAction {
     /// Show current policy

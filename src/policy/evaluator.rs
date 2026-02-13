@@ -1,20 +1,33 @@
+//! Policy evaluation engine.
+//!
+//! Given an HTTP request and a [`PolicyConfig`], this module determines the
+//! appropriate [`Action`] by matching against rules in order. The first matching
+//! rule wins; if no rule matches, the default action is applied.
+
 use super::config::{Action, PolicyConfig, Rule};
 
 /// Represents an HTTP request to be evaluated against policy rules.
 pub struct RequestInfo {
+    /// Target domain (e.g., `"api.github.com"`).
     pub domain: String,
+    /// HTTP method (e.g., `"GET"`, `"POST"`, `"CONNECT"`).
     pub method: String,
+    /// Request path (e.g., `"/v1/messages"`).
     pub path: String,
 }
 
-/// Result of a policy evaluation, including the action and the reason.
+/// Result of a policy evaluation.
 pub struct EvalResult {
+    /// The action to take (allow, deny, or ask).
     pub action: Action,
+    /// Human-readable reason for the decision.
     pub reason: String,
+    /// Name of the matched rule, or `None` if the default was applied.
     pub matched_rule: Option<String>,
 }
 
 /// Evaluate a request against the policy configuration.
+///
 /// Rules are matched sequentially; the first matching rule wins.
 /// If no rule matches, the default action is returned.
 pub fn evaluate(req: &RequestInfo, config: &PolicyConfig) -> EvalResult {
@@ -35,7 +48,10 @@ pub fn evaluate(req: &RequestInfo, config: &PolicyConfig) -> EvalResult {
     }
 }
 
-/// Check if a request matches a given rule.
+/// Check if a request matches a given rule by domain and optional HTTP method.
+///
+/// Domain matching supports exact match, `"*"` wildcard (matches everything),
+/// and `"*.example.com"` subdomain wildcard (matches `foo.example.com` and `example.com`).
 fn matches_rule(req: &RequestInfo, rule: &Rule) -> bool {
     // Check domain match
     let domain_matches = rule.domains.iter().any(|d| {

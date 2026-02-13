@@ -1,27 +1,46 @@
+//! Unified error handling for the AgentShield library.
+//!
+//! Uses [`thiserror`] to define a single error enum that covers all failure modes:
+//! database access, I/O, config parsing, JSON serialization, proxy operations, and
+//! notification delivery. Library code returns [`Result<T>`] which aliases
+//! `std::result::Result<T, AgentShieldError>`.
+//!
+//! The binary (`main.rs`) uses [`anyhow`] for top-level error propagation.
+
 use thiserror::Error;
 
 /// Unified error type for the AgentShield library.
+///
+/// Each variant wraps an underlying error source, enabling automatic conversion
+/// via `?` and preserving the original error chain for diagnostics.
 #[derive(Debug, Error)]
 pub enum AgentShieldError {
+    /// SQLite database error (schema init, query, insert).
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
 
+    /// File I/O error (config read, plist write, etc.).
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// TOML configuration parsing error.
     #[error("Config parse error: {0}")]
     ConfigParse(#[from] toml::de::Error),
 
+    /// JSON serialization/deserialization error.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// Proxy runtime error (connection pool, bind failure, etc.).
     #[error("Proxy error: {0}")]
     Proxy(String),
 
+    /// Notification delivery error (Telegram API failure, etc.).
     #[error("Notification error: {0}")]
     Notification(String),
 }
 
+/// Convenience type alias for `std::result::Result<T, AgentShieldError>`.
 pub type Result<T> = std::result::Result<T, AgentShieldError>;
 
 #[cfg(test)]

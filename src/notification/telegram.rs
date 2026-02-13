@@ -1,3 +1,9 @@
+//! Telegram notification backend.
+//!
+//! Sends formatted Markdown messages to a Telegram chat using the
+//! [Bot API `sendMessage`](https://core.telegram.org/bots/api#sendmessage) endpoint.
+//! The notifier reuses a single `reqwest::Client` for connection pooling.
+
 use crate::error::{AgentShieldError, Result};
 use crate::notification::{NotificationEvent, Notifier, format_message};
 
@@ -5,10 +11,12 @@ use crate::notification::{NotificationEvent, Notifier, format_message};
 pub struct TelegramNotifier {
     bot_token: String,
     chat_id: String,
+    /// Reusable HTTP client for connection pooling.
     client: reqwest::Client,
 }
 
 impl TelegramNotifier {
+    /// Create a new Telegram notifier with the given bot token and chat ID.
     pub fn new(bot_token: String, chat_id: String) -> Self {
         Self {
             bot_token,

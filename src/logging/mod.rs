@@ -1,13 +1,25 @@
+//! SQLite-backed request logging.
+//!
+//! Every proxied request is logged to a SQLite database with its timestamp,
+//! method, domain, path, action (allow/deny/ask/system-allow), and reason.
+//! The database is accessed through an [`r2d2`] connection pool ([`DbPool`])
+//! for thread-safe concurrent writes from async tasks.
+//!
+//! The [`export`] submodule provides JSON and CSV export of all logs.
+
 pub mod export;
 
 use rusqlite::Connection;
 
 use crate::error::Result;
 
-/// Connection pool type alias for SQLite.
+/// SQLite connection pool type alias (r2d2 + r2d2-sqlite).
 pub type DbPool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
 
-/// Open a connection pool for the given database path.
+/// Open a connection pool for the given database file path.
+///
+/// Creates the database and `requests` table if they don't exist.
+/// The pool is configured with a maximum of 4 connections.
 pub fn open_pool(path: &std::path::Path) -> Result<DbPool> {
     let manager = r2d2_sqlite::SqliteConnectionManager::file(path);
     let pool = r2d2::Pool::builder()
@@ -35,15 +47,22 @@ pub fn open_memory_pool() -> Result<DbPool> {
     Ok(pool)
 }
 
-/// A single logged request record.
+/// A single logged request record stored in the `requests` table.
 #[derive(Debug, Clone)]
 pub struct RequestLog {
+    /// Auto-incremented row ID (`None` for new records before insert).
     pub id: Option<i64>,
+    /// ISO 8601 timestamp (e.g., `"2026-02-12T10:00:00Z"`).
     pub timestamp: String,
+    /// HTTP method (e.g., `"GET"`, `"POST"`, `"CONNECT"`).
     pub method: String,
+    /// Target domain (e.g., `"api.github.com"`).
     pub domain: String,
+    /// Request path (e.g., `"/v1/messages"`).
     pub path: String,
+    /// Decision taken: `"allow"`, `"deny"`, `"ask"`, or `"system-allow"`.
     pub action: String,
+    /// Human-readable reason for the decision.
     pub reason: String,
 }
 
