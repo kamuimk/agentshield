@@ -134,9 +134,16 @@ async fn handle_connection(
 
 /// Send an ASK request through the channel and wait for the response.
 /// Returns true if allowed, false if denied. Defaults to deny on timeout or error.
-async fn ask_and_wait(ctx: &ConnectionContext, domain: &str, method: &str, path: &str) -> bool {
+async fn ask_and_wait(
+    ctx: &ConnectionContext,
+    domain: &str,
+    method: &str,
+    path: &str,
+    body: Option<String>,
+) -> bool {
     if let Some(ref tx) = ctx.ask_tx {
-        let (req, rx) = AskRequest::new(domain.to_string(), method.to_string(), path.to_string());
+        let (req, rx) =
+            AskRequest::new(domain.to_string(), method.to_string(), path.to_string(), body);
         if tx.send(req).await.is_ok() {
             // Wait up to 30 seconds for a response
             match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
@@ -222,7 +229,7 @@ async fn handle_connect(
             }
             Action::Ask => {
                 info!("ASK CONNECT to {} - {}", target, result.reason);
-                let allowed = ask_and_wait(ctx, domain, "CONNECT", "/").await;
+                let allowed = ask_and_wait(ctx, domain, "CONNECT", "/", None).await;
                 if allowed {
                     log_to_db(ctx, "CONNECT", domain, "/", "allow", "approved via ASK");
                 } else {
@@ -368,7 +375,9 @@ async fn handle_http_request(
             }
             Action::Ask => {
                 info!("ASK {} {} - {}", method, uri, result.reason);
-                let allowed = ask_and_wait(ctx, &host, method, &path).await;
+                let body_str = extract_body(raw_request)
+                    .and_then(|b| String::from_utf8(b.to_vec()).ok());
+                let allowed = ask_and_wait(ctx, &host, method, &path, body_str).await;
                 if allowed {
                     log_to_db(ctx, method, &host, &path, "allow", "approved via ASK");
                 } else {

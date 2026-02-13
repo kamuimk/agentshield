@@ -103,7 +103,7 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
                 method: ask_req.method.clone(),
                 domain: ask_req.domain.clone(),
                 path: ask_req.path.clone(),
-                body: None,
+                body: ask_req.body.clone(),
             };
             let mut reader = stdin.lock();
             let mut writer = stdout.lock();

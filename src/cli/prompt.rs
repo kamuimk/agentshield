@@ -55,19 +55,27 @@ pub struct AskRequest {
     pub method: String,
     /// Request path.
     pub path: String,
+    /// Optional request body for inspection (HTTP only; `None` for CONNECT).
+    pub body: Option<String>,
     /// Channel to send the approval decision back to the proxy.
     response_tx: oneshot::Sender<bool>,
 }
 
 impl AskRequest {
     /// Create a new ASK request and return the receiver for the response.
-    pub fn new(domain: String, method: String, path: String) -> (Self, oneshot::Receiver<bool>) {
+    pub fn new(
+        domain: String,
+        method: String,
+        path: String,
+        body: Option<String>,
+    ) -> (Self, oneshot::Receiver<bool>) {
         let (tx, rx) = oneshot::channel();
         (
             Self {
                 domain,
                 method,
                 path,
+                body,
                 response_tx: tx,
             },
             rx,
@@ -297,6 +305,29 @@ default = "deny"
         handle_inspect(&req, &mut output).unwrap();
         let output_str = String::from_utf8(output).unwrap();
         assert!(output_str.contains("test PR"));
+    }
+
+    #[test]
+    fn ask_request_with_body() {
+        let (req, _rx) = AskRequest::new(
+            "api.github.com".into(),
+            "POST".into(),
+            "/repos".into(),
+            Some("{\"title\":\"PR\"}".into()),
+        );
+        assert_eq!(req.domain, "api.github.com");
+        assert_eq!(req.body, Some("{\"title\":\"PR\"}".into()));
+    }
+
+    #[test]
+    fn ask_request_without_body() {
+        let (req, _rx) = AskRequest::new(
+            "example.com".into(),
+            "CONNECT".into(),
+            "/".into(),
+            None,
+        );
+        assert_eq!(req.body, None);
     }
 
     #[test]
