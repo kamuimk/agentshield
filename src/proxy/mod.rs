@@ -21,6 +21,7 @@ use crate::cli::prompt::AskRequest;
 use crate::dlp::DlpScanner;
 use crate::notification::Notifier;
 use crate::policy::config::PolicyConfig;
+use connect::ConnectionContext;
 
 /// The main proxy server, configured via builder methods.
 ///
@@ -100,14 +101,16 @@ impl ProxyServer {
         let local_addr = listener.local_addr()?;
         info!("AgentShield proxy listening on {}", local_addr);
 
-        let policy = self.policy.clone();
-        let db = self.db.clone();
-        let ask_tx = self.ask_tx.clone();
-        let dlp = self.dlp_scanner.clone();
-        let allowlist = self.system_allowlist.clone();
-        let notifier = self.notifier.clone();
+        let ctx = Arc::new(ConnectionContext {
+            policy: self.policy.clone(),
+            db: self.db.clone(),
+            ask_tx: self.ask_tx.clone(),
+            dlp_scanner: self.dlp_scanner.clone(),
+            system_allowlist: self.system_allowlist.clone(),
+            notifier: self.notifier.clone(),
+        });
         tokio::spawn(async move {
-            connect::accept_loop(listener, policy, db, ask_tx, dlp, allowlist, notifier).await;
+            connect::accept_loop(listener, ctx).await;
         });
 
         Ok(local_addr)

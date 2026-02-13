@@ -25,38 +25,36 @@ use crate::policy::config::{Action, PolicyConfig};
 use crate::policy::evaluator::{self, RequestInfo};
 use std::sync::Arc;
 
+/// Shared context for all connection handlers, consolidating the various
+/// optional components that each handler needs access to.
+///
+/// Created once in [`ProxyServer::start()`](super::ProxyServer::start) and
+/// shared via `Arc` across all spawned connection tasks.
+#[derive(Clone)]
+pub struct ConnectionContext {
+    /// Policy configuration for request evaluation.
+    pub policy: Option<Arc<PolicyConfig>>,
+    /// SQLite connection pool for request logging.
+    pub db: Option<DbPool>,
+    /// Channel for sending ASK prompts to the CLI handler.
+    pub ask_tx: Option<mpsc::Sender<AskRequest>>,
+    /// DLP scanner for inspecting HTTP request bodies.
+    pub dlp_scanner: Option<Arc<dyn DlpScanner>>,
+    /// Domains that bypass policy and DLP evaluation.
+    pub system_allowlist: Option<Arc<Vec<String>>>,
+    /// Notification backend for deny/DLP alerts.
+    pub notifier: Option<Arc<dyn Notifier>>,
+}
+
 /// Main accept loop: accept incoming connections and handle them.
-pub async fn accept_loop(
-    listener: TcpListener,
-    policy: Option<Arc<PolicyConfig>>,
-    db: Option<DbPool>,
-    ask_tx: Option<mpsc::Sender<AskRequest>>,
-    dlp_scanner: Option<Arc<dyn DlpScanner>>,
-    system_allowlist: Option<Arc<Vec<String>>>,
-    notifier: Option<Arc<dyn Notifier>>,
-) {
+pub async fn accept_loop(listener: TcpListener, ctx: Arc<ConnectionContext>) {
     loop {
         match listener.accept().await {
             Ok((stream, peer_addr)) => {
                 info!("New connection from {}", peer_addr);
-                let policy = policy.clone();
-                let db = db.clone();
-                let ask_tx = ask_tx.clone();
-                let dlp = dlp_scanner.clone();
-                let allowlist = system_allowlist.clone();
-                let notifier = notifier.clone();
+                let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(
-                        stream,
-                        policy.as_deref(),
-                        db.as_ref(),
-                        ask_tx.as_ref(),
-                        dlp.as_ref(),
-                        allowlist.as_deref(),
-                        &notifier,
-                    )
-                    .await
-                    {
+                    if let Err(e) = handle_connection(stream, &ctx).await {
                         error!("Error handling connection from {}: {}", peer_addr, e);
                     }
                 });
@@ -69,15 +67,8 @@ pub async fn accept_loop(
 }
 
 /// Log a request to the database if a DB pool is available.
-fn log_to_db(
-    db: Option<&DbPool>,
-    method: &str,
-    domain: &str,
-    path: &str,
-    action: &str,
-    reason: &str,
-) {
-    if let Some(pool) = db {
+fn log_to_db(ctx: &ConnectionContext, method: &str, domain: &str, path: &str, action: &str, reason: &str) {
+    if let Some(ref pool) = ctx.db {
         match pool.get() {
             Ok(conn) => {
                 let log = logging::RequestLog {
@@ -101,8 +92,8 @@ fn log_to_db(
 }
 
 /// Fire-and-forget notification: spawn a task that won't block the proxy.
-fn notify_event(notifier: &Option<Arc<dyn Notifier>>, event: NotificationEvent) {
-    if let Some(n) = notifier {
+fn notify_event(ctx: &ConnectionContext, event: NotificationEvent) {
+    if let Some(ref n) = ctx.notifier {
         let n = n.clone();
         tokio::spawn(async move {
             if let Err(e) = n.notify(&event).await {
@@ -116,12 +107,7 @@ fn notify_event(notifier: &Option<Arc<dyn Notifier>>, event: NotificationEvent) 
 /// dispatching to [`handle_connect`] (HTTPS) or [`handle_http_request`] (HTTP).
 async fn handle_connection(
     mut client: TcpStream,
-    policy: Option<&PolicyConfig>,
-    db: Option<&DbPool>,
-    ask_tx: Option<&mpsc::Sender<AskRequest>>,
-    dlp_scanner: Option<&Arc<dyn DlpScanner>>,
-    system_allowlist: Option<&Vec<String>>,
-    notifier: &Option<Arc<dyn Notifier>>,
+    ctx: &ConnectionContext,
 ) -> crate::error::Result<()> {
     let mut buf = vec![0u8; 8192];
     let n = client.read(&mut buf).await?;
@@ -133,40 +119,16 @@ async fn handle_connection(
     let first_line = request.lines().next().unwrap_or("");
 
     if first_line.starts_with("CONNECT ") {
-        handle_connect(
-            &mut client,
-            first_line,
-            policy,
-            db,
-            ask_tx,
-            system_allowlist,
-            notifier,
-        )
-        .await
+        handle_connect(&mut client, first_line, ctx).await
     } else {
-        handle_http_request(
-            &mut client,
-            &buf[..n],
-            policy,
-            db,
-            ask_tx,
-            dlp_scanner,
-            system_allowlist,
-            notifier,
-        )
-        .await
+        handle_http_request(&mut client, &buf[..n], ctx).await
     }
 }
 
 /// Send an ASK request through the channel and wait for the response.
 /// Returns true if allowed, false if denied. Defaults to deny on timeout or error.
-async fn ask_and_wait(
-    ask_tx: Option<&mpsc::Sender<AskRequest>>,
-    domain: &str,
-    method: &str,
-    path: &str,
-) -> bool {
-    if let Some(tx) = ask_tx {
+async fn ask_and_wait(ctx: &ConnectionContext, domain: &str, method: &str, path: &str) -> bool {
+    if let Some(ref tx) = ctx.ask_tx {
         let (req, rx) = AskRequest::new(domain.to_string(), method.to_string(), path.to_string());
         if tx.send(req).await.is_ok() {
             // Wait up to 30 seconds for a response
@@ -189,11 +151,7 @@ async fn ask_and_wait(
 async fn handle_connect(
     client: &mut TcpStream,
     first_line: &str,
-    policy: Option<&PolicyConfig>,
-    db: Option<&DbPool>,
-    ask_tx: Option<&mpsc::Sender<AskRequest>>,
-    system_allowlist: Option<&Vec<String>>,
-    notifier: &Option<Arc<dyn Notifier>>,
+    ctx: &ConnectionContext,
 ) -> crate::error::Result<()> {
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     if parts.len() < 2 {
@@ -208,27 +166,20 @@ async fn handle_connect(
     // Validate domain to prevent header injection
     if !validate_domain(domain) {
         warn!("Invalid domain in CONNECT: {}", domain);
-        log_to_db(db, "CONNECT", domain, "/", "deny", "invalid domain");
+        log_to_db(ctx, "CONNECT", domain, "/", "deny", "invalid domain");
         let response = "HTTP/1.1 400 Bad Request\r\nX-AgentShield-Reason: invalid domain\r\n\r\n";
         client.write_all(response.as_bytes()).await?;
         return Ok(());
     }
 
     // System allowlist bypass: skip policy evaluation for internal services
-    let allowlist_slice = system_allowlist.map(|v| v.as_slice());
+    let allowlist_slice = ctx.system_allowlist.as_ref().map(|v| v.as_slice());
     if is_system_allowed(domain, allowlist_slice) {
         info!("SYSTEM-ALLOW CONNECT to {} (allowlist)", target);
-        log_to_db(
-            db,
-            "CONNECT",
-            domain,
-            "/",
-            "system-allow",
-            "system allowlist",
-        );
+        log_to_db(ctx, "CONNECT", domain, "/", "system-allow", "system allowlist");
     }
     // Policy evaluation for CONNECT (domain-level only)
-    else if let Some(policy) = policy {
+    else if let Some(ref policy) = ctx.policy {
         let req_info = RequestInfo {
             domain: domain.to_string(),
             method: "CONNECT".to_string(),
@@ -238,9 +189,9 @@ async fn handle_connect(
         match result.action {
             Action::Deny => {
                 warn!("BLOCKED CONNECT to {} - {}", target, result.reason);
-                log_to_db(db, "CONNECT", domain, "/", "deny", &result.reason);
+                log_to_db(ctx, "CONNECT", domain, "/", "deny", &result.reason);
                 notify_event(
-                    notifier,
+                    ctx,
                     NotificationEvent::RequestDenied {
                         domain: domain.to_string(),
                         method: "CONNECT".to_string(),
@@ -257,13 +208,13 @@ async fn handle_connect(
             }
             Action::Ask => {
                 info!("ASK CONNECT to {} - {}", target, result.reason);
-                let allowed = ask_and_wait(ask_tx, domain, "CONNECT", "/").await;
+                let allowed = ask_and_wait(ctx, domain, "CONNECT", "/").await;
                 if allowed {
-                    log_to_db(db, "CONNECT", domain, "/", "allow", "approved via ASK");
+                    log_to_db(ctx, "CONNECT", domain, "/", "allow", "approved via ASK");
                 } else {
-                    log_to_db(db, "CONNECT", domain, "/", "deny", "denied via ASK");
+                    log_to_db(ctx, "CONNECT", domain, "/", "deny", "denied via ASK");
                     notify_event(
-                        notifier,
+                        ctx,
                         NotificationEvent::RequestDenied {
                             domain: domain.to_string(),
                             method: "CONNECT".to_string(),
@@ -281,7 +232,7 @@ async fn handle_connect(
             }
             Action::Allow => {
                 info!("ALLOWED CONNECT to {} - {}", target, result.reason);
-                log_to_db(db, "CONNECT", domain, "/", "allow", &result.reason);
+                log_to_db(ctx, "CONNECT", domain, "/", "allow", &result.reason);
             }
         }
     }
@@ -323,16 +274,10 @@ async fn handle_connect(
 /// Unlike CONNECT tunneling, plain HTTP requests expose the full request body,
 /// enabling DLP scanning for secrets and PII before forwarding. Critical DLP
 /// findings block the request; non-critical findings are logged as warnings.
-#[allow(clippy::too_many_arguments)]
 async fn handle_http_request(
     client: &mut TcpStream,
     raw_request: &[u8],
-    policy: Option<&PolicyConfig>,
-    db: Option<&DbPool>,
-    ask_tx: Option<&mpsc::Sender<AskRequest>>,
-    dlp_scanner: Option<&Arc<dyn DlpScanner>>,
-    system_allowlist: Option<&Vec<String>>,
-    notifier: &Option<Arc<dyn Notifier>>,
+    ctx: &ConnectionContext,
 ) -> crate::error::Result<()> {
     let request_str = String::from_utf8_lossy(raw_request);
     let first_line = request_str.lines().next().unwrap_or("");
@@ -352,7 +297,7 @@ async fn handle_http_request(
     // Validate domain to prevent header injection
     if !validate_domain(&host) {
         warn!("Invalid domain in HTTP request: {}", host);
-        log_to_db(db, method, &host, &path, "deny", "invalid domain");
+        log_to_db(ctx, method, &host, &path, "deny", "invalid domain");
         let response = "HTTP/1.1 400 Bad Request\r\nX-AgentShield-Reason: invalid domain\r\n\r\n";
         client.write_all(response.as_bytes()).await?;
         return Ok(());
@@ -363,7 +308,7 @@ async fn handle_http_request(
     // SECURITY NOTE: Domains on the system allowlist bypass both policy and DLP checks.
     // Only add trusted internal services (e.g., notification endpoints). Adding external
     // domains here disables all outbound protection for that destination.
-    let allowlist_slice = system_allowlist.map(|v| v.as_slice());
+    let allowlist_slice = ctx.system_allowlist.as_ref().map(|v| v.as_slice());
     let system_allowed = is_system_allowed(&host, allowlist_slice);
     if system_allowed {
         info!(
@@ -371,7 +316,7 @@ async fn handle_http_request(
             method, uri
         );
         log_to_db(
-            db,
+            ctx,
             method,
             &host,
             &path,
@@ -380,7 +325,7 @@ async fn handle_http_request(
         );
     }
     // Policy evaluation for HTTP
-    else if let Some(policy) = policy {
+    else if let Some(ref policy) = ctx.policy {
         let req_info = RequestInfo {
             domain: host.clone(),
             method: method.to_string(),
@@ -390,9 +335,9 @@ async fn handle_http_request(
         match result.action {
             Action::Deny => {
                 warn!("BLOCKED {} {} - {}", method, uri, result.reason);
-                log_to_db(db, method, &host, &path, "deny", &result.reason);
+                log_to_db(ctx, method, &host, &path, "deny", &result.reason);
                 notify_event(
-                    notifier,
+                    ctx,
                     NotificationEvent::RequestDenied {
                         domain: host.clone(),
                         method: method.to_string(),
@@ -409,11 +354,11 @@ async fn handle_http_request(
             }
             Action::Ask => {
                 info!("ASK {} {} - {}", method, uri, result.reason);
-                let allowed = ask_and_wait(ask_tx, &host, method, &path).await;
+                let allowed = ask_and_wait(ctx, &host, method, &path).await;
                 if allowed {
-                    log_to_db(db, method, &host, &path, "allow", "approved via ASK");
+                    log_to_db(ctx, method, &host, &path, "allow", "approved via ASK");
                 } else {
-                    log_to_db(db, method, &host, &path, "deny", "denied via ASK");
+                    log_to_db(ctx, method, &host, &path, "deny", "denied via ASK");
                     let response = format!(
                         "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: {}\r\n\r\n",
                         "denied via ASK prompt"
@@ -424,7 +369,7 @@ async fn handle_http_request(
             }
             Action::Allow => {
                 info!("ALLOWED {} {} - {}", method, uri, result.reason);
-                log_to_db(db, method, &host, &path, "allow", &result.reason);
+                log_to_db(ctx, method, &host, &path, "allow", &result.reason);
             }
         }
     }
@@ -432,7 +377,7 @@ async fn handle_http_request(
     // DLP scan: check request body for sensitive data before forwarding.
     // System-allowed domains bypass DLP (they already bypass policy above).
     if !system_allowed {
-        if let Some(scanner) = dlp_scanner {
+        if let Some(ref scanner) = ctx.dlp_scanner {
             if let Some(body) = extract_body(raw_request) {
                 let findings = scanner.scan(body);
                 let has_critical = findings.iter().any(|f| f.severity == Severity::Critical);
@@ -447,11 +392,11 @@ async fn handle_http_request(
                             f.matched_text
                         );
                     }
-                    log_to_db(db, method, &host, &path, "deny", "DLP: critical finding");
+                    log_to_db(ctx, method, &host, &path, "deny", "DLP: critical finding");
                     // Notify about first critical finding
                     if let Some(f) = findings.iter().find(|f| f.severity == Severity::Critical) {
                         notify_event(
-                            notifier,
+                            ctx,
                             NotificationEvent::DlpFinding {
                                 domain: host.clone(),
                                 method: method.to_string(),
