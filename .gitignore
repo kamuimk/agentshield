@@ -1,3 +1,7 @@
 /target
 .env
 *.db
+.DS_Store
+.serena/
+agentshield.toml
+CODE_REVIEW.md
