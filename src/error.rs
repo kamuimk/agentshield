@@ -35,6 +35,10 @@ pub enum AgentShieldError {
     #[error("Proxy error: {0}")]
     Proxy(String),
 
+    /// Missing environment variable during config substitution.
+    #[error("Config error: undefined environment variable `{0}`")]
+    ConfigEnvVar(String),
+
     /// Notification delivery error (Telegram API failure, etc.).
     #[error("Notification error: {0}")]
     Notification(String),

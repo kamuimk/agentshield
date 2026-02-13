@@ -21,9 +21,10 @@
 
 use std::path::Path;
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{AgentShieldError, Result};
 
 /// The action to take when a request matches a policy rule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,9 +135,47 @@ pub struct AppConfig {
 
 impl AppConfig {
     /// Load and parse the configuration from a TOML file at the given path.
+    ///
+    /// Before parsing, `${VAR}` and `$VAR` placeholders in the TOML text are
+    /// replaced with the corresponding environment variable values. An error is
+    /// returned if a referenced variable is not set.
     pub fn load_from_path(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
+        let content = substitute_env_vars(&content)?;
         let config: AppConfig = toml::from_str(&content)?;
         Ok(config)
     }
+}
+
+/// Replace `${VAR_NAME}` and `$VAR_NAME` placeholders with environment variable values.
+///
+/// Returns an error containing the variable name if the variable is not set.
+fn substitute_env_vars(input: &str) -> Result<String> {
+    // Match ${VAR_NAME} (braces form)
+    let re_braces = Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").unwrap();
+    // Match $VAR_NAME (no braces, uppercase + underscore only to avoid false positives)
+    let re_bare = Regex::new(r"\$([A-Z_][A-Z0-9_]*)").unwrap();
+
+    let mut result = input.to_string();
+
+    // First pass: ${VAR} form
+    for cap in re_braces.captures_iter(input) {
+        let var_name = &cap[1];
+        let value = std::env::var(var_name)
+            .map_err(|_| AgentShieldError::ConfigEnvVar(var_name.to_string()))?;
+        result = result.replace(&cap[0], &value);
+    }
+
+    // Second pass: $VAR form (on already-substituted string, but only matches remaining $VAR)
+    let intermediate = result.clone();
+    for cap in re_bare.captures_iter(&intermediate) {
+        let full_match = &cap[0];
+        // Skip if this was part of a ${...} that was already handled (shouldn't happen after replacement)
+        let var_name = &cap[1];
+        let value = std::env::var(var_name)
+            .map_err(|_| AgentShieldError::ConfigEnvVar(var_name.to_string()))?;
+        result = result.replace(full_match, &value);
+    }
+
+    Ok(result)
 }

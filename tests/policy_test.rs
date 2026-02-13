@@ -179,3 +179,121 @@ fn config_load_from_file() {
     let config = AppConfig::load_from_path(&config_path).unwrap();
     assert_eq!(config.proxy.listen, "127.0.0.1:18080");
 }
+
+#[test]
+fn env_var_substitution_braces() {
+    use std::io::Write;
+    // SAFETY: test-only, single-threaded access to these unique env var names
+    unsafe {
+        std::env::set_var("AGENTSHIELD_TEST_TOKEN", "my-bot-token-123");
+        std::env::set_var("AGENTSHIELD_TEST_CHAT", "-100999");
+    }
+
+    let toml_str = r#"
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+[notification]
+enabled = true
+
+[notification.telegram]
+bot_token = "${AGENTSHIELD_TEST_TOKEN}"
+chat_id = "${AGENTSHIELD_TEST_CHAT}"
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("agentshield.toml");
+    let mut file = std::fs::File::create(&config_path).unwrap();
+    write!(file, "{}", toml_str).unwrap();
+
+    let config = AppConfig::load_from_path(&config_path).unwrap();
+    let tg = config.notification.unwrap().telegram.unwrap();
+    assert_eq!(tg.bot_token, "my-bot-token-123");
+    assert_eq!(tg.chat_id, "-100999");
+
+    // SAFETY: test cleanup
+    unsafe {
+        std::env::remove_var("AGENTSHIELD_TEST_TOKEN");
+        std::env::remove_var("AGENTSHIELD_TEST_CHAT");
+    }
+}
+
+#[test]
+fn env_var_substitution_no_braces() {
+    use std::io::Write;
+    // SAFETY: test-only, single-threaded access to unique env var name
+    unsafe {
+        std::env::set_var("AGENTSHIELD_TEST_LISTEN", "0.0.0.0:9999");
+    }
+
+    let toml_str = r#"
+[proxy]
+listen = "$AGENTSHIELD_TEST_LISTEN"
+mode = "transparent"
+
+[policy]
+default = "deny"
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("agentshield.toml");
+    let mut file = std::fs::File::create(&config_path).unwrap();
+    write!(file, "{}", toml_str).unwrap();
+
+    let config = AppConfig::load_from_path(&config_path).unwrap();
+    assert_eq!(config.proxy.listen, "0.0.0.0:9999");
+
+    // SAFETY: test cleanup
+    unsafe {
+        std::env::remove_var("AGENTSHIELD_TEST_LISTEN");
+    }
+}
+
+#[test]
+fn env_var_missing_returns_error() {
+    use std::io::Write;
+    // SAFETY: test-only, ensure var does NOT exist
+    unsafe {
+        std::env::remove_var("AGENTSHIELD_NONEXISTENT_VAR");
+    }
+
+    let toml_str = r#"
+[proxy]
+listen = "${AGENTSHIELD_NONEXISTENT_VAR}"
+mode = "transparent"
+
+[policy]
+default = "deny"
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("agentshield.toml");
+    let mut file = std::fs::File::create(&config_path).unwrap();
+    write!(file, "{}", toml_str).unwrap();
+
+    let result = AppConfig::load_from_path(&config_path);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("AGENTSHIELD_NONEXISTENT_VAR"));
+}
+
+#[test]
+fn no_env_var_syntax_passes_unchanged() {
+    use std::io::Write;
+    let toml_str = r#"
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("agentshield.toml");
+    let mut file = std::fs::File::create(&config_path).unwrap();
+    write!(file, "{}", toml_str).unwrap();
+
+    let config = AppConfig::load_from_path(&config_path).unwrap();
+    assert_eq!(config.proxy.listen, "127.0.0.1:18080");
+}
