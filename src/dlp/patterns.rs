@@ -40,20 +40,25 @@ impl RegexScanner {
 
         // === AI Provider API Keys ===
 
-        // OpenAI API key (sk-..., sk-proj-..., sk-svcacct-...)
-        patterns.insert(
-            "openai-api-key".to_string(),
-            PatternDef {
-                regex: Regex::new(r"sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}").unwrap(),
-                severity: Severity::Critical,
-            },
-        );
-
-        // Anthropic API key (sk-ant-api03-...)
+        // Anthropic API key (sk-ant-api03-..., sk-ant-admin-...)
+        // IMPORTANT: Must be inserted before OpenAI to allow scan() to find both,
+        // but the OpenAI regex explicitly excludes the sk-ant- prefix.
         patterns.insert(
             "anthropic-api-key".to_string(),
             PatternDef {
                 regex: Regex::new(r"sk-ant-(?:api03|admin)[A-Za-z0-9_-]{20,}").unwrap(),
+                severity: Severity::Critical,
+            },
+        );
+
+        // OpenAI API key (sk-..., sk-proj-..., sk-svcacct-..., sk-None-..., sk-admin-...)
+        // Note: sk-ant- prefix (Anthropic) is excluded via post-processing in scan(),
+        // since Rust regex does not support lookahead.
+        patterns.insert(
+            "openai-api-key".to_string(),
+            PatternDef {
+                regex: Regex::new(r"sk-(?:proj-|svcacct-|None-|admin-)?[A-Za-z0-9_-]{20,}")
+                    .unwrap(),
                 severity: Severity::Critical,
             },
         );
@@ -112,20 +117,21 @@ impl RegexScanner {
             },
         );
 
-        // Together AI API key
+        // Together AI API key (context-based, alphanumeric 32+)
         patterns.insert(
             "together-api-key".to_string(),
             PatternDef {
-                regex: Regex::new(r##"(?i)(?:together[_-]?(?:api[_-]?)?key)\s*[:=]\s*["']?([A-Fa-f0-9]{64})["']?"##).unwrap(),
+                regex: Regex::new(r##"(?i)(?:together[_-]?(?:api[_-]?)?key)\s*[:=]\s*["']?([A-Za-z0-9]{32,})["']?"##).unwrap(),
                 severity: Severity::Critical,
             },
         );
 
-        // Fireworks AI API key (fw_...)
+        // Fireworks AI API key (context-based, no confirmed prefix)
+        // Changed from fw_ prefix to context-based detection (Option A from PRD)
         patterns.insert(
             "fireworks-api-key".to_string(),
             PatternDef {
-                regex: Regex::new(r"fw_[A-Za-z0-9]{20,}").unwrap(),
+                regex: Regex::new(r##"(?i)(?:fireworks[_-]?(?:api[_-]?)?key)\s*[:=]\s*["']?([A-Za-z0-9_-]{32,})["']?"##).unwrap(),
                 severity: Severity::Critical,
             },
         );
@@ -213,8 +219,15 @@ impl DlpScanner for RegexScanner {
         let mut findings = Vec::new();
         for (name, def) in &self.patterns {
             for mat in def.regex.find_iter(text) {
-                // Redact the matched text: show first 4 and last 4 chars
                 let matched = mat.as_str();
+
+                // Exclude sk-ant- matches from the OpenAI pattern (Anthropic keys).
+                // Rust regex lacks lookahead, so we filter here instead.
+                if name == "openai-api-key" && matched.starts_with("sk-ant-") {
+                    continue;
+                }
+
+                // Redact the matched text: show first 4 and last 4 chars
                 let redacted = if matched.len() > 12 {
                     format!("{}...{}", &matched[..4], &matched[matched.len() - 4..])
                 } else {
@@ -431,6 +444,7 @@ mod tests {
     #[test]
     fn detects_fireworks_api_key() {
         let scanner = RegexScanner::new();
+        // Context-based: FIREWORKS_API_KEY=<value>
         let payload = b"FIREWORKS_API_KEY=fw_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
         let findings = scanner.scan(payload);
         let finding = findings
@@ -473,6 +487,76 @@ mod tests {
             .iter()
             .find(|f| f.pattern_name == "openai-api-key")
             .expect("should detect openai project api key");
+        assert_eq!(finding.severity, Severity::Critical);
+    }
+
+    // === R5: Updated pattern tests ===
+
+    #[test]
+    fn detects_openai_none_key() {
+        let scanner = RegexScanner::new();
+        let payload = b"Authorization: Bearer sk-None-abcdefghijklmnopqrstuvwxyz1234567890";
+        let findings = scanner.scan(payload);
+        let finding = findings
+            .iter()
+            .find(|f| f.pattern_name == "openai-api-key")
+            .expect("should detect openai sk-None- key");
+        assert_eq!(finding.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn detects_openai_admin_key() {
+        let scanner = RegexScanner::new();
+        let payload = b"Authorization: Bearer sk-admin-abcdefghijklmnopqrstuvwxyz1234567890";
+        let findings = scanner.scan(payload);
+        let finding = findings
+            .iter()
+            .find(|f| f.pattern_name == "openai-api-key")
+            .expect("should detect openai sk-admin- key");
+        assert_eq!(finding.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn anthropic_key_not_detected_as_openai() {
+        let scanner = RegexScanner::new();
+        let payload = b"x-api-key: sk-ant-admin01-abcdefghijklmnopqrstuvwxyz1234567890";
+        let findings = scanner.scan(payload);
+        // Should be detected as anthropic, NOT openai
+        let anthropic = findings
+            .iter()
+            .find(|f| f.pattern_name == "anthropic-api-key");
+        assert!(anthropic.is_some(), "should detect as anthropic key");
+        // Should NOT match openai pattern (sk-ant- prefix is anthropic-specific)
+        let openai = findings
+            .iter()
+            .find(|f| f.pattern_name == "openai-api-key");
+        assert!(
+            openai.is_none(),
+            "sk-ant-admin should NOT be detected as openai key"
+        );
+    }
+
+    #[test]
+    fn detects_fireworks_context_key() {
+        let scanner = RegexScanner::new();
+        let payload = b"FIREWORKS_API_KEY=abcdefghijklmnopqrstuvwxyz123456789012345678";
+        let findings = scanner.scan(payload);
+        let finding = findings
+            .iter()
+            .find(|f| f.pattern_name == "fireworks-api-key")
+            .expect("should detect fireworks context-based key");
+        assert_eq!(finding.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn detects_together_alphanumeric_key() {
+        let scanner = RegexScanner::new();
+        let payload = b"TOGETHER_API_KEY=AbCdEfGhIjKlMnOpQrStUvWxYz012345678901";
+        let findings = scanner.scan(payload);
+        let finding = findings
+            .iter()
+            .find(|f| f.pattern_name == "together-api-key")
+            .expect("should detect together alphanumeric key");
         assert_eq!(finding.severity, Severity::Critical);
     }
 }
