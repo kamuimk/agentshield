@@ -187,22 +187,20 @@ fn cmd_stop() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Display a summary of logged requests (total, allowed, denied, asked).
+/// Display a summary of logged requests using SQL aggregation.
 fn cmd_status() -> anyhow::Result<()> {
     let db = db_path();
     if db.exists() {
         let conn = logging::open_db(&db)?;
-        let total_logs = logging::query_recent(&conn, usize::MAX)?;
-        let allowed = total_logs.iter().filter(|l| l.action == "allow").count();
-        let denied = total_logs.iter().filter(|l| l.action == "deny").count();
-        let asked = total_logs.iter().filter(|l| l.action == "ask").count();
+        let stats = logging::query_stats(&conn)?;
 
         println!("AgentShield Status");
         println!("──────────────────");
-        println!("Total requests: {}", total_logs.len());
-        println!("  Allowed: {}", allowed);
-        println!("  Denied:  {}", denied);
-        println!("  Asked:   {}", asked);
+        println!("Total requests: {}", stats.total);
+        println!("  Allowed:        {}", stats.allowed);
+        println!("  Denied:         {}", stats.denied);
+        println!("  Asked:          {}", stats.asked);
+        println!("  System-allowed: {}", stats.system_allowed);
     } else {
         println!("AgentShield Status: No log database found.");
         println!("Run 'agentshield start' to begin monitoring.");

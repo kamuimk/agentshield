@@ -127,6 +127,48 @@ pub fn query_recent(conn: &Connection, limit: usize) -> Result<Vec<RequestLog>> 
     Ok(logs)
 }
 
+/// Aggregated request statistics from the `requests` table.
+#[derive(Debug, Clone, Default)]
+pub struct RequestStats {
+    /// Total number of logged requests.
+    pub total: usize,
+    /// Requests allowed by policy.
+    pub allowed: usize,
+    /// Requests denied by policy or DLP.
+    pub denied: usize,
+    /// Requests that triggered an ASK prompt.
+    pub asked: usize,
+    /// Requests bypassed via system allowlist.
+    pub system_allowed: usize,
+}
+
+/// Query aggregated request counts grouped by action.
+///
+/// Uses SQL `COUNT(*) GROUP BY action` for efficient aggregation without
+/// loading all rows into memory.
+pub fn query_stats(conn: &Connection) -> Result<RequestStats> {
+    let mut stmt = conn.prepare("SELECT action, COUNT(*) FROM requests GROUP BY action")?;
+    let rows = stmt.query_map([], |row| {
+        let action: String = row.get(0)?;
+        let count: i64 = row.get(1)?;
+        Ok((action, count as usize))
+    })?;
+
+    let mut stats = RequestStats::default();
+    for row in rows {
+        let (action, count) = row?;
+        stats.total += count;
+        match action.as_str() {
+            "allow" => stats.allowed = count,
+            "deny" => stats.denied = count,
+            "ask" => stats.asked = count,
+            "system-allow" => stats.system_allowed = count,
+            _ => {} // unknown actions still count in total
+        }
+    }
+    Ok(stats)
+}
+
 /// Open or create a SQLite database at the given path.
 pub fn open_db(path: &std::path::Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
@@ -224,6 +266,40 @@ mod tests {
         let logs = query_recent(&conn, 10).unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].domain, "mem.com");
+    }
+
+    #[test]
+    fn query_stats_mixed_entries() {
+        let conn = open_memory_db().unwrap();
+        // Insert 10 mixed entries
+        log_request(&conn, &sample_log("a.com", "GET", "allow")).unwrap();
+        log_request(&conn, &sample_log("b.com", "GET", "allow")).unwrap();
+        log_request(&conn, &sample_log("c.com", "POST", "deny")).unwrap();
+        log_request(&conn, &sample_log("d.com", "POST", "deny")).unwrap();
+        log_request(&conn, &sample_log("e.com", "POST", "deny")).unwrap();
+        log_request(&conn, &sample_log("f.com", "GET", "ask")).unwrap();
+        log_request(&conn, &sample_log("g.com", "GET", "system-allow")).unwrap();
+        log_request(&conn, &sample_log("h.com", "GET", "system-allow")).unwrap();
+        log_request(&conn, &sample_log("i.com", "GET", "allow")).unwrap();
+        log_request(&conn, &sample_log("j.com", "DELETE", "deny")).unwrap();
+
+        let stats = query_stats(&conn).unwrap();
+        assert_eq!(stats.total, 10);
+        assert_eq!(stats.allowed, 3);
+        assert_eq!(stats.denied, 4);
+        assert_eq!(stats.asked, 1);
+        assert_eq!(stats.system_allowed, 2);
+    }
+
+    #[test]
+    fn query_stats_empty_db() {
+        let conn = open_memory_db().unwrap();
+        let stats = query_stats(&conn).unwrap();
+        assert_eq!(stats.total, 0);
+        assert_eq!(stats.allowed, 0);
+        assert_eq!(stats.denied, 0);
+        assert_eq!(stats.asked, 0);
+        assert_eq!(stats.system_allowed, 0);
     }
 
     #[test]
