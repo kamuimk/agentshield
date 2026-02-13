@@ -2,141 +2,154 @@
   "master": {
     "tasks": [
       {
-        "id": 21,
+        "id": "21",
         "title": "Implement System Allowlist DLP Bypass (R1)",
         "description": "Modify handle_http_request to skip DLP scanning for system_allowlist domains and log 'policy+dlp bypass' reason",
         "details": "In connect.rs handle_http_request, add early return when system_allowed == true before DLP block (lines 396-437). Update logging to include 'policy+dlp bypass' reason for system-allow actions. Add security comment warning that system allowlist bypasses DLP protection. handle_connect already skips DLP, no changes needed.",
         "testStrategy": "Test system allowlist domain HTTP POST with API key in body -> expect 200 not 403. Test non-allowlist domain -> DLP blocks as before. Verify log contains 'policy+dlp bypass' reason.",
         "priority": "high",
         "dependencies": [],
-        "status": "pending",
-        "subtasks": []
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-13T02:57:05.296Z"
       },
       {
-        "id": 22,
+        "id": "22",
         "title": "Update DLP Patterns for OpenAI, Fireworks, Together AI (R5)",
         "description": "Update OpenAI regex to cover sk-None-, sk-admin- prefixes, implement Fireworks context-based detection, relax Together AI to alphanumeric 32+",
         "details": "OpenAI: change `sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}` to `sk-(?:proj-|svcacct-|None-|admin-)?[A-Za-z0-9_-]{20,}`. Fireworks: `(?i)(?:fireworks[_-]?(?:api[_-]?)?key)\\s*[:=]\\s*[\"']?([A-Za-z0-9_-]{32,})[\"']?`. Together AI: `[A-Za-z0-9]{32,}`. Ensure no overlap with Anthropic sk-ant-admin-.",
         "testStrategy": "Test sk-None-xxx, sk-admin-xxx detection (OpenAI). Test sk-ant-admin-xxx -> anthropic detection only. Test Fireworks context pattern. Test Together alphanumeric keys. Verify no false positives.",
         "priority": "high",
         "dependencies": [],
-        "status": "pending",
-        "subtasks": []
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-13T03:03:25.925Z"
       },
       {
-        "id": 23,
+        "id": "23",
         "title": "Implement NotificationEvent event_type() method",
         "description": "Add event_type() method to NotificationEvent enum returning deny/dlp/start/shutdown strings",
         "details": "```rust\nimpl NotificationEvent {\n    pub fn event_type(&self) -> &'static str {\n        match self {\n            Self::RequestDenied { .. } => \"deny\",\n            Self::DlpFinding { .. } => \"dlp\",\n            Self::ProxyStarted { .. } => \"start\",\n            Self::ProxyShutdown => \"shutdown\",\n        }\n    }\n}```",
         "testStrategy": "Unit test each variant returns correct string. Integration test with mock notifier verifies correct type returned.",
         "priority": "high",
         "dependencies": [],
-        "status": "pending",
-        "subtasks": []
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-13T03:05:42.612Z"
       },
       {
-        "id": 24,
+        "id": "24",
         "title": "Implement FilteredNotifier for events filtering (R2)",
         "description": "Create FilteredNotifier wrapper that filters events based on TelegramConfig.events array",
         "details": "```rust\npub struct FilteredNotifier {\n    inner: Arc<dyn Notifier>,\n    allowed_events: Vec<String>,\n}\n\nimpl FilteredNotifier {\n    pub fn new(inner: Arc<dyn Notifier>, events: Vec<String>) -> Self { ... }\n}\n\nimpl Notifier for FilteredNotifier {\n    fn notify(&self, event: &NotificationEvent) -> Result<()> {\n        if self.allowed_events.is_empty() || \n           self.allowed_events.contains(&event.event_type().to_string()) {\n            self.inner.notify(event)\n        } else {\n            Ok(())\n        }\n    }\n}``` Empty or unspecified events = all events (backward compatible).",
         "testStrategy": "events=[\"deny\"] -> DLP events filtered out. events=[\"dlp\"] -> deny events filtered. events=[] -> all events pass. MockNotifier count verification.",
         "priority": "high",
         "dependencies": [
-          23
+          "23"
         ],
-        "status": "pending",
-        "subtasks": []
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-13T03:09:56.950Z"
       },
       {
-        "id": 25,
+        "id": "25",
         "title": "Implement TOML environment variable substitution (R3)",
         "description": "Support ${ENV_VAR} and $ENV_VAR substitution in TOML config with clear error on missing vars",
         "details": "In AppConfig::load_from_path, preprocess TOML string with regex `\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}` and `\\$([A-Z_][A-Z0-9_]*)`. Use std::env::var(), fail with AgentShieldError::ConfigParse if missing. Apply to all fields (bot_token, chat_id, listen, etc.).",
         "testStrategy": "Set env vars -> correct substitution. Unset env var -> error contains var name. No ${} syntax -> passes unchanged.",
         "priority": "medium",
         "dependencies": [],
-        "status": "pending",
-        "subtasks": []
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-13T03:19:25.778Z"
       },
       {
-        "id": 26,
+        "id": "26",
         "title": "Define and implement ConnectionContext struct (R4)",
         "description": "Create ConnectionContext struct consolidating 8 handle_http_request arguments",
         "details": "```rust\n#[derive(Clone)]\npub struct ConnectionContext {\n    pub policy: Option<Arc<PolicyConfig>>,\n    pub db: Option<DbPool>,\n    pub ask_tx: Option<mpsc::Sender<AskRequest>>,\n    pub dlp_scanner: Option<Arc<dyn DlpScanner>>,\n    pub system_allowlist: Option<Arc<Vec<String>>>,\n    pub notifier: Option<Arc<dyn Notifier>>,\n}``` Use Arc<ConnectionContext> passed to all handlers. Create in ProxyServer::start().",
         "testStrategy": "Refactor all handlers to use context. Run full test suite (117+ tests) to verify no functional changes.",
         "priority": "medium",
         "dependencies": [
-          21,
-          24
+          "21",
+          "24"
         ],
-        "status": "pending",
-        "subtasks": []
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-13T03:28:39.450Z"
       },
       {
-        "id": 27,
+        "id": "27",
         "title": "Update handler signatures to use ConnectionContext",
         "description": "Refactor accept_loop, handle_connection, handle_connect, handle_http_request to use ConnectionContext",
         "details": "Replace 8 individual args with single Arc<ConnectionContext> parameter. Remove #[allow(clippy::too_many_arguments)]. Update all call sites. Ensure system_allowed access works post-R1 changes.",
         "testStrategy": "Full proxy integration tests pass. clippy passes without too_many_arguments suppression. Verify R1 DLP bypass still works.",
         "priority": "medium",
         "dependencies": [
-          21,
-          24,
-          26
+          "21",
+          "24",
+          "26"
         ],
-        "status": "pending",
-        "subtasks": []
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-13T03:28:47.869Z"
       },
       {
-        "id": 28,
+        "id": "28",
         "title": "Optimize cmd_status() with SQL aggregation (R6)",
         "description": "Replace full table load with SQL COUNT(*) GROUP BY action query",
         "details": "```rust\npub struct RequestStats {\n    pub total: usize,\n    pub allowed: usize,\n    pub denied: usize,\n    pub asked: usize,\n    pub system_allowed: usize,\n}\n\npub fn query_stats(conn: &Connection) -> Result<RequestStats> {\n    let rows: Vec<(String, i64)> = sqlx::query_as(\n        \"SELECT action, COUNT(*) as cnt FROM requests GROUP BY action\"\n    ).fetch_all(conn)?;\n    // Aggregate counts\n}```",
         "testStrategy": "Insert 10 mixed log entries -> stats match expected counts. Empty DB -> all zeros. Performance test with 10k rows.",
         "priority": "low",
         "dependencies": [],
-        "status": "pending",
-        "subtasks": []
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-13T03:32:04.510Z"
       },
       {
-        "id": 29,
+        "id": "29",
         "title": "Update Cargo.toml to v0.4.0 and run CI checks",
         "description": "Bump version, run cargo fmt/clippy/test, ensure ≥130 tests pass",
         "details": "Update Cargo.toml: version = \"0.4.0\". Run `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`. Ensure 117 existing + 13+ new tests ≥130 total. Rust 1.85+ compatible.",
         "testStrategy": "CI pipeline green. Test count verification. No clippy warnings.",
         "priority": "medium",
         "dependencies": [
-          21,
-          22,
-          24,
-          25,
-          27,
-          28
+          "21",
+          "22",
+          "24",
+          "25",
+          "27",
+          "28"
         ],
-        "status": "pending",
-        "subtasks": []
+        "status": "in-progress",
+        "subtasks": [],
+        "updatedAt": "2026-02-13T03:32:10.909Z"
       },
       {
-        "id": 30,
+        "id": "30",
         "title": "Update README.md with new features documentation",
         "description": "Document env var substitution syntax, events filtering, system allowlist DLP bypass",
         "details": "Add sections: 1) Environment variables: `${AGENTSHIELD_TELEGRAM_TOKEN}` syntax with examples. 2) Events filtering: `events = [\"deny\", \"dlp\"]` with all types. 3) System allowlist warning: DLP bypass security note. Include TOML examples.",
         "testStrategy": "Manual review: all new features documented accurately. Examples parse/validate correctly.",
         "priority": "low",
         "dependencies": [
-          21,
-          22,
-          24,
-          25
+          "21",
+          "22",
+          "24",
+          "25"
         ],
         "status": "pending",
         "subtasks": []
       }
     ],
     "metadata": {
-      "created": "2026-02-13T02:24:26.787Z",
-      "updated": "2026-02-13T02:24:26.787Z",
-      "description": "Tasks for master context"
+      "version": "1.0.0",
+      "lastModified": "2026-02-13T03:32:10.909Z",
+      "taskCount": 10,
+      "completedCount": 8,
+      "tags": [
+        "master"
+      ]
     }
   }
 }

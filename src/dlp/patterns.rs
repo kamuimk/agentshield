@@ -527,9 +527,7 @@ mod tests {
             .find(|f| f.pattern_name == "anthropic-api-key");
         assert!(anthropic.is_some(), "should detect as anthropic key");
         // Should NOT match openai pattern (sk-ant- prefix is anthropic-specific)
-        let openai = findings
-            .iter()
-            .find(|f| f.pattern_name == "openai-api-key");
+        let openai = findings.iter().find(|f| f.pattern_name == "openai-api-key");
         assert!(
             openai.is_none(),
             "sk-ant-admin should NOT be detected as openai key"

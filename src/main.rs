@@ -149,10 +149,16 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
                     tg.chat_id.clone(),
                 ));
                 let notifier: Arc<dyn Notifier> = if tg.events.is_empty() {
-                    info!("Telegram notification enabled (chat_id: {}, events: all)", tg.chat_id);
+                    info!(
+                        "Telegram notification enabled (chat_id: {}, events: all)",
+                        tg.chat_id
+                    );
                     inner
                 } else {
-                    info!("Telegram notification enabled (chat_id: {}, events: {:?})", tg.chat_id, tg.events);
+                    info!(
+                        "Telegram notification enabled (chat_id: {}, events: {:?})",
+                        tg.chat_id, tg.events
+                    );
                     Arc::new(FilteredNotifier::new(inner, tg.events.clone()))
                 };
                 server = server.with_notifier(notifier);

@@ -67,7 +67,14 @@ pub async fn accept_loop(listener: TcpListener, ctx: Arc<ConnectionContext>) {
 }
 
 /// Log a request to the database if a DB pool is available.
-fn log_to_db(ctx: &ConnectionContext, method: &str, domain: &str, path: &str, action: &str, reason: &str) {
+fn log_to_db(
+    ctx: &ConnectionContext,
+    method: &str,
+    domain: &str,
+    path: &str,
+    action: &str,
+    reason: &str,
+) {
     if let Some(ref pool) = ctx.db {
         match pool.get() {
             Ok(conn) => {
@@ -176,7 +183,14 @@ async fn handle_connect(
     let allowlist_slice = ctx.system_allowlist.as_ref().map(|v| v.as_slice());
     if is_system_allowed(domain, allowlist_slice) {
         info!("SYSTEM-ALLOW CONNECT to {} (allowlist)", target);
-        log_to_db(ctx, "CONNECT", domain, "/", "system-allow", "system allowlist");
+        log_to_db(
+            ctx,
+            "CONNECT",
+            domain,
+            "/",
+            "system-allow",
+            "system allowlist",
+        );
     }
     // Policy evaluation for CONNECT (domain-level only)
     else if let Some(ref policy) = ctx.policy {

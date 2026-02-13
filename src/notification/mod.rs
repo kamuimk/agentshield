@@ -102,7 +102,9 @@ impl FilteredNotifier {
 impl Notifier for FilteredNotifier {
     async fn notify(&self, event: &NotificationEvent) -> Result<()> {
         if self.allowed_events.is_empty()
-            || self.allowed_events.contains(&event.event_type().to_string())
+            || self
+                .allowed_events
+                .contains(&event.event_type().to_string())
         {
             self.inner.notify(event).await
         } else {
