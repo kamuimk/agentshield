@@ -107,11 +107,26 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
             };
             let mut reader = stdin.lock();
             let mut writer = stdout.lock();
-            let allowed = matches!(
-                agentshield::cli::prompt::prompt_decision(&prompt_req, &mut reader, &mut writer,),
-                Ok(PromptDecision::AllowOnce | PromptDecision::AddRule)
-            );
-            ask_req.respond(allowed);
+            loop {
+                match agentshield::cli::prompt::prompt_decision(
+                    &prompt_req,
+                    &mut reader,
+                    &mut writer,
+                ) {
+                    Ok(PromptDecision::Inspect) => {
+                        agentshield::cli::prompt::handle_inspect(&prompt_req, &mut writer).ok();
+                        continue; // Re-prompt after inspect
+                    }
+                    Ok(PromptDecision::AllowOnce | PromptDecision::AddRule) => {
+                        ask_req.respond(true);
+                        break;
+                    }
+                    _ => {
+                        ask_req.respond(false);
+                        break;
+                    }
+                }
+            }
         }
     });
 
