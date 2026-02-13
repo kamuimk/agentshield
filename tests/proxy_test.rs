@@ -317,6 +317,48 @@ async fn dlp_does_not_scan_connect_tunnels() {
     );
 }
 
+// --- System allowlist + DLP bypass integration tests ---
+
+#[tokio::test]
+async fn system_allowlist_bypasses_dlp_for_http() {
+    // System allowlist domain should bypass BOTH policy AND DLP
+    let scanner: Arc<dyn DlpScanner> = Arc::new(RegexScanner::new());
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_policy(deny_all_policy())
+        .with_dlp(scanner)
+        .with_system_allowlist(vec!["example.com".to_string()]);
+    let addr = server.start().await.unwrap();
+
+    // HTTP POST with API key in body to allowlisted domain → should pass (not 403)
+    let request = "POST http://example.com/api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 50\r\n\r\nAuthorization: Bearer sk-abcdefghijklmnopqrstuvwxyz1234567890";
+    let response = send_raw_request(addr, request).await;
+    assert!(
+        !response.contains("403"),
+        "System allowlist domain should bypass DLP, got: {}",
+        response
+    );
+}
+
+#[tokio::test]
+async fn non_allowlist_domain_still_blocked_by_dlp() {
+    // Non-allowlist domain should still be subject to DLP scanning
+    let scanner: Arc<dyn DlpScanner> = Arc::new(RegexScanner::new());
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_policy(allow_example_policy())
+        .with_dlp(scanner)
+        .with_system_allowlist(vec!["api.telegram.org".to_string()]);
+    let addr = server.start().await.unwrap();
+
+    // HTTP POST with API key to NON-allowlisted domain → should be blocked by DLP
+    let request = "POST http://example.com/api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 50\r\n\r\nAuthorization: Bearer sk-abcdefghijklmnopqrstuvwxyz1234567890";
+    let response = send_raw_request(addr, request).await;
+    assert!(
+        response.contains("403"),
+        "Non-allowlist domain should still be blocked by DLP, got: {}",
+        response
+    );
+}
+
 // --- Notification integration tests ---
 
 #[tokio::test]

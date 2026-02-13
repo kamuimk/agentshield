@@ -358,12 +358,26 @@ async fn handle_http_request(
         return Ok(());
     }
 
-    // System allowlist bypass: skip policy evaluation for internal services
+    // System allowlist bypass: skip policy evaluation AND DLP scanning for internal services.
+    //
+    // SECURITY NOTE: Domains on the system allowlist bypass both policy and DLP checks.
+    // Only add trusted internal services (e.g., notification endpoints). Adding external
+    // domains here disables all outbound protection for that destination.
     let allowlist_slice = system_allowlist.map(|v| v.as_slice());
     let system_allowed = is_system_allowed(&host, allowlist_slice);
     if system_allowed {
-        info!("SYSTEM-ALLOW {} {} (allowlist)", method, uri);
-        log_to_db(db, method, &host, &path, "system-allow", "system allowlist");
+        info!(
+            "SYSTEM-ALLOW {} {} (allowlist, policy+dlp bypass)",
+            method, uri
+        );
+        log_to_db(
+            db,
+            method,
+            &host,
+            &path,
+            "system-allow",
+            "system allowlist (policy+dlp bypass)",
+        );
     }
     // Policy evaluation for HTTP
     else if let Some(policy) = policy {
@@ -415,48 +429,51 @@ async fn handle_http_request(
         }
     }
 
-    // DLP scan: check request body for sensitive data before forwarding
-    if let Some(scanner) = dlp_scanner {
-        if let Some(body) = extract_body(raw_request) {
-            let findings = scanner.scan(body);
-            let has_critical = findings.iter().any(|f| f.severity == Severity::Critical);
-            if has_critical {
+    // DLP scan: check request body for sensitive data before forwarding.
+    // System-allowed domains bypass DLP (they already bypass policy above).
+    if !system_allowed {
+        if let Some(scanner) = dlp_scanner {
+            if let Some(body) = extract_body(raw_request) {
+                let findings = scanner.scan(body);
+                let has_critical = findings.iter().any(|f| f.severity == Severity::Critical);
+                if has_critical {
+                    for f in &findings {
+                        warn!(
+                            "DLP {} finding in {} {}: pattern={}, match={}",
+                            format!("{:?}", f.severity),
+                            method,
+                            uri,
+                            f.pattern_name,
+                            f.matched_text
+                        );
+                    }
+                    log_to_db(db, method, &host, &path, "deny", "DLP: critical finding");
+                    // Notify about first critical finding
+                    if let Some(f) = findings.iter().find(|f| f.severity == Severity::Critical) {
+                        notify_event(
+                            notifier,
+                            NotificationEvent::DlpFinding {
+                                domain: host.clone(),
+                                method: method.to_string(),
+                                pattern_name: f.pattern_name.clone(),
+                                severity: format!("{:?}", f.severity),
+                            },
+                        );
+                    }
+                    let response = "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: DLP: sensitive data detected\r\n\r\n";
+                    client.write_all(response.as_bytes()).await?;
+                    return Ok(());
+                }
+                // Non-critical findings: log warning but allow request through
                 for f in &findings {
                     warn!(
-                        "DLP {} finding in {} {}: pattern={}, match={}",
-                        format!("{:?}", f.severity),
-                        method,
-                        uri,
-                        f.pattern_name,
-                        f.matched_text
+                        "DLP {:?} finding in {} {}: pattern={}, match={}",
+                        f.severity, method, uri, f.pattern_name, f.matched_text
                     );
                 }
-                log_to_db(db, method, &host, &path, "deny", "DLP: critical finding");
-                // Notify about first critical finding
-                if let Some(f) = findings.iter().find(|f| f.severity == Severity::Critical) {
-                    notify_event(
-                        notifier,
-                        NotificationEvent::DlpFinding {
-                            domain: host.clone(),
-                            method: method.to_string(),
-                            pattern_name: f.pattern_name.clone(),
-                            severity: format!("{:?}", f.severity),
-                        },
-                    );
-                }
-                let response = "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: DLP: sensitive data detected\r\n\r\n";
-                client.write_all(response.as_bytes()).await?;
-                return Ok(());
-            }
-            // Non-critical findings: log warning but allow request through
-            for f in &findings {
-                warn!(
-                    "DLP {:?} finding in {} {}: pattern={}, match={}",
-                    f.severity, method, uri, f.pattern_name, f.matched_text
-                );
             }
         }
-    }
+    } // end if !system_allowed (DLP bypass)
 
     info!("HTTP {} to {}", method, uri);
     let target = format!("{}:{}", host, port);
