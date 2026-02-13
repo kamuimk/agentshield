@@ -12,6 +12,7 @@ use agentshield::cli::{Cli, Commands, IntegrateTarget, PolicyAction};
 use agentshield::dlp::DlpScanner;
 use agentshield::dlp::patterns::RegexScanner;
 use agentshield::logging;
+use agentshield::notification::FilteredNotifier;
 use agentshield::notification::Notifier;
 use agentshield::notification::telegram::TelegramNotifier;
 use agentshield::policy::config::AppConfig;
@@ -143,11 +144,17 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
     if let Some(ref notif_config) = config.notification {
         if notif_config.enabled {
             if let Some(ref tg) = notif_config.telegram {
-                let notifier: Arc<dyn Notifier> = Arc::new(TelegramNotifier::new(
+                let inner: Arc<dyn Notifier> = Arc::new(TelegramNotifier::new(
                     tg.bot_token.clone(),
                     tg.chat_id.clone(),
                 ));
-                info!("Telegram notification enabled (chat_id: {})", tg.chat_id);
+                let notifier: Arc<dyn Notifier> = if tg.events.is_empty() {
+                    info!("Telegram notification enabled (chat_id: {}, events: all)", tg.chat_id);
+                    inner
+                } else {
+                    info!("Telegram notification enabled (chat_id: {}, events: {:?})", tg.chat_id, tg.events);
+                    Arc::new(FilteredNotifier::new(inner, tg.events.clone()))
+                };
                 server = server.with_notifier(notifier);
             }
         }

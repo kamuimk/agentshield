@@ -16,6 +16,8 @@
 
 pub mod telegram;
 
+use std::sync::Arc;
+
 use crate::error::Result;
 
 /// Events that can trigger notifications.
@@ -41,6 +43,18 @@ pub enum NotificationEvent {
     ProxyShutdown,
 }
 
+impl NotificationEvent {
+    /// Return the event type as a string for filtering (e.g., `"deny"`, `"dlp"`).
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::RequestDenied { .. } => "deny",
+            Self::DlpFinding { .. } => "dlp",
+            Self::ProxyStarted { .. } => "start",
+            Self::ProxyShutdown => "shutdown",
+        }
+    }
+}
+
 /// Trait for notification backends (e.g., Telegram, Slack, email).
 ///
 /// Implementations must be `Send + Sync` for use across async tasks.
@@ -50,6 +64,55 @@ pub trait Notifier: Send + Sync {
     async fn notify(&self, event: &NotificationEvent) -> Result<()>;
     /// Return the backend name (e.g., `"telegram"`).
     fn name(&self) -> &str;
+}
+
+/// A wrapper [`Notifier`] that only forwards events whose [`NotificationEvent::event_type`]
+/// is in the configured allow-list.
+///
+/// If `allowed_events` is empty, **all** events are forwarded (backward-compatible default).
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use std::sync::Arc;
+/// let filtered = FilteredNotifier::new(
+///     Arc::new(inner_notifier),
+///     vec!["deny".to_string(), "dlp".to_string()],
+/// );
+/// ```
+pub struct FilteredNotifier {
+    inner: Arc<dyn Notifier>,
+    allowed_events: Vec<String>,
+}
+
+impl FilteredNotifier {
+    /// Create a new `FilteredNotifier` wrapping `inner`.
+    ///
+    /// Only events whose [`NotificationEvent::event_type`] appears in `allowed_events`
+    /// will be forwarded. An empty list means all events are forwarded.
+    pub fn new(inner: Arc<dyn Notifier>, allowed_events: Vec<String>) -> Self {
+        Self {
+            inner,
+            allowed_events,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Notifier for FilteredNotifier {
+    async fn notify(&self, event: &NotificationEvent) -> Result<()> {
+        if self.allowed_events.is_empty()
+            || self.allowed_events.contains(&event.event_type().to_string())
+        {
+            self.inner.notify(event).await
+        } else {
+            Ok(())
+        }
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
 }
 
 /// Format a [`NotificationEvent`] into a human-readable Markdown message.
@@ -188,5 +251,92 @@ mod tests {
 
         let collected = events.lock().unwrap();
         assert_eq!(collected.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn filtered_notifier_passes_matching_events() {
+        let (mock, events) = MockNotifier::new();
+        let filtered = FilteredNotifier::new(Arc::new(mock), vec!["deny".to_string()]);
+        // deny event → should pass through
+        filtered
+            .notify(&NotificationEvent::RequestDenied {
+                domain: "x".into(),
+                method: "GET".into(),
+                path: "/".into(),
+                reason: "r".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(events.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn filtered_notifier_blocks_non_matching_events() {
+        let (mock, events) = MockNotifier::new();
+        let filtered = FilteredNotifier::new(Arc::new(mock), vec!["deny".to_string()]);
+        // dlp event → should be filtered out
+        filtered
+            .notify(&NotificationEvent::DlpFinding {
+                domain: "x".into(),
+                method: "POST".into(),
+                pattern_name: "p".into(),
+                severity: "Critical".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(events.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn filtered_notifier_empty_events_passes_all() {
+        let (mock, events) = MockNotifier::new();
+        // Empty events = pass all (backward compatible)
+        let filtered = FilteredNotifier::new(Arc::new(mock), vec![]);
+        filtered
+            .notify(&NotificationEvent::DlpFinding {
+                domain: "x".into(),
+                method: "POST".into(),
+                pattern_name: "p".into(),
+                severity: "Critical".into(),
+            })
+            .await
+            .unwrap();
+        filtered
+            .notify(&NotificationEvent::ProxyShutdown)
+            .await
+            .unwrap();
+        assert_eq!(events.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn event_type_returns_correct_string() {
+        assert_eq!(
+            NotificationEvent::RequestDenied {
+                domain: "x".into(),
+                method: "GET".into(),
+                path: "/".into(),
+                reason: "r".into(),
+            }
+            .event_type(),
+            "deny"
+        );
+        assert_eq!(
+            NotificationEvent::DlpFinding {
+                domain: "x".into(),
+                method: "POST".into(),
+                pattern_name: "p".into(),
+                severity: "Critical".into(),
+            }
+            .event_type(),
+            "dlp"
+        );
+        assert_eq!(
+            NotificationEvent::ProxyStarted {
+                listen_addr: "127.0.0.1:0".into(),
+            }
+            .event_type(),
+            "start"
+        );
+        assert_eq!(NotificationEvent::ProxyShutdown.event_type(), "shutdown");
     }
 }
