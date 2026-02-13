@@ -2,6 +2,7 @@
 name = "agentshield"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "AI Agent Egress Firewall - Default-deny egress control for AI agents"
 license = "Apache-2.0"
 

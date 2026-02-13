@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::cli::prompt::AskRequest;
+use crate::dlp::DlpScanner;
 use crate::policy::config::PolicyConfig;
 
 pub struct ProxyServer {
@@ -19,6 +20,7 @@ pub struct ProxyServer {
     policy: Option<Arc<PolicyConfig>>,
     db: Option<Arc<Mutex<Connection>>>,
     ask_tx: Option<mpsc::Sender<AskRequest>>,
+    dlp_scanner: Option<Arc<dyn DlpScanner>>,
 }
 
 impl ProxyServer {
@@ -28,6 +30,7 @@ impl ProxyServer {
             policy: None,
             db: None,
             ask_tx: None,
+            dlp_scanner: None,
         }
     }
 
@@ -46,6 +49,11 @@ impl ProxyServer {
         self
     }
 
+    pub fn with_dlp(mut self, scanner: Arc<dyn DlpScanner>) -> Self {
+        self.dlp_scanner = Some(scanner);
+        self
+    }
+
     /// Start the proxy server and return the actual bound address.
     pub async fn start(&self) -> Result<SocketAddr> {
         let listener = TcpListener::bind(&self.listen_addr).await?;
@@ -55,8 +63,9 @@ impl ProxyServer {
         let policy = self.policy.clone();
         let db = self.db.clone();
         let ask_tx = self.ask_tx.clone();
+        let dlp = self.dlp_scanner.clone();
         tokio::spawn(async move {
-            connect::accept_loop(listener, policy, db, ask_tx).await;
+            connect::accept_loop(listener, policy, db, ask_tx, dlp).await;
         });
 
         Ok(local_addr)

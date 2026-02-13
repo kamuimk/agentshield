@@ -19,12 +19,15 @@ flowchart LR
     F -->|Approve| D
     F -->|Deny| E
     B --> G[(SQLite Log)]
+    B --> H{DLP Scanner}
+    H -->|Critical| E
+    H -->|Clean| D
 ```
 
 ## Quick Start
 
 ```bash
-# Build from source
+# Build from source (requires Rust 1.85+)
 git clone https://github.com/kamuimk/agentshield.git
 cd agentshield
 cargo build --release
@@ -41,6 +44,20 @@ cargo build --release
 # Point your AI agent to the proxy
 export HTTPS_PROXY=http://127.0.0.1:18080
 ```
+
+### Integrate with OpenClaw (Node.js)
+
+For OpenClaw or other Node.js-based agents, use the built-in integration command:
+
+```bash
+# Auto-configure OpenClaw to use AgentShield proxy
+agentshield integrate openclaw
+
+# Remove the proxy configuration
+agentshield integrate remove
+```
+
+This sets `channels.telegram.proxy` in `~/.openclaw/openclaw.json` to route traffic through AgentShield.
 
 ## Policy Configuration
 
@@ -72,6 +89,11 @@ name = "github-write"
 domains = ["api.github.com"]
 methods = ["POST", "PUT", "PATCH", "DELETE"]
 action = "ask"
+
+# Enable DLP scanning on HTTP requests
+[dlp]
+enabled = true
+# patterns = ["openai-api-key", "aws-access-key"]  # optional: subset of built-in patterns
 ```
 
 ### Policy Actions
@@ -81,6 +103,18 @@ action = "ask"
 | `allow` | Request passes through, logged to SQLite |
 | `deny` | Request blocked with `403 Forbidden` + `X-AgentShield-Reason` header |
 | `ask` | Terminal prompt for approval. Timeout (30s) defaults to deny |
+
+### DLP (Data Loss Prevention)
+
+When `[dlp] enabled = true`, AgentShield scans HTTP request bodies for sensitive data before forwarding:
+
+| Severity | Patterns | Action |
+|----------|----------|--------|
+| Critical | OpenAI API key, AWS access key, private key, GitHub token | Block (403) |
+| High | Generic API key | Log warning, allow |
+| Medium | Email address | Log warning, allow |
+
+> **Note:** CONNECT tunnels (HTTPS) are encrypted and cannot be scanned by DLP.
 
 ### Built-in Templates
 
@@ -105,6 +139,8 @@ agentshield logs [--tail N]           # View recent logs
 agentshield logs --export --format json  # Export logs
 agentshield policy show               # Display current policy
 agentshield policy template <name>    # Apply a template
+agentshield integrate openclaw        # Configure OpenClaw to use proxy
+agentshield integrate remove          # Remove proxy configuration
 ```
 
 ## Using with Docker (OpenClaw)
@@ -123,6 +159,8 @@ services:
 
 Make sure AgentShield listens on `0.0.0.0:18080` (not `127.0.0.1`) for Docker access.
 
+> **Note:** Node.js 23 does not natively support `HTTP_PROXY` / `HTTPS_PROXY` environment variables. You may need to use a proxy agent library (e.g., `undici`) or wait for Node.js 24+ with `NODE_USE_ENV_PROXY=1` support.
+
 ## What AgentShield is NOT
 
 - **Not a sandbox.** AgentShield controls network egress only. It does not restrict file system access, process execution, or other local operations.
@@ -133,10 +171,12 @@ AgentShield complements tools like [PipeLock](https://github.com/nichochar/pipel
 
 ## Development
 
+- **MSRV:** Rust 1.85 (edition 2024)
+
 ```bash
-cargo test          # Run all tests (61 tests)
-cargo clippy        # Lint
-cargo fmt           # Format
+cargo test --all     # Run all tests (87 tests)
+cargo clippy         # Lint
+cargo fmt            # Format
 ```
 
 ## License

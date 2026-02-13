@@ -2,7 +2,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use agentshield::cli::integrate;
+use agentshield::cli::prompt::{AskRequest, PromptDecision, PromptRequest};
 use agentshield::cli::{Cli, Commands, IntegrateTarget, PolicyAction};
+use agentshield::dlp::DlpScanner;
+use agentshield::dlp::patterns::RegexScanner;
 use agentshield::logging;
 use agentshield::policy::config::AppConfig;
 use agentshield::proxy::ProxyServer;
@@ -71,9 +74,45 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
     let conn = logging::open_db(&db)?;
     let db_arc = Arc::new(Mutex::new(conn));
 
-    let server = ProxyServer::new(config.proxy.listen.clone())
+    // ASK channel: proxy sends ASK requests, handler prompts user via stdin/stdout
+    let (ask_tx, mut ask_rx) = tokio::sync::mpsc::channel::<AskRequest>(100);
+    tokio::spawn(async move {
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        while let Some(ask_req) = ask_rx.recv().await {
+            let prompt_req = PromptRequest {
+                method: ask_req.method.clone(),
+                domain: ask_req.domain.clone(),
+                path: ask_req.path.clone(),
+                body: None,
+            };
+            let mut reader = stdin.lock();
+            let mut writer = stdout.lock();
+            let allowed = matches!(
+                agentshield::cli::prompt::prompt_decision(&prompt_req, &mut reader, &mut writer,),
+                Ok(PromptDecision::AllowOnce | PromptDecision::AddRule)
+            );
+            ask_req.respond(allowed);
+        }
+    });
+
+    let mut server = ProxyServer::new(config.proxy.listen.clone())
         .with_policy(config.policy.clone())
-        .with_db(db_arc);
+        .with_db(db_arc)
+        .with_ask_channel(ask_tx);
+
+    // Initialize DLP scanner if enabled in config
+    if let Some(ref dlp_config) = config.dlp {
+        if dlp_config.enabled {
+            let scanner: Arc<dyn DlpScanner> = match &dlp_config.patterns {
+                Some(patterns) => Arc::new(RegexScanner::with_patterns(patterns)),
+                None => Arc::new(RegexScanner::new()),
+            };
+            println!("DLP scanner enabled");
+            server = server.with_dlp(scanner);
+        }
+    }
+
     let addr = server.start().await?;
     println!("Proxy running on {}", addr);
     println!(

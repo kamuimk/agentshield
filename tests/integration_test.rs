@@ -95,7 +95,18 @@ async fn e2e_proxy_policy_deny_logs_nothing_yet() {
 async fn e2e_openclaw_full_flow() {
     let template = include_str!("../templates/openclaw-default.toml");
     let config: AppConfig = toml::from_str(template).unwrap();
-    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(config.policy.clone());
+
+    // ASK channel with auto-approve handler
+    let (ask_tx, mut ask_rx) = tokio::sync::mpsc::channel::<AskRequest>(10);
+    tokio::spawn(async move {
+        while let Some(req) = ask_rx.recv().await {
+            req.respond(true); // auto-approve for testing
+        }
+    });
+
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_policy(config.policy.clone())
+        .with_ask_channel(ask_tx);
     let addr = server.start().await.unwrap();
 
     // 1. Anthropic API - should be ALLOWED
@@ -320,6 +331,41 @@ fn prompt_add_rule_roundtrip() {
 
     let config = AppConfig::load_from_path(&config_path).unwrap();
     assert_eq!(config.policy.rules.len(), 2);
+}
+
+// ===== ASK without channel defaults to deny =====
+
+#[tokio::test]
+async fn ask_policy_without_channel_defaults_to_deny() {
+    let policy = PolicyConfig {
+        default: Action::Deny,
+        rules: vec![Rule {
+            name: "ask-example".to_string(),
+            domains: vec!["example.com".to_string()],
+            methods: None,
+            action: Action::Ask,
+            note: None,
+        }],
+    };
+
+    // No ASK channel attached — should default to deny (fail-closed)
+    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(policy);
+    let addr = server.start().await.unwrap();
+
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf).await.unwrap();
+    let response = String::from_utf8_lossy(&buf[..n]);
+    assert!(
+        response.contains("403"),
+        "ASK without channel should deny, got: {}",
+        response
+    );
 }
 
 // ===== Concurrent proxy connections =====

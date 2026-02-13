@@ -42,7 +42,10 @@ impl RegexScanner {
         patterns.insert(
             "generic-api-key".to_string(),
             PatternDef {
-                regex: Regex::new(r#"(?i)(api[_-]?key|apikey)\s*[:=]\s*["']?([A-Za-z0-9_\-]{20,})["']?"#).unwrap(),
+                regex: Regex::new(
+                    r#"(?i)(api[_-]?key|apikey)\s*[:=]\s*["']?([A-Za-z0-9_\-]{20,})["']?"#,
+                )
+                .unwrap(),
                 severity: Severity::High,
             },
         );
@@ -108,11 +111,7 @@ impl DlpScanner for RegexScanner {
                 // Redact the matched text: show first 4 and last 4 chars
                 let matched = mat.as_str();
                 let redacted = if matched.len() > 12 {
-                    format!(
-                        "{}...{}",
-                        &matched[..4],
-                        &matched[matched.len() - 4..]
-                    )
+                    format!("{}...{}", &matched[..4], &matched[matched.len() - 4..])
                 } else {
                     matched.to_string()
                 };
@@ -212,8 +211,10 @@ mod tests {
 
     #[test]
     fn with_patterns_filters_correctly() {
-        let scanner =
-            RegexScanner::with_patterns(&["openai-api-key".to_string(), "email-address".to_string()]);
+        let scanner = RegexScanner::with_patterns(&[
+            "openai-api-key".to_string(),
+            "email-address".to_string(),
+        ]);
         // Should have only 2 patterns
         assert_eq!(scanner.patterns.len(), 2);
         assert!(scanner.patterns.contains_key("openai-api-key"));

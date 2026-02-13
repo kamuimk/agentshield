@@ -20,10 +20,7 @@ pub fn detect_openclaw_config() -> Option<PathBuf> {
 }
 
 /// Set the Telegram proxy in openclaw.json
-pub fn set_openclaw_proxy(
-    config_path: &std::path::Path,
-    proxy_url: &str,
-) -> anyhow::Result<()> {
+pub fn set_openclaw_proxy(config_path: &std::path::Path, proxy_url: &str) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(config_path)?;
     let mut json: serde_json::Value = serde_json::from_str(&content)?;
 
@@ -66,10 +63,7 @@ pub fn restart_openclaw_daemon() -> anyhow::Result<()> {
         .join(format!("{}.plist", LAUNCHD_LABEL));
 
     if !plist_path.exists() {
-        anyhow::bail!(
-            "OpenClaw plist not found: {}",
-            plist_path.display()
-        );
+        anyhow::bail!("OpenClaw plist not found: {}", plist_path.display());
     }
 
     let plist_str = plist_path.to_string_lossy().to_string();
@@ -129,9 +123,8 @@ pub fn cmd_integrate_openclaw() -> anyhow::Result<()> {
 pub fn cmd_integrate_remove() -> anyhow::Result<()> {
     println!("Removing AgentShield integration...");
 
-    let config_path = detect_openclaw_config().ok_or_else(|| {
-        anyhow::anyhow!("OpenClaw config not found at ~/.openclaw/openclaw.json")
-    })?;
+    let config_path = detect_openclaw_config()
+        .ok_or_else(|| anyhow::anyhow!("OpenClaw config not found at ~/.openclaw/openclaw.json"))?;
 
     println!("  Found config: {}", config_path.display());
 
@@ -267,10 +260,12 @@ mod tests {
 
         let result = set_openclaw_proxy(&config_path, "http://127.0.0.1:18080");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("channels.telegram not found"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("channels.telegram not found")
+        );
     }
 
     #[test]

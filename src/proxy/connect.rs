@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use crate::cli::prompt::AskRequest;
+use crate::dlp::{DlpScanner, Severity};
 use crate::logging;
 use crate::policy::config::{Action, PolicyConfig};
 use crate::policy::evaluator::{self, RequestInfo};
@@ -17,6 +18,7 @@ pub async fn accept_loop(
     policy: Option<Arc<PolicyConfig>>,
     db: Option<Arc<Mutex<Connection>>>,
     ask_tx: Option<mpsc::Sender<AskRequest>>,
+    dlp_scanner: Option<Arc<dyn DlpScanner>>,
 ) {
     loop {
         match listener.accept().await {
@@ -25,10 +27,16 @@ pub async fn accept_loop(
                 let policy = policy.clone();
                 let db = db.clone();
                 let ask_tx = ask_tx.clone();
+                let dlp = dlp_scanner.clone();
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        handle_connection(stream, policy.as_deref(), db.as_ref(), ask_tx.as_ref())
-                            .await
+                    if let Err(e) = handle_connection(
+                        stream,
+                        policy.as_deref(),
+                        db.as_ref(),
+                        ask_tx.as_ref(),
+                        dlp.as_ref(),
+                    )
+                    .await
                     {
                         error!("Error handling connection from {}: {}", peer_addr, e);
                     }
@@ -74,6 +82,7 @@ async fn handle_connection(
     policy: Option<&PolicyConfig>,
     db: Option<&Arc<Mutex<Connection>>>,
     ask_tx: Option<&mpsc::Sender<AskRequest>>,
+    dlp_scanner: Option<&Arc<dyn DlpScanner>>,
 ) -> crate::error::Result<()> {
     let mut buf = vec![0u8; 8192];
     let n = client.read(&mut buf).await?;
@@ -85,9 +94,10 @@ async fn handle_connection(
     let first_line = request.lines().next().unwrap_or("");
 
     if first_line.starts_with("CONNECT ") {
+        // CONNECT tunnels are encrypted — DLP cannot scan them
         handle_connect(&mut client, first_line, policy, db, ask_tx).await
     } else {
-        handle_http_request(&mut client, &buf[..n], policy, db, ask_tx).await
+        handle_http_request(&mut client, &buf[..n], policy, db, ask_tx, dlp_scanner).await
     }
 }
 
@@ -110,8 +120,8 @@ async fn ask_and_wait(
             }
         }
     }
-    // No channel or error: default to allow (backward compat when no channel)
-    ask_tx.is_none()
+    // No channel or error: default to deny (fail-closed)
+    false
 }
 
 /// Handle CONNECT method for HTTPS tunneling.
@@ -221,6 +231,7 @@ async fn handle_http_request(
     policy: Option<&PolicyConfig>,
     db: Option<&Arc<Mutex<Connection>>>,
     ask_tx: Option<&mpsc::Sender<AskRequest>>,
+    dlp_scanner: Option<&Arc<dyn DlpScanner>>,
 ) -> crate::error::Result<()> {
     let request_str = String::from_utf8_lossy(raw_request);
     let first_line = request_str.lines().next().unwrap_or("");
@@ -287,6 +298,37 @@ async fn handle_http_request(
         }
     }
 
+    // DLP scan: check request body for sensitive data before forwarding
+    if let Some(scanner) = dlp_scanner {
+        if let Some(body) = extract_body(raw_request) {
+            let findings = scanner.scan(body);
+            let has_critical = findings.iter().any(|f| f.severity == Severity::Critical);
+            if has_critical {
+                for f in &findings {
+                    warn!(
+                        "DLP {} finding in {} {}: pattern={}, match={}",
+                        format!("{:?}", f.severity),
+                        method,
+                        uri,
+                        f.pattern_name,
+                        f.matched_text
+                    );
+                }
+                log_to_db(db, method, &host, &path, "deny", "DLP: critical finding");
+                let response = "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: DLP: sensitive data detected\r\n\r\n";
+                client.write_all(response.as_bytes()).await?;
+                return Ok(());
+            }
+            // Non-critical findings: log warning but allow request through
+            for f in &findings {
+                warn!(
+                    "DLP {:?} finding in {} {}: pattern={}, match={}",
+                    f.severity, method, uri, f.pattern_name, f.matched_text
+                );
+            }
+        }
+    }
+
     info!("HTTP {} to {}", method, uri);
     let target = format!("{}:{}", host, port);
 
@@ -326,6 +368,17 @@ async fn handle_http_request(
     }
 
     Ok(())
+}
+
+/// Extract the body from a raw HTTP request (everything after `\r\n\r\n`).
+fn extract_body(raw_request: &[u8]) -> Option<&[u8]> {
+    raw_request
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .and_then(|pos| {
+            let start = pos + 4;
+            (start < raw_request.len()).then(|| &raw_request[start..])
+        })
 }
 
 /// Validate that a domain name contains only safe characters.
@@ -420,6 +473,20 @@ mod tests {
         assert!(validate_domain("my-service.example.com"));
         assert!(validate_domain("localhost"));
         assert!(validate_domain("192.168.1.1"));
+    }
+
+    #[test]
+    fn extract_body_from_raw_request() {
+        let raw = b"POST /api HTTP/1.1\r\nHost: example.com\r\n\r\n{\"key\": \"value\"}";
+        let body = extract_body(raw).unwrap();
+        assert_eq!(body, b"{\"key\": \"value\"}");
+    }
+
+    #[test]
+    fn no_body_in_get_request() {
+        let raw = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let body = extract_body(raw);
+        assert!(body.is_none());
     }
 
     #[test]
