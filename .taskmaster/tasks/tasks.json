@@ -2,140 +2,141 @@
   "master": {
     "tasks": [
       {
-        "id": "11",
-        "title": "Implement SQLite logging integration in ProxyServer",
-        "description": "Extend ProxyServer with DB path injection and integrate SQLite connection sharing via Arc<Mutex<Connection>>",
-        "details": "1. Add `with_db_path(self, path: PathBuf) -> Self` method to ProxyServer struct in src/proxy/mod.rs\n2. Modify accept_loop to open rusqlite::Connection and wrap in Arc<Mutex<Connection>> before spawning handlers\n3. Pass Arc<Mutex<Connection>> to handle_connect() and handle_http_request() via handler context\n4. Update cmd_start() in src/main.rs to call proxy.with_db_path(db_path)\n5. Ensure DB schema has requests table: timestamp, method, host, path, action, policy_matched",
-        "testStrategy": "Integration test: Start proxy with test DB path, send HTTP request through proxy, verify SQLite DB contains log entry with correct fields using rusqlite query",
+        "id": 21,
+        "title": "Implement System Allowlist DLP Bypass (R1)",
+        "description": "Modify handle_http_request to skip DLP scanning for system_allowlist domains and log 'policy+dlp bypass' reason",
+        "details": "In connect.rs handle_http_request, add early return when system_allowed == true before DLP block (lines 396-437). Update logging to include 'policy+dlp bypass' reason for system-allow actions. Add security comment warning that system allowlist bypasses DLP protection. handle_connect already skips DLP, no changes needed.",
+        "testStrategy": "Test system allowlist domain HTTP POST with API key in body -> expect 200 not 403. Test non-allowlist domain -> DLP blocks as before. Verify log contains 'policy+dlp bypass' reason.",
         "priority": "high",
         "dependencies": [],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-12T06:11:14.235Z"
+        "status": "pending",
+        "subtasks": []
       },
       {
-        "id": "12",
-        "title": "Add logging calls after policy evaluation",
-        "description": "Implement logging::log_request() calls in handle_connect() and handle_http_request() after policy evaluation",
-        "details": "1. Create src/logging/mod.rs with pub fn log_request(conn: &Mutex<Connection>, req: &RequestInfo) -> anyhow::Result<()> using rusqlite\n2. RequestInfo struct: timestamp, method, host, path, action (allow/deny/ask), policy_name\n3. In handle_connect() and handle_http_request(), after policy::evaluate(), call logging::log_request(&db_lock, &req_info).await\n4. Use tracing::info!(\"Logged request to DB\") on success",
-        "testStrategy": "Unit test log_request() function with mock Connection. Integration test: verify different policy actions (allow/deny/ask) logged correctly in DB",
-        "priority": "high",
-        "dependencies": [
-          "11"
-        ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-12T06:11:14.961Z"
-      },
-      {
-        "id": "13",
-        "title": "Implement HTTP response streaming with tokio::io::copy",
-        "description": "Replace 64KB fixed buffer read in handle_http_request() with bidirectional streaming using tokio::io::copy",
-        "details": "1. In src/proxy/connect.rs handle_http_request(): after sending request to remote, use tokio::io::copy(&mut remote_stream, &mut client_stream).await\n2. Follow same pattern as CONNECT tunneling: request -> copy remote->client\n3. Handle errors with proper connection cleanup using tokio::select! for timeout\n4. Add tracing spans for streaming operations: tracing::info_span!(\"streaming_response\")",
-        "testStrategy": "Test with >64KB response payload (generate test server returning 100KB response), verify full response received by client without truncation",
+        "id": 22,
+        "title": "Update DLP Patterns for OpenAI, Fireworks, Together AI (R5)",
+        "description": "Update OpenAI regex to cover sk-None-, sk-admin- prefixes, implement Fireworks context-based detection, relax Together AI to alphanumeric 32+",
+        "details": "OpenAI: change `sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}` to `sk-(?:proj-|svcacct-|None-|admin-)?[A-Za-z0-9_-]{20,}`. Fireworks: `(?i)(?:fireworks[_-]?(?:api[_-]?)?key)\\s*[:=]\\s*[\"']?([A-Za-z0-9_-]{32,})[\"']?`. Together AI: `[A-Za-z0-9]{32,}`. Ensure no overlap with Anthropic sk-ant-admin-.",
+        "testStrategy": "Test sk-None-xxx, sk-admin-xxx detection (OpenAI). Test sk-ant-admin-xxx -> anthropic detection only. Test Fireworks context pattern. Test Together alphanumeric keys. Verify no false positives.",
         "priority": "high",
         "dependencies": [],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-12T06:24:03.959Z"
+        "status": "pending",
+        "subtasks": []
       },
       {
-        "id": "14",
-        "title": "Implement ASK channel infrastructure",
-        "description": "Add mpsc channel for proxy-to-main thread ASK requests with AskRequest struct and oneshot response",
-        "details": "1. Define AskRequest { host: String, path: String, method: String, sender: oneshot::Sender<bool> }\n2. Add with_ask_channel(self, tx: mpsc::Sender<AskRequest>) -> Self to ProxyServer\n3. In policy evaluator, when ASK action matched, send to ask_tx with timeout\n4. Default deny after 30s timeout using tokio::time::timeout\n5. Update cmd_start() to create channel and pass to proxy",
-        "testStrategy": "Unit test: send AskRequest through channel, verify receiver gets struct correctly. Integration test: policy ASK rule triggers channel send",
+        "id": 23,
+        "title": "Implement NotificationEvent event_type() method",
+        "description": "Add event_type() method to NotificationEvent enum returning deny/dlp/start/shutdown strings",
+        "details": "```rust\nimpl NotificationEvent {\n    pub fn event_type(&self) -> &'static str {\n        match self {\n            Self::RequestDenied { .. } => \"deny\",\n            Self::DlpFinding { .. } => \"dlp\",\n            Self::ProxyStarted { .. } => \"start\",\n            Self::ProxyShutdown => \"shutdown\",\n        }\n    }\n}```",
+        "testStrategy": "Unit test each variant returns correct string. Integration test with mock notifier verifies correct type returned.",
         "priority": "high",
         "dependencies": [],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-12T06:26:28.242Z"
+        "status": "pending",
+        "subtasks": []
       },
       {
-        "id": "15",
-        "title": "Implement terminal ASK prompt handler",
-        "description": "Main thread stdin/stdout handler for ASK requests with AllowOnce/AddRule/Deny options",
-        "details": "1. In src/cli/prompt.rs: async fn handle_ask_requests(mut rx: mpsc::Receiver<AskRequest>)\n2. Use crossterm or similar for formatted terminal UI showing request details\n3. Parse user input: 'y'->allow, 'n'->deny, 'a'->add rule to config.toml\n4. For AddRule: append to config [rules] section and reload policy engine\n5. Send response via oneshot::Sender, timeout 30s -> deny\n6. Spawn this task from cmd_start()",
-        "testStrategy": "Mock stdin input test: simulate 'y'/'n' inputs, verify oneshot response sent correctly. Verify config.toml updated on 'a' input",
+        "id": 24,
+        "title": "Implement FilteredNotifier for events filtering (R2)",
+        "description": "Create FilteredNotifier wrapper that filters events based on TelegramConfig.events array",
+        "details": "```rust\npub struct FilteredNotifier {\n    inner: Arc<dyn Notifier>,\n    allowed_events: Vec<String>,\n}\n\nimpl FilteredNotifier {\n    pub fn new(inner: Arc<dyn Notifier>, events: Vec<String>) -> Self { ... }\n}\n\nimpl Notifier for FilteredNotifier {\n    fn notify(&self, event: &NotificationEvent) -> Result<()> {\n        if self.allowed_events.is_empty() || \n           self.allowed_events.contains(&event.event_type().to_string()) {\n            self.inner.notify(event)\n        } else {\n            Ok(())\n        }\n    }\n}``` Empty or unspecified events = all events (backward compatible).",
+        "testStrategy": "events=[\"deny\"] -> DLP events filtered out. events=[\"dlp\"] -> deny events filtered. events=[] -> all events pass. MockNotifier count verification.",
         "priority": "high",
         "dependencies": [
-          "14"
+          23
         ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-12T06:26:28.969Z"
+        "status": "pending",
+        "subtasks": []
       },
       {
-        "id": "16",
-        "title": "Create comprehensive README.md",
-        "description": "Write complete README with project description, quick start, policy examples, architecture diagram",
-        "details": "1. One-line description + badges (build, license)\n2. Quick Start: cargo install, agent-shield init, edit config.toml, agent-shield start\n3. Policy file examples (TOML format)\n4. Mermaid architecture diagram showing proxy->policy->logging->notification flow\n5. 'What AgentShield is NOT' section\n6. Contributing guidelines, code of conduct link",
-        "testStrategy": "Manual review: ensure all sections complete, links work, mermaid renders correctly on GitHub",
+        "id": 25,
+        "title": "Implement TOML environment variable substitution (R3)",
+        "description": "Support ${ENV_VAR} and $ENV_VAR substitution in TOML config with clear error on missing vars",
+        "details": "In AppConfig::load_from_path, preprocess TOML string with regex `\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}` and `\\$([A-Z_][A-Z0-9_]*)`. Use std::env::var(), fail with AgentShieldError::ConfigParse if missing. Apply to all fields (bot_token, chat_id, listen, etc.).",
+        "testStrategy": "Set env vars -> correct substitution. Unset env var -> error contains var name. No ${} syntax -> passes unchanged.",
         "priority": "medium",
         "dependencies": [],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-12T06:28:45.725Z"
+        "status": "pending",
+        "subtasks": []
       },
       {
-        "id": "17",
-        "title": "Setup GitHub Actions CI workflow",
-        "description": "Create .github/workflows/ci.yml for automatic test/lint/format on PR/push",
-        "details": "1. Use dtolnay/rust-toolchain@stable action\n2. Steps: cargo fmt --check, cargo clippy -- -D warnings, cargo test --all\n3. ubuntu-latest runner\n4. Cache cargo registry and target dir\n5. Fail-fast: true\n6. Trigger: push, pull_request",
-        "testStrategy": "Push to test branch, verify CI runs successfully on GitHub Actions",
+        "id": 26,
+        "title": "Define and implement ConnectionContext struct (R4)",
+        "description": "Create ConnectionContext struct consolidating 8 handle_http_request arguments",
+        "details": "```rust\n#[derive(Clone)]\npub struct ConnectionContext {\n    pub policy: Option<Arc<PolicyConfig>>,\n    pub db: Option<DbPool>,\n    pub ask_tx: Option<mpsc::Sender<AskRequest>>,\n    pub dlp_scanner: Option<Arc<dyn DlpScanner>>,\n    pub system_allowlist: Option<Arc<Vec<String>>>,\n    pub notifier: Option<Arc<dyn Notifier>>,\n}``` Use Arc<ConnectionContext> passed to all handlers. Create in ProxyServer::start().",
+        "testStrategy": "Refactor all handlers to use context. Run full test suite (117+ tests) to verify no functional changes.",
         "priority": "medium",
-        "dependencies": [],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-12T06:48:18.263Z"
-      },
-      {
-        "id": "18",
-        "title": "Define DLP trait interfaces and RegexScanner",
-        "description": "Create DlpScanner trait, DlpFinding struct, Severity enum, and basic RegexScanner implementation",
-        "details": "1. src/dlp/mod.rs: pub trait DlpScanner { async fn scan(&self, payload: &[u8]) -> Vec<DlpFinding>; }\n2. #[derive(Serialize)] struct DlpFinding { pattern_name: String, matched_text: String, severity: Severity }\n3. #[derive(Clone, Copy)] enum Severity { Low, Medium, High, Critical }\n4. src/dlp/patterns.rs: RegexScanner struct with HashMap<String, Regex>\n5. impl DlpScanner for RegexScanner with async scan() matching API keys, emails, etc.",
-        "testStrategy": "Unit tests: RegexScanner detects API key pattern 'sk-...', email patterns, verify DlpFinding fields correct",
-        "priority": "medium",
-        "dependencies": [],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-12T06:50:05.414Z"
-      },
-      {
-        "id": "19",
-        "title": "Implement unified error handling with thiserror",
-        "description": "Replace anyhow in library code with AgentShieldError enum, keep anyhow only in main.rs",
-        "details": "1. src/error.rs: #[derive(thiserror::Error, Debug)] pub enum AgentShieldError { #[error(\"Policy error: {0}\")] Policy(String), #[error(\"Database error\")] Database(#[from] rusqlite::Error), #[error(\"Proxy error\")] Proxy(String), ... }\n2. Update all lib.rs modules Result<T, anyhow::Error> -> Result<T, AgentShieldError>\n3. main.rs: use anyhow::Context; map AgentShieldError to anyhow::Error\n4. Add From<AgentShieldError> for anyhow::Error",
-        "testStrategy": "Compile test: ensure all modules compile with new error types. Unit test error variants propagate correctly",
-        "priority": "medium",
-        "dependencies": [],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-12T06:52:38.241Z"
-      },
-      {
-        "id": "20",
-        "title": "Add Host header injection defense",
-        "description": "Implement domain/port validation in parse_host_port() to prevent header injection",
-        "details": "1. src/proxy/connect.rs: fn validate_domain(domain: &str) -> bool { regex: ^[a-zA-Z0-9.-]+$ }\n2. fn validate_port(port: u16) -> bool { (1..=65535).contains(&port) }\n3. In parse_host_port(): extract host/port, validate both, reject invalid with 400 Bad Request\n4. CONNECT: add config option allowed_ports: vec![443, 8443] default\n5. Log rejected requests with action: 'invalid-host'",
-        "testStrategy": "Fuzz test: invalid domains (@, /, \\x00), invalid ports (0, 65536, -1), verify 400 response and logging",
-        "priority": "high",
         "dependencies": [
-          "11"
+          21,
+          24
         ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-12T06:28:00.767Z"
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": 27,
+        "title": "Update handler signatures to use ConnectionContext",
+        "description": "Refactor accept_loop, handle_connection, handle_connect, handle_http_request to use ConnectionContext",
+        "details": "Replace 8 individual args with single Arc<ConnectionContext> parameter. Remove #[allow(clippy::too_many_arguments)]. Update all call sites. Ensure system_allowed access works post-R1 changes.",
+        "testStrategy": "Full proxy integration tests pass. clippy passes without too_many_arguments suppression. Verify R1 DLP bypass still works.",
+        "priority": "medium",
+        "dependencies": [
+          21,
+          24,
+          26
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": 28,
+        "title": "Optimize cmd_status() with SQL aggregation (R6)",
+        "description": "Replace full table load with SQL COUNT(*) GROUP BY action query",
+        "details": "```rust\npub struct RequestStats {\n    pub total: usize,\n    pub allowed: usize,\n    pub denied: usize,\n    pub asked: usize,\n    pub system_allowed: usize,\n}\n\npub fn query_stats(conn: &Connection) -> Result<RequestStats> {\n    let rows: Vec<(String, i64)> = sqlx::query_as(\n        \"SELECT action, COUNT(*) as cnt FROM requests GROUP BY action\"\n    ).fetch_all(conn)?;\n    // Aggregate counts\n}```",
+        "testStrategy": "Insert 10 mixed log entries -> stats match expected counts. Empty DB -> all zeros. Performance test with 10k rows.",
+        "priority": "low",
+        "dependencies": [],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": 29,
+        "title": "Update Cargo.toml to v0.4.0 and run CI checks",
+        "description": "Bump version, run cargo fmt/clippy/test, ensure ≥130 tests pass",
+        "details": "Update Cargo.toml: version = \"0.4.0\". Run `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`. Ensure 117 existing + 13+ new tests ≥130 total. Rust 1.85+ compatible.",
+        "testStrategy": "CI pipeline green. Test count verification. No clippy warnings.",
+        "priority": "medium",
+        "dependencies": [
+          21,
+          22,
+          24,
+          25,
+          27,
+          28
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": 30,
+        "title": "Update README.md with new features documentation",
+        "description": "Document env var substitution syntax, events filtering, system allowlist DLP bypass",
+        "details": "Add sections: 1) Environment variables: `${AGENTSHIELD_TELEGRAM_TOKEN}` syntax with examples. 2) Events filtering: `events = [\"deny\", \"dlp\"]` with all types. 3) System allowlist warning: DLP bypass security note. Include TOML examples.",
+        "testStrategy": "Manual review: all new features documented accurately. Examples parse/validate correctly.",
+        "priority": "low",
+        "dependencies": [
+          21,
+          22,
+          24,
+          25
+        ],
+        "status": "pending",
+        "subtasks": []
       }
     ],
     "metadata": {
-      "version": "1.0.0",
-      "lastModified": "2026-02-12T06:52:38.241Z",
-      "taskCount": 10,
-      "completedCount": 10,
-      "tags": [
-        "master"
-      ]
+      "created": "2026-02-13T02:24:26.787Z",
+      "updated": "2026-02-13T02:24:26.787Z",
+      "description": "Tasks for master context"
     }
   }
 }

@@ -1,4 +1,4 @@
-# AgentShield v0.2 PRD - Code Review V2 이슈 해결
+# AgentShield v0.4 PRD
 
 ## 프로젝트 개요
 
@@ -9,136 +9,289 @@ AgentShield는 AI 에이전트(OpenClaw, Claude Code 등)의 아웃바운드 네
 - Language: Rust (edition 2024, MSRV 1.85)
 - License: Apache-2.0
 
-## v0.1 현황
+## v0.3 현황
 
-프록시 → 정책 → 로깅 파이프라인이 완성되어 실제로 동작하는 egress firewall 상태.
-- 81개 테스트 (unit + integration)
-- OpenClaw Telegram 채널 프록시 연동 (`agentshield integrate openclaw`)
-- TOML 기반 정책 엔진 (도메인/메서드별 allow/deny/ask)
-- SQLite 요청 로깅 + JSON/CSV 내보내기
-- DLP RegexScanner 구현 (7개 패턴) - **프록시에 미연결**
+프록시 → 정책 → DLP → 로깅(connection pool) → 알림 → system allowlist까지 전체 파이프라인이
+end-to-end로 동작하는 상태. CI 4회 연속 Green.
 
-## v0.2 목표
+- 117개 테스트 (unit + integration)
+- 15개 DLP 패턴 (10개 AI 프로바이더 + 5개 인프라/범용)
+- r2d2 SQLite connection pool (max_size=4)
+- Telegram 알림 (fire-and-forget, Notifier trait)
+- System allowlist (정책 bypass)
+- tracing 전면 적용 (println! 제거)
+- OpenClaw integrate 커맨드
+- 3개 정책 템플릿 (openclaw-default, claude-code-default, strict)
 
-Code Review V2에서 발견된 P1/P2 이슈 해결.
-DLP 스캐너를 프록시에 연결하여 민감 데이터 유출 방지 기능을 완성한다.
+### v0.3 미해결 이슈 (본 PRD의 근거)
+
+| # | 이슈 | 우선순위 | 근거 |
+|---|------|---------|------|
+| 1 | System allowlist가 DLP를 스킵하지 않음 | P1 | 알림 본문에 API key가 포함되면 Telegram 전송이 차단됨 |
+| 2 | Notification events 필터 미구현 | P1 | `events = ["deny"]` 설정해도 DLP 알림도 전송 |
+| 3 | Telegram bot_token TOML 평문 노출 | P2 | git 커밋 시 토큰 유출 위험 |
+| 4 | `handle_http_request` 인자 8개 | P2 | clippy suppress로 넘김, 확장성 한계 |
+| 5 | OpenAI `sk-None-`, `sk-admin-` 패턴 누락 | P2 | 최신 OpenAI 키 변형 미탐지 |
+| 6 | Fireworks AI `fw_` prefix 근거 없음 | P3 | 오탐 위험 |
+| 7 | `cmd_status()` 전체 테이블 로드 | P3 | 로그 증가 시 메모리 이슈 |
+
+## v0.4 목표
+
+v0.3 코드 리뷰에서 발견된 P1/P2 이슈를 해결하고, HN 공개 전 마지막 품질 개선을 완료한다.
+코드 구조를 리팩토링하여 v0.5(rate limiting, wildcard 매칭 등) 확장에 대비한다.
 
 ## 요구사항
 
-### R1: DLP 스캐너 프록시 연결 [P1]
+### R1: System Allowlist DLP Bypass 정책 [P1]
 
-**배경**: RegexScanner가 구현되어 있지만 connect.rs에서 호출하지 않아 단위 테스트에서만 동작.
+**배경**: `system_allowlist`에 등록된 도메인(예: `api.telegram.org`)은 정책 평가를 bypass하지만,
+DLP 스캔은 여전히 실행된다. 알림 메시지 본문에 API key가 포함될 수 있는 edge case에서
+Telegram 전송 자체가 DLP에 의해 차단될 수 있다.
 
 **기능 요구사항**:
-1. ProxyServer에 `with_dlp(scanner: Arc<dyn DlpScanner>)` 빌더 메서드 추가
-2. HTTP 평문 요청의 body를 `\r\n\r\n` 이후로 추출하여 DLP 스캔 실행
-3. Critical severity (openai-api-key, aws-access-key, private-key, github-token) → 403 차단 + DB 로깅 + tracing::warn
-4. Non-critical severity (email, generic-api-key) → tracing::warn 로깅만, 요청은 통과
-5. CONNECT 터널(HTTPS)은 암호화되어 스캔 불가 → DLP 스킵
-6. TOML `[dlp]` 섹션으로 활성화/패턴 선택 제어:
-   ```toml
-   [dlp]
-   enabled = true
-   # patterns = ["openai-api-key", "aws-access-key"]  # 선택적, 미지정 시 전체 패턴
-   ```
+1. `system_allowlist` 도메인으로의 요청은 DLP 스캔도 bypass
+2. `system-allow` action으로 로깅 시 "policy+dlp bypass" reason 명시
+3. 보안 주석 추가: system allowlist는 내부 서비스 전용이며, 외부 도메인 등록 시 DLP 보호가 해제됨을 경고
 
 **기술 설계**:
-- DLP 스캔 위치: 정책 평가 후 (allow/ask 승인 후), 원격 서버 전송 전
-- `extract_body()` 헬퍼 함수로 raw_request에서 body 분리
-- 기존 Builder 패턴 (`with_policy`, `with_db`, `with_ask_channel`) 동일하게 확장
-- `accept_loop` → `handle_connection` → `handle_http_request`로 `Option<Arc<dyn DlpScanner>>` 전파
+- `connect.rs`의 `handle_http_request`에서 `system_allowed == true`일 때 DLP 블록(line 396-437) 건너뛰기
+- `handle_connect`는 이미 DLP를 스킵하므로 변경 불필요
 
-**수정 파일**:
-- `src/proxy/mod.rs` - ProxyServer 구조체 + 빌더
-- `src/proxy/connect.rs` - 함수 시그니처 + DLP 스캔 로직
-- `src/main.rs` - DlpConfig → RegexScanner 초기화
+**테스트**:
+- system allowlist 도메인으로의 HTTP POST에 API key 포함 → 403이 아닌 통과 확인
+- system allowlist에 없는 도메인 → 기존 DLP 동작 유지 확인
 
-**재사용 코드**:
-- `DlpScanner` trait: `src/dlp/mod.rs`
-- `RegexScanner`: `src/dlp/patterns.rs`
-- `DlpConfig`: `src/policy/config.rs` (이미 AppConfig에 포함)
+**예상 소요**: 30분
 
-### R2: ASK 채널 보안 강화 [P1]
+---
 
-**배경**: `ask_and_wait()` 함수에서 ASK 채널이 없을 때 `ask_tx.is_none()` = `true` (allow)를 반환하여
-정책이 ASK인 요청이 무조건 허용되는 보안 취약점이 있음. 또한 `cmd_start()`에서 ASK 채널을
-생성하지 않아 실제 운영 시 이 취약 경로를 항상 타게 됨.
+### R2: Notification Events 필터 구현 [P1]
+
+**배경**: `TelegramConfig.events: Vec<String>`이 config에 정의되어 있지만, `connect.rs`에서
+이벤트 타입별 필터링을 하지 않는다. 모든 deny와 DLP critical이 무조건 알림으로 전송된다.
 
 **기능 요구사항**:
-1. `ask_and_wait()`: 채널 미존재 또는 에러 시 `false` (deny) 반환 (fail-closed)
-2. `cmd_start()`: ASK 채널(mpsc) 항상 생성 + stdin/stdout 기반 interactive prompt 스폰
-3. `prompt_decision()` (기존 구현) 호출하여 사용자 승인/거부 처리
+1. `events` 필드로 알림 이벤트 타입 필터링:
+   - `"deny"`: 정책에 의한 차단 (RequestDenied)
+   - `"dlp"`: DLP critical 탐지 (DlpFinding)
+   - `"start"`: 프록시 시작 (ProxyStarted)
+   - `"shutdown"`: 프록시 종료 (ProxyShutdown)
+   - 빈 배열 또는 미지정: 전체 이벤트 전송 (하위 호환)
+2. `NotificationEvent`에 이벤트 타입 문자열을 반환하는 `event_type()` 메서드 추가
+3. `Notifier` trait 래퍼 또는 `FilteredNotifier`에서 events 체크 후 전달
 
-**수정 파일**:
-- `src/proxy/connect.rs` - line 113-114: `ask_tx.is_none()` → `false`
-- `src/main.rs` - ASK 채널 생성 + tokio::spawn으로 prompt handler
+**기술 설계**:
+```rust
+impl NotificationEvent {
+    pub fn event_type(&self) -> &str {
+        match self {
+            Self::RequestDenied { .. } => "deny",
+            Self::DlpFinding { .. } => "dlp",
+            Self::ProxyStarted { .. } => "start",
+            Self::ProxyShutdown => "shutdown",
+        }
+    }
+}
 
-**영향 범위**:
-- 기존 `e2e_openclaw_full_flow` 테스트: ASK 채널 없이 ASK 규칙 테스트하므로 수정 필요
-  → ASK 채널 + auto-approve로 변경
-
-### R3: README 정비 [P1]
-
-**수정 내용**:
-1. Quick Start에 `agentshield integrate openclaw` 사용법 추가 (Node.js 앱용)
-2. CLI Commands 섹션에 `integrate openclaw`, `integrate remove` 추가
-3. 테스트 수를 최종 값으로 업데이트
-4. Docker 섹션에 Node.js 23의 `HTTP_PROXY` 환경변수 미지원 주의사항 추가
-5. Development 섹션에 MSRV 1.85 명시
-
-### R4: Cargo.toml MSRV [P2]
-
-- `rust-version = "1.85"` 필드 추가
-- Rust 2024 edition은 1.85.0에서 안정화됨
-
-### R5: 코드 품질 확인 [P2]
-
-- Issue 3.3 (let-chain): Rust 2024 edition에서 안정화. CI `cargo test` 통과로 확인.
-- Issue 3.4 (Mutex 성능): MVP 적합. 향후 connection pool 고려.
-
-## 테스트 계획
-
-### 새로 추가할 테스트
-
-| 테스트명 | 위치 | 유형 | 설명 |
-|----------|------|------|------|
-| `ask_policy_without_channel_defaults_to_deny` | integration_test.rs | 통합 | ASK 채널 없을 때 403 반환 |
-| `dlp_blocks_http_request_with_critical_finding` | proxy_test.rs | 통합 | API 키 포함 HTTP → 403 |
-| `dlp_allows_clean_http_request` | proxy_test.rs | 통합 | 깨끗한 HTTP → 통과 |
-| `dlp_does_not_scan_connect_tunnels` | proxy_test.rs | 통합 | CONNECT → DLP 무시 |
-| `extract_body_from_raw_request` | connect.rs | 단위 | body 추출 로직 |
-| `no_body_in_get_request` | connect.rs | 단위 | body 없는 GET 요청 |
-
-### 수정할 기존 테스트
-
-| 테스트명 | 변경 내용 |
-|----------|-----------|
-| `e2e_openclaw_full_flow` | ASK 채널 추가 (auto-approve) |
-
-### 검증 커맨드
-
-```bash
-cargo test --all           # 전체 테스트 통과
-cargo clippy -- -D warnings  # Clippy 경고 0
-cargo fmt --check           # 포맷 일치
+pub struct FilteredNotifier {
+    inner: Arc<dyn Notifier>,
+    allowed_events: Vec<String>,
+}
 ```
 
-## 완료 기준
+**TOML 예시**:
+```toml
+[notification]
+enabled = true
 
-1. 모든 테스트 통과 (기존 81 + 신규 6 = 87+)
-2. `cargo clippy -- -D warnings` 경고 0
-3. `[dlp] enabled = true` 설정 시 HTTP 요청 body DLP 스캔 동작 확인
-4. Critical DLP finding → 403 차단 확인
-5. ASK 정책 + 채널 미존재 → deny 확인
-6. README가 현재 기능(integrate, MSRV, 테스트 수)과 일치
-7. `.taskmaster/docs/prd.txt` PRD 문서 생성 완료
+[notification.telegram]
+bot_token = "123456:ABC"
+chat_id = "-100123"
+events = ["deny", "dlp"]    # start/shutdown 알림 제외
+```
 
-## 향후 과제 (v0.3+)
+**테스트**:
+- `events = ["deny"]` → DLP finding 알림 미전송 확인
+- `events = ["dlp"]` → RequestDenied 알림 미전송 확인
+- `events = []` 또는 미지정 → 전체 이벤트 전송 확인 (하위 호환)
+- MockNotifier로 수신 이벤트 수 검증
 
-- `println!` → `tracing` 매크로 통일 (main.rs에 59개 잔존)
-- Notification trait + Telegram 알림 (deny/DLP 이벤트 실시간 알림)
-- 시스템 allowlist (알림 채널 자기 차단 방지)
-- `Mutex<Connection>` → connection pool (r2d2-sqlite)
-- Phase 2: macOS pf 방화벽 기반 투명 프록시 (모든 프로세스 트래픽 강제 리다이렉트)
-- MITM TLS (v0.3): CONNECT 터널 내부 DLP 스캔 가능
-- Node.js 24+ `NODE_USE_ENV_PROXY=1` 환경변수 프록시 지원 활용
+**예상 소요**: 1시간
+
+---
+
+### R3: Config 환경변수 참조 지원 [P2]
+
+**배경**: `agentshield.toml`에 Telegram bot_token이 평문으로 들어가며,
+git 커밋 시 토큰이 유출될 위험이 있다.
+
+**기능 요구사항**:
+1. TOML 값에서 `${ENV_VAR}` 또는 `$ENV_VAR` 패턴을 환경변수 값으로 치환
+2. 환경변수 미설정 시 startup에서 명확한 에러 메시지 출력 후 종료
+3. bot_token, chat_id 등 시크릿성 필드에 우선 적용
+4. 일반 필드(listen, default 등)에도 동일하게 동작
+
+**기술 설계**:
+- `AppConfig::load_from_path`에서 TOML 파싱 전에 환경변수 치환 수행
+- regex: `\$\{([A-Za-z_][A-Za-z0-9_]*)\}` 또는 단순 `\$([A-Z_][A-Z0-9_]*)`
+- 치환 실패 시 `AgentShieldError::ConfigParse`로 에러
+
+**TOML 예시**:
+```toml
+[notification.telegram]
+bot_token = "${AGENTSHIELD_TELEGRAM_TOKEN}"
+chat_id = "${AGENTSHIELD_TELEGRAM_CHAT_ID}"
+```
+
+**테스트**:
+- 환경변수 설정 → 정상 파싱 확인
+- 환경변수 미설정 → 에러 메시지에 변수명 포함 확인
+- `${}` 없는 일반 값 → 그대로 통과 확인
+
+**예상 소요**: 1시간
+
+---
+
+### R4: ConnectionContext 리팩토링 [P2]
+
+**배경**: `handle_http_request`의 인자가 8개로, `#[allow(clippy::too_many_arguments)]`로
+suppress 중. v0.4에서 events 필터, v0.5에서 rate limiting 추가 시 더 늘어날 예정.
+
+**기능 요구사항**:
+1. 프록시 핸들러에 전달되는 공유 상태를 `ConnectionContext` struct로 통합
+2. `accept_loop`, `handle_connection`, `handle_connect`, `handle_http_request` 시그니처 정리
+3. `#[allow(clippy::too_many_arguments)]` 제거
+
+**기술 설계**:
+```rust
+pub struct ConnectionContext {
+    pub policy: Option<Arc<PolicyConfig>>,
+    pub db: Option<DbPool>,
+    pub ask_tx: Option<mpsc::Sender<AskRequest>>,
+    pub dlp_scanner: Option<Arc<dyn DlpScanner>>,
+    pub system_allowlist: Option<Arc<Vec<String>>>,
+    pub notifier: Option<Arc<dyn Notifier>>,
+}
+```
+- `Arc<ConnectionContext>`로 clone하여 각 connection task에 전달
+- `ProxyServer::start()`에서 `ConnectionContext` 생성
+
+**테스트**:
+- 기존 프록시 테스트 전부 통과 확인 (API 변경 없음, 내부 리팩토링)
+
+**예상 소요**: 1시간
+
+---
+
+### R5: DLP 패턴 최신화 [P2]
+
+**배경**: 2026년 2월 기준 API key 포맷 조사 결과, 현재 패턴에 누락/오류가 발견됨.
+
+**변경 사항**:
+
+#### 5-1. OpenAI 패턴 업데이트
+현재: `sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}`
+
+OpenAI는 현재 4가지 키 변형을 사용:
+- `sk-proj-` (프로젝트 키)
+- `sk-svcacct-` (서비스 계정 키)
+- `sk-None-` (사용자 키, 프로젝트 미지정)
+- `sk-admin-` (Admin API 키)
+
+변경: `sk-(?:proj-|svcacct-|None-|admin-)?[A-Za-z0-9_-]{20,}`
+
+> 주의: `sk-admin-`은 Anthropic `sk-ant-`와 겹치지 않음 (Anthropic은 `sk-ant-api03-` 또는 `sk-ant-admin-`)
+
+#### 5-2. Fireworks AI 패턴 재검토
+현재: `fw_[A-Za-z0-9]{20,}` (prefix 기반)
+
+Fireworks AI 공식 문서, GitGuardian, liteLLM 어디에서도 `fw_` prefix를 확인할 수 없다.
+Fireworks는 API 응답의 `prefix` 필드로 사용자별 다른 prefix를 사용하는 구조.
+
+변경 옵션:
+- A) 컨텍스트 기반으로 변경: `(?i)(?:fireworks[_-]?(?:api[_-]?)?key)\s*[:=]\s*["']?([A-Za-z0-9_-]{32,})["']?`
+- B) 확인될 때까지 제거하고 `generic-api-key` 패턴에 의존
+- **권장: 옵션 A** (false positive 줄이면서 커버리지 유지)
+
+#### 5-3. Together AI 패턴 완화
+현재: `[A-Fa-f0-9]{64}` (hex 64자 고정)
+
+Together AI 키가 반드시 hex 64자인지 공식 문서에서 확인 불가.
+변경: `[A-Za-z0-9]{32,}` (alphanumeric 32자 이상)
+
+**테스트**:
+- `sk-None-xxx...` 키 탐지 확인
+- `sk-admin-xxx...` 키 탐지 확인 (OpenAI)
+- `sk-ant-admin...` 키 → anthropic-api-key로 탐지 확인 (OpenAI 아님)
+- Fireworks 컨텍스트 기반 탐지 확인
+- Together AI alphanumeric 키 탐지 확인
+
+**예상 소요**: 30분
+
+---
+
+### R6: `cmd_status()` SQL 집계 최적화 [P3]
+
+**배경**: 현재 `query_recent(conn, usize::MAX)`로 전체 테이블을 메모리에 로드한 뒤
+Rust에서 filter/count. 로그가 수만 건 이상이면 메모리 낭비.
+
+**기능 요구사항**:
+1. SQL `COUNT(*) ... GROUP BY action`으로 DB 레벨 집계
+2. 총 요청 수, action별 카운트를 단일 쿼리로 반환
+
+**기술 설계**:
+```rust
+pub struct RequestStats {
+    pub total: usize,
+    pub allowed: usize,
+    pub denied: usize,
+    pub asked: usize,
+    pub system_allowed: usize,
+}
+
+pub fn query_stats(conn: &Connection) -> Result<RequestStats> {
+    // SELECT action, COUNT(*) as cnt FROM requests GROUP BY action
+}
+```
+
+**테스트**:
+- 10개 혼합 로그 insert 후 stats 정확성 확인
+- 빈 DB에서 all-zero 반환 확인
+
+**예상 소요**: 30분
+
+---
+
+## 우선순위 요약 및 일정
+
+| 요구사항 | 우선순위 | 예상 소요 | 의존성 |
+|---------|---------|----------|--------|
+| R1: System Allowlist DLP Bypass | P1 | 30분 | 없음 |
+| R2: Notification Events 필터 | P1 | 1시간 | 없음 |
+| R3: Config 환경변수 참조 | P2 | 1시간 | 없음 |
+| R4: ConnectionContext 리팩토링 | P2 | 1시간 | R1 이후 |
+| R5: DLP 패턴 최신화 | P2 | 30분 | 없음 |
+| R6: cmd_status SQL 집계 | P3 | 30분 | 없음 |
+| **합계** | | **~4.5시간** | |
+
+**구현 순서 권장**: R1 → R5 → R2 → R3 → R4 → R6
+
+- R1을 먼저 해야 R4 리팩토링 시 system_allowed 분기가 깔끔해짐
+- R5는 독립적이라 아무 때나 가능하지만 빨리 하는 게 좋음 (DLP 정확도)
+- R4는 R1, R2 완료 후에 해야 최종 인자 목록이 확정됨
+
+## 비기능 요구사항
+
+- CI Green 유지 (cargo fmt + clippy + test)
+- 기존 117개 테스트 + R1~R6 신규 테스트 ≥ 130개
+- README.md 업데이트: 환경변수 참조 문법, events 필터 설명 추가
+- `version = "0.4.0"` Cargo.toml 업데이트
+
+## 향후 v0.5 고려사항 (본 PRD 범위 밖)
+
+- Rate limiting (도메인/메서드별 요청 속도 제한)
+- Wildcard 도메인 매칭 (`*.github.com`)
+- 정책 hot-reload (SIGHUP 또는 파일 감시)
+- Claude Code 연동 (`agentshield integrate claude-code`)
+- MITM HTTPS inspection (v0.3에서 "CONNECT tunnel은 DLP 불가" → 해결)
+- 웹 대시보드 (로그 조회, 정책 편집)

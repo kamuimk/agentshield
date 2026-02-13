@@ -36,9 +36,7 @@ pub enum NotificationEvent {
         severity: String,
     },
     /// The proxy server has started listening.
-    ProxyStarted {
-        listen_addr: String,
-    },
+    ProxyStarted { listen_addr: String },
     /// The proxy server is shutting down.
     ProxyShutdown,
 }
