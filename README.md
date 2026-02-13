@@ -106,8 +106,8 @@ enabled = true
 # [notification]
 # enabled = true
 # [notification.telegram]
-# bot_token = "YOUR_BOT_TOKEN"
-# chat_id = "YOUR_CHAT_ID"
+# bot_token = "${AGENTSHIELD_TELEGRAM_TOKEN}"
+# chat_id = "${AGENTSHIELD_TELEGRAM_CHAT_ID}"
 # events = ["deny", "dlp"]
 ```
 
@@ -119,14 +119,28 @@ enabled = true
 | `deny` | Request blocked with `403 Forbidden` + `X-AgentShield-Reason` header |
 | `ask` | Terminal prompt for approval. Timeout (30s) defaults to deny |
 
+### Environment Variable Substitution
+
+Use `${VAR_NAME}` or `$VAR_NAME` syntax in `agentshield.toml` to reference environment variables. This keeps secrets out of the config file:
+
+```toml
+[notification.telegram]
+bot_token = "${AGENTSHIELD_TELEGRAM_TOKEN}"
+chat_id = "${AGENTSHIELD_TELEGRAM_CHAT_ID}"
+```
+
+Missing variables produce a clear error message at startup.
+
 ### System Allowlist
 
-Domains in `[system] allowlist` bypass policy evaluation entirely. This prevents the proxy from blocking its own notification traffic.
+Domains in `[system] allowlist` bypass policy evaluation **and** DLP scanning entirely. This prevents the proxy from blocking its own notification traffic.
 
 ```toml
 [system]
 allowlist = ["api.telegram.org"]
 ```
+
+> **Security Warning:** Allowlisted domains bypass **all** protection (policy + DLP). Only add trusted internal services. Adding external domains disables outbound protection for that destination.
 
 ### Notifications
 
@@ -137,10 +151,21 @@ AgentShield can send alerts to Telegram when requests are denied or DLP findings
 enabled = true
 
 [notification.telegram]
-bot_token = "123456:ABC-DEF"
-chat_id = "-1001234567890"
+bot_token = "${AGENTSHIELD_TELEGRAM_TOKEN}"
+chat_id = "${AGENTSHIELD_TELEGRAM_CHAT_ID}"
 events = ["deny", "dlp"]
 ```
+
+The `events` field filters which event types trigger a notification:
+
+| Event Type | Description |
+|------------|-------------|
+| `deny` | Request blocked by policy |
+| `dlp` | DLP scanner detected sensitive data |
+| `start` | Proxy server started |
+| `shutdown` | Proxy server shutting down |
+
+If `events` is empty or omitted, all event types are forwarded (backward compatible).
 
 ### DLP (Data Loss Prevention)
 
@@ -212,7 +237,7 @@ AgentShield complements tools like [PipeLock](https://github.com/nichochar/pipel
 - **MSRV:** Rust 1.85 (edition 2024)
 
 ```bash
-cargo test --all     # Run all tests (117+ tests)
+cargo test --all     # Run all tests (134+ tests)
 cargo clippy         # Lint
 cargo fmt            # Format
 ```
