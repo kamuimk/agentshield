@@ -3,11 +3,14 @@
 //! Parses command-line arguments via [`clap`] and dispatches to the appropriate
 //! handler: `start`, `stop`, `status`, `logs`, `policy`, `init`, or `integrate`.
 
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
 use agentshield::cli::integrate;
-use agentshield::cli::prompt::{AskRequest, PromptDecision, PromptRequest};
+use agentshield::cli::prompt::{
+    AskRequest, PromptDecision, PromptRequest, append_rule_to_config, generate_rule,
+};
 use agentshield::cli::{Cli, Commands, IntegrateTarget, PolicyAction};
 use agentshield::dlp::DlpScanner;
 use agentshield::dlp::patterns::RegexScanner;
@@ -18,7 +21,7 @@ use agentshield::notification::telegram::TelegramNotifier;
 use agentshield::policy::config::AppConfig;
 use agentshield::proxy::ProxyServer;
 use clap::Parser;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Return the path to the SQLite log database (`~/.agentshield/agentshield.db`).
 fn db_path() -> std::path::PathBuf {
@@ -95,6 +98,7 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
 
     // ASK channel: proxy sends ASK requests, handler prompts user via stdin/stdout
     let (ask_tx, mut ask_rx) = tokio::sync::mpsc::channel::<AskRequest>(100);
+    let config_path_owned = config_path.to_path_buf();
     tokio::spawn(async move {
         let stdin = std::io::stdin();
         let stdout = std::io::stdout();
@@ -117,7 +121,25 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
                         agentshield::cli::prompt::handle_inspect(&prompt_req, &mut writer).ok();
                         continue; // Re-prompt after inspect
                     }
-                    Ok(PromptDecision::AllowOnce | PromptDecision::AddRule) => {
+                    Ok(PromptDecision::AllowOnce) => {
+                        ask_req.respond(true);
+                        break;
+                    }
+                    Ok(PromptDecision::AddRule) => {
+                        let rule = generate_rule(&prompt_req);
+                        match append_rule_to_config(&config_path_owned, &rule) {
+                            Ok(()) => {
+                                writeln!(
+                                    writer,
+                                    "Rule '{}' added to config (effective next restart)",
+                                    rule.name
+                                )
+                                .ok();
+                            }
+                            Err(e) => {
+                                warn!("Failed to append rule: {}", e);
+                            }
+                        }
                         ask_req.respond(true);
                         break;
                     }
