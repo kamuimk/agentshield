@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -443,13 +442,14 @@ async fn proxy_logs_requests_to_sqlite() {
         }],
     };
 
-    // Create in-memory DB wrapped in Arc<Mutex>
-    let conn = logging::open_memory_db().unwrap();
-    let db = Arc::new(Mutex::new(conn));
+    // Create a file-based DB pool (in-memory pools don't share state across connections)
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test_proxy_logs.db");
+    let pool = logging::open_pool(&db_path).unwrap();
 
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(policy)
-        .with_db(db.clone());
+        .with_db(pool.clone());
     let addr = server.start().await.unwrap();
 
     // 1. Allowed request (CONNECT to example.com)
@@ -480,8 +480,8 @@ async fn proxy_logs_requests_to_sqlite() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Verify SQLite has both log entries
-    let db_lock = db.lock().unwrap();
-    let logs = logging::query_recent(&db_lock, 10).unwrap();
+    let conn = pool.get().unwrap();
+    let logs = logging::query_recent(&conn, 10).unwrap();
     assert!(
         logs.len() >= 2,
         "Expected at least 2 logs, got {}",

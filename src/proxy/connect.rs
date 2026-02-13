@@ -1,6 +1,3 @@
-use std::sync::{Arc, Mutex};
-
-use rusqlite::Connection;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -9,16 +6,21 @@ use tracing::{error, info, warn};
 use crate::cli::prompt::AskRequest;
 use crate::dlp::{DlpScanner, Severity};
 use crate::logging;
+use crate::logging::DbPool;
+use crate::notification::{NotificationEvent, Notifier};
 use crate::policy::config::{Action, PolicyConfig};
 use crate::policy::evaluator::{self, RequestInfo};
+use std::sync::Arc;
 
 /// Main accept loop: accept incoming connections and handle them.
 pub async fn accept_loop(
     listener: TcpListener,
     policy: Option<Arc<PolicyConfig>>,
-    db: Option<Arc<Mutex<Connection>>>,
+    db: Option<DbPool>,
     ask_tx: Option<mpsc::Sender<AskRequest>>,
     dlp_scanner: Option<Arc<dyn DlpScanner>>,
+    system_allowlist: Option<Arc<Vec<String>>>,
+    notifier: Option<Arc<dyn Notifier>>,
 ) {
     loop {
         match listener.accept().await {
@@ -28,6 +30,8 @@ pub async fn accept_loop(
                 let db = db.clone();
                 let ask_tx = ask_tx.clone();
                 let dlp = dlp_scanner.clone();
+                let allowlist = system_allowlist.clone();
+                let notifier = notifier.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(
                         stream,
@@ -35,6 +39,8 @@ pub async fn accept_loop(
                         db.as_ref(),
                         ask_tx.as_ref(),
                         dlp.as_ref(),
+                        allowlist.as_deref(),
+                        &notifier,
                     )
                     .await
                     {
@@ -49,30 +55,47 @@ pub async fn accept_loop(
     }
 }
 
-/// Log a request to the database if a DB connection is available.
+/// Log a request to the database if a DB pool is available.
 fn log_to_db(
-    db: Option<&Arc<Mutex<Connection>>>,
+    db: Option<&DbPool>,
     method: &str,
     domain: &str,
     path: &str,
     action: &str,
     reason: &str,
 ) {
-    if let Some(db) = db
-        && let Ok(conn) = db.lock()
-    {
-        let log = logging::RequestLog {
-            id: None,
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            method: method.to_string(),
-            domain: domain.to_string(),
-            path: path.to_string(),
-            action: action.to_string(),
-            reason: reason.to_string(),
-        };
-        if let Err(e) = logging::log_request(&conn, &log) {
-            warn!("Failed to log request to DB: {}", e);
+    if let Some(pool) = db {
+        match pool.get() {
+            Ok(conn) => {
+                let log = logging::RequestLog {
+                    id: None,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    method: method.to_string(),
+                    domain: domain.to_string(),
+                    path: path.to_string(),
+                    action: action.to_string(),
+                    reason: reason.to_string(),
+                };
+                if let Err(e) = logging::log_request(&conn, &log) {
+                    warn!("Failed to log request to DB: {}", e);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to get DB connection from pool: {}", e);
+            }
         }
+    }
+}
+
+/// Fire-and-forget notification: spawn a task that won't block the proxy.
+fn notify_event(notifier: &Option<Arc<dyn Notifier>>, event: NotificationEvent) {
+    if let Some(n) = notifier {
+        let n = n.clone();
+        tokio::spawn(async move {
+            if let Err(e) = n.notify(&event).await {
+                warn!("notification failed: {}", e);
+            }
+        });
     }
 }
 
@@ -80,9 +103,11 @@ fn log_to_db(
 async fn handle_connection(
     mut client: TcpStream,
     policy: Option<&PolicyConfig>,
-    db: Option<&Arc<Mutex<Connection>>>,
+    db: Option<&DbPool>,
     ask_tx: Option<&mpsc::Sender<AskRequest>>,
     dlp_scanner: Option<&Arc<dyn DlpScanner>>,
+    system_allowlist: Option<&Vec<String>>,
+    notifier: &Option<Arc<dyn Notifier>>,
 ) -> crate::error::Result<()> {
     let mut buf = vec![0u8; 8192];
     let n = client.read(&mut buf).await?;
@@ -94,10 +119,28 @@ async fn handle_connection(
     let first_line = request.lines().next().unwrap_or("");
 
     if first_line.starts_with("CONNECT ") {
-        // CONNECT tunnels are encrypted — DLP cannot scan them
-        handle_connect(&mut client, first_line, policy, db, ask_tx).await
+        handle_connect(
+            &mut client,
+            first_line,
+            policy,
+            db,
+            ask_tx,
+            system_allowlist,
+            notifier,
+        )
+        .await
     } else {
-        handle_http_request(&mut client, &buf[..n], policy, db, ask_tx, dlp_scanner).await
+        handle_http_request(
+            &mut client,
+            &buf[..n],
+            policy,
+            db,
+            ask_tx,
+            dlp_scanner,
+            system_allowlist,
+            notifier,
+        )
+        .await
     }
 }
 
@@ -129,8 +172,10 @@ async fn handle_connect(
     client: &mut TcpStream,
     first_line: &str,
     policy: Option<&PolicyConfig>,
-    db: Option<&Arc<Mutex<Connection>>>,
+    db: Option<&DbPool>,
     ask_tx: Option<&mpsc::Sender<AskRequest>>,
+    system_allowlist: Option<&Vec<String>>,
+    notifier: &Option<Arc<dyn Notifier>>,
 ) -> crate::error::Result<()> {
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     if parts.len() < 2 {
@@ -151,8 +196,21 @@ async fn handle_connect(
         return Ok(());
     }
 
+    // System allowlist bypass: skip policy evaluation for internal services
+    let allowlist_slice = system_allowlist.map(|v| v.as_slice());
+    if is_system_allowed(domain, allowlist_slice) {
+        info!("SYSTEM-ALLOW CONNECT to {} (allowlist)", target);
+        log_to_db(
+            db,
+            "CONNECT",
+            domain,
+            "/",
+            "system-allow",
+            "system allowlist",
+        );
+    }
     // Policy evaluation for CONNECT (domain-level only)
-    if let Some(policy) = policy {
+    else if let Some(policy) = policy {
         let req_info = RequestInfo {
             domain: domain.to_string(),
             method: "CONNECT".to_string(),
@@ -163,6 +221,15 @@ async fn handle_connect(
             Action::Deny => {
                 warn!("BLOCKED CONNECT to {} - {}", target, result.reason);
                 log_to_db(db, "CONNECT", domain, "/", "deny", &result.reason);
+                notify_event(
+                    notifier,
+                    NotificationEvent::RequestDenied {
+                        domain: domain.to_string(),
+                        method: "CONNECT".to_string(),
+                        path: "/".to_string(),
+                        reason: result.reason.clone(),
+                    },
+                );
                 let response = format!(
                     "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: {}\r\n\r\n",
                     result.reason
@@ -177,6 +244,15 @@ async fn handle_connect(
                     log_to_db(db, "CONNECT", domain, "/", "allow", "approved via ASK");
                 } else {
                     log_to_db(db, "CONNECT", domain, "/", "deny", "denied via ASK");
+                    notify_event(
+                        notifier,
+                        NotificationEvent::RequestDenied {
+                            domain: domain.to_string(),
+                            method: "CONNECT".to_string(),
+                            path: "/".to_string(),
+                            reason: "denied via ASK".to_string(),
+                        },
+                    );
                     let response = format!(
                         "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: {}\r\n\r\n",
                         "denied via ASK prompt"
@@ -225,13 +301,16 @@ async fn handle_connect(
 }
 
 /// Handle plain HTTP requests by forwarding to the target server.
+#[allow(clippy::too_many_arguments)]
 async fn handle_http_request(
     client: &mut TcpStream,
     raw_request: &[u8],
     policy: Option<&PolicyConfig>,
-    db: Option<&Arc<Mutex<Connection>>>,
+    db: Option<&DbPool>,
     ask_tx: Option<&mpsc::Sender<AskRequest>>,
     dlp_scanner: Option<&Arc<dyn DlpScanner>>,
+    system_allowlist: Option<&Vec<String>>,
+    notifier: &Option<Arc<dyn Notifier>>,
 ) -> crate::error::Result<()> {
     let request_str = String::from_utf8_lossy(raw_request);
     let first_line = request_str.lines().next().unwrap_or("");
@@ -257,8 +336,15 @@ async fn handle_http_request(
         return Ok(());
     }
 
+    // System allowlist bypass: skip policy evaluation for internal services
+    let allowlist_slice = system_allowlist.map(|v| v.as_slice());
+    let system_allowed = is_system_allowed(&host, allowlist_slice);
+    if system_allowed {
+        info!("SYSTEM-ALLOW {} {} (allowlist)", method, uri);
+        log_to_db(db, method, &host, &path, "system-allow", "system allowlist");
+    }
     // Policy evaluation for HTTP
-    if let Some(policy) = policy {
+    else if let Some(policy) = policy {
         let req_info = RequestInfo {
             domain: host.clone(),
             method: method.to_string(),
@@ -269,6 +355,15 @@ async fn handle_http_request(
             Action::Deny => {
                 warn!("BLOCKED {} {} - {}", method, uri, result.reason);
                 log_to_db(db, method, &host, &path, "deny", &result.reason);
+                notify_event(
+                    notifier,
+                    NotificationEvent::RequestDenied {
+                        domain: host.clone(),
+                        method: method.to_string(),
+                        path: path.clone(),
+                        reason: result.reason.clone(),
+                    },
+                );
                 let response = format!(
                     "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: {}\r\n\r\n",
                     result.reason
@@ -315,6 +410,18 @@ async fn handle_http_request(
                     );
                 }
                 log_to_db(db, method, &host, &path, "deny", "DLP: critical finding");
+                // Notify about first critical finding
+                if let Some(f) = findings.iter().find(|f| f.severity == Severity::Critical) {
+                    notify_event(
+                        notifier,
+                        NotificationEvent::DlpFinding {
+                            domain: host.clone(),
+                            method: method.to_string(),
+                            pattern_name: f.pattern_name.clone(),
+                            severity: format!("{:?}", f.severity),
+                        },
+                    );
+                }
                 let response = "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: DLP: sensitive data detected\r\n\r\n";
                 client.write_all(response.as_bytes()).await?;
                 return Ok(());
@@ -379,6 +486,11 @@ fn extract_body(raw_request: &[u8]) -> Option<&[u8]> {
             let start = pos + 4;
             (start < raw_request.len()).then(|| &raw_request[start..])
         })
+}
+
+/// Check if a domain is in the system allowlist (bypass policy evaluation).
+fn is_system_allowed(domain: &str, allowlist: Option<&[String]>) -> bool {
+    allowlist.is_some_and(|list| list.iter().any(|d| d == domain))
 }
 
 /// Validate that a domain name contains only safe characters.
@@ -487,6 +599,24 @@ mod tests {
         let raw = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
         let body = extract_body(raw);
         assert!(body.is_none());
+    }
+
+    #[test]
+    fn system_allowlist_match() {
+        let list = vec!["api.telegram.org".to_string(), "internal.svc".to_string()];
+        assert!(is_system_allowed("api.telegram.org", Some(&list)));
+        assert!(is_system_allowed("internal.svc", Some(&list)));
+    }
+
+    #[test]
+    fn system_allowlist_no_match() {
+        let list = vec!["api.telegram.org".to_string()];
+        assert!(!is_system_allowed("evil.com", Some(&list)));
+    }
+
+    #[test]
+    fn system_allowlist_none() {
+        assert!(!is_system_allowed("api.telegram.org", None));
     }
 
     #[test]

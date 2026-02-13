@@ -10,3 +10,15 @@ default = "deny"
 
 [dlp]
 enabled = false
+
+# System allowlist: domains that bypass policy evaluation (e.g., notification endpoints)
+# [system]
+# allowlist = ["api.telegram.org"]
+
+# Notifications: receive alerts on deny/DLP events
+# [notification]
+# enabled = true
+# [notification.telegram]
+# bot_token = "YOUR_BOT_TOKEN"
+# chat_id = "YOUR_CHAT_ID"
+# events = ["deny", "dlp"]

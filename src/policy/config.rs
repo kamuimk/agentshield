@@ -43,12 +43,38 @@ pub struct DlpConfig {
     pub patterns: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct SystemConfig {
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TelegramConfig {
+    pub bot_token: String,
+    pub chat_id: String,
+    #[serde(default)]
+    pub events: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NotificationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub telegram: Option<TelegramConfig>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
     pub proxy: ProxyConfig,
     pub policy: PolicyConfig,
     #[serde(default)]
     pub dlp: Option<DlpConfig>,
+    #[serde(default)]
+    pub system: Option<SystemConfig>,
+    #[serde(default)]
+    pub notification: Option<NotificationConfig>,
 }
 
 impl AppConfig {

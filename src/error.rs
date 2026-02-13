@@ -17,6 +17,9 @@ pub enum AgentShieldError {
 
     #[error("Proxy error: {0}")]
     Proxy(String),
+
+    #[error("Notification error: {0}")]
+    Notification(String),
 }
 
 pub type Result<T> = std::result::Result<T, AgentShieldError>;

@@ -20,14 +20,99 @@ impl RegexScanner {
     pub fn new() -> Self {
         let mut patterns = HashMap::new();
 
-        // OpenAI API key
+        // === AI Provider API Keys ===
+
+        // OpenAI API key (sk-..., sk-proj-..., sk-svcacct-...)
         patterns.insert(
             "openai-api-key".to_string(),
             PatternDef {
-                regex: Regex::new(r"sk-[A-Za-z0-9]{20,}").unwrap(),
+                regex: Regex::new(r"sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}").unwrap(),
                 severity: Severity::Critical,
             },
         );
+
+        // Anthropic API key (sk-ant-api03-...)
+        patterns.insert(
+            "anthropic-api-key".to_string(),
+            PatternDef {
+                regex: Regex::new(r"sk-ant-(?:api03|admin)[A-Za-z0-9_-]{20,}").unwrap(),
+                severity: Severity::Critical,
+            },
+        );
+
+        // Google AI / Gemini API key (AIzaSy...)
+        patterns.insert(
+            "google-ai-api-key".to_string(),
+            PatternDef {
+                regex: Regex::new(r"AIzaSy[A-Za-z0-9_-]{33}").unwrap(),
+                severity: Severity::Critical,
+            },
+        );
+
+        // HuggingFace API token (hf_...)
+        patterns.insert(
+            "huggingface-token".to_string(),
+            PatternDef {
+                regex: Regex::new(r"hf_[A-Za-z0-9]{20,}").unwrap(),
+                severity: Severity::Critical,
+            },
+        );
+
+        // Cohere API key (v2 format, 40-char alphanumeric)
+        patterns.insert(
+            "cohere-api-key".to_string(),
+            PatternDef {
+                regex: Regex::new(r##"(?i)(?:cohere[_-]?(?:api[_-]?)?key|co[_-]api[_-]key)\s*[:=]\s*["']?([A-Za-z0-9]{40})["']?"##).unwrap(),
+                severity: Severity::Critical,
+            },
+        );
+
+        // Replicate API token (r8_...)
+        patterns.insert(
+            "replicate-api-token".to_string(),
+            PatternDef {
+                regex: Regex::new(r"r8_[A-Za-z0-9]{20,}").unwrap(),
+                severity: Severity::Critical,
+            },
+        );
+
+        // Mistral API key (no fixed prefix, context-based detection)
+        patterns.insert(
+            "mistral-api-key".to_string(),
+            PatternDef {
+                regex: Regex::new(r##"(?i)(?:mistral[_-]?(?:api[_-]?)?key)\s*[:=]\s*["']?([A-Za-z0-9]{32,})["']?"##).unwrap(),
+                severity: Severity::Critical,
+            },
+        );
+
+        // Groq API key (gsk_...)
+        patterns.insert(
+            "groq-api-key".to_string(),
+            PatternDef {
+                regex: Regex::new(r"gsk_[A-Za-z0-9]{20,}").unwrap(),
+                severity: Severity::Critical,
+            },
+        );
+
+        // Together AI API key
+        patterns.insert(
+            "together-api-key".to_string(),
+            PatternDef {
+                regex: Regex::new(r##"(?i)(?:together[_-]?(?:api[_-]?)?key)\s*[:=]\s*["']?([A-Fa-f0-9]{64})["']?"##).unwrap(),
+                severity: Severity::Critical,
+            },
+        );
+
+        // Fireworks AI API key (fw_...)
+        patterns.insert(
+            "fireworks-api-key".to_string(),
+            PatternDef {
+                regex: Regex::new(r"fw_[A-Za-z0-9]{20,}").unwrap(),
+                severity: Severity::Critical,
+            },
+        );
+
+        // === Cloud & Infrastructure Keys ===
 
         // AWS Access Key ID
         patterns.insert(
@@ -43,7 +128,7 @@ impl RegexScanner {
             "generic-api-key".to_string(),
             PatternDef {
                 regex: Regex::new(
-                    r#"(?i)(api[_-]?key|apikey)\s*[:=]\s*["']?([A-Za-z0-9_\-]{20,})["']?"#,
+                    r##"(?i)(api[_-]?key|apikey)\s*[:=]\s*["']?([A-Za-z0-9_-]{20,})["']?"##,
                 )
                 .unwrap(),
                 severity: Severity::High,
@@ -243,5 +328,131 @@ mod tests {
             .find(|f| f.pattern_name == "generic-api-key")
             .expect("should detect generic api key");
         assert_eq!(finding.severity, Severity::High);
+    }
+
+    // === AI Provider Key Tests ===
+
+    #[test]
+    fn detects_anthropic_api_key() {
+        let scanner = RegexScanner::new();
+        let payload = b"x-api-key: sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGHIJKL";
+        let findings = scanner.scan(payload);
+        let finding = findings
+            .iter()
+            .find(|f| f.pattern_name == "anthropic-api-key")
+            .expect("should detect anthropic api key");
+        assert_eq!(finding.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn detects_anthropic_admin_key() {
+        let scanner = RegexScanner::new();
+        let payload = b"x-api-key: sk-ant-admin01-abcdefghijklmnopqrstuvwxyz1234567890";
+        let findings = scanner.scan(payload);
+        let finding = findings
+            .iter()
+            .find(|f| f.pattern_name == "anthropic-api-key")
+            .expect("should detect anthropic admin key");
+        assert_eq!(finding.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn detects_google_ai_api_key() {
+        let scanner = RegexScanner::new();
+        let payload = b"key=AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q";
+        let findings = scanner.scan(payload);
+        let finding = findings
+            .iter()
+            .find(|f| f.pattern_name == "google-ai-api-key")
+            .expect("should detect google ai api key");
+        assert_eq!(finding.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn detects_huggingface_token() {
+        let scanner = RegexScanner::new();
+        // Build token at runtime to avoid GitHub push protection false positive
+        let token = format!(
+            "Authorization: Bearer {}{}",
+            "hf_", "aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQ"
+        );
+        let findings = scanner.scan(token.as_bytes());
+        let finding = findings
+            .iter()
+            .find(|f| f.pattern_name == "huggingface-token")
+            .expect("should detect huggingface token");
+        assert_eq!(finding.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn detects_replicate_api_token() {
+        let scanner = RegexScanner::new();
+        let payload = b"REPLICATE_API_TOKEN=r8_ABCDEFGHIJKLMNOPQRSTUVWXYZab";
+        let findings = scanner.scan(payload);
+        let finding = findings
+            .iter()
+            .find(|f| f.pattern_name == "replicate-api-token")
+            .expect("should detect replicate api token");
+        assert_eq!(finding.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn detects_groq_api_key() {
+        let scanner = RegexScanner::new();
+        let payload = b"Authorization: Bearer gsk_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij1234";
+        let findings = scanner.scan(payload);
+        let finding = findings
+            .iter()
+            .find(|f| f.pattern_name == "groq-api-key")
+            .expect("should detect groq api key");
+        assert_eq!(finding.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn detects_fireworks_api_key() {
+        let scanner = RegexScanner::new();
+        let payload = b"FIREWORKS_API_KEY=fw_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
+        let findings = scanner.scan(payload);
+        let finding = findings
+            .iter()
+            .find(|f| f.pattern_name == "fireworks-api-key")
+            .expect("should detect fireworks api key");
+        assert_eq!(finding.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn detects_cohere_api_key() {
+        let scanner = RegexScanner::new();
+        let payload = b"cohere_api_key=abcdefghijABCDEFGHIJabcdefghijABCDEFGHIJ";
+        let findings = scanner.scan(payload);
+        let finding = findings
+            .iter()
+            .find(|f| f.pattern_name == "cohere-api-key")
+            .expect("should detect cohere api key");
+        assert_eq!(finding.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn detects_mistral_api_key() {
+        let scanner = RegexScanner::new();
+        let payload = b"MISTRAL_API_KEY=abcdefghijklmnopqrstuvwxyz123456789012";
+        let findings = scanner.scan(payload);
+        let finding = findings
+            .iter()
+            .find(|f| f.pattern_name == "mistral-api-key")
+            .expect("should detect mistral api key");
+        assert_eq!(finding.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn detects_openai_project_key() {
+        let scanner = RegexScanner::new();
+        let payload = b"Authorization: Bearer sk-proj-abcdefghijklmnopqrstuvwxyz1234567890";
+        let findings = scanner.scan(payload);
+        let finding = findings
+            .iter()
+            .find(|f| f.pattern_name == "openai-api-key")
+            .expect("should detect openai project api key");
+        assert_eq!(finding.severity, Severity::Critical);
     }
 }

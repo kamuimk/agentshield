@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use agentshield::cli::integrate;
 use agentshield::cli::prompt::{AskRequest, PromptDecision, PromptRequest};
@@ -7,9 +7,12 @@ use agentshield::cli::{Cli, Commands, IntegrateTarget, PolicyAction};
 use agentshield::dlp::DlpScanner;
 use agentshield::dlp::patterns::RegexScanner;
 use agentshield::logging;
+use agentshield::notification::Notifier;
+use agentshield::notification::telegram::TelegramNotifier;
 use agentshield::policy::config::AppConfig;
 use agentshield::proxy::ProxyServer;
 use clap::Parser;
+use tracing::info;
 
 fn db_path() -> std::path::PathBuf {
     dirs_path().join("agentshield.db")
@@ -64,15 +67,14 @@ async fn main() -> anyhow::Result<()> {
 
 async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
     let config = AppConfig::load_from_path(config_path)?;
-    println!("AgentShield starting...");
-    println!("Config: {}", config_path.display());
-    println!("Listen: {}", config.proxy.listen);
-    println!("Default policy: {:?}", config.policy.default);
-    println!("Rules loaded: {}", config.policy.rules.len());
+    info!("AgentShield starting...");
+    info!("Config: {}", config_path.display());
+    info!("Listen: {}", config.proxy.listen);
+    info!("Default policy: {:?}", config.policy.default);
+    info!("Rules loaded: {}", config.policy.rules.len());
 
     let db = db_path();
-    let conn = logging::open_db(&db)?;
-    let db_arc = Arc::new(Mutex::new(conn));
+    let pool = logging::open_pool(&db)?;
 
     // ASK channel: proxy sends ASK requests, handler prompts user via stdin/stdout
     let (ask_tx, mut ask_rx) = tokio::sync::mpsc::channel::<AskRequest>(100);
@@ -98,8 +100,16 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
 
     let mut server = ProxyServer::new(config.proxy.listen.clone())
         .with_policy(config.policy.clone())
-        .with_db(db_arc)
+        .with_db(pool)
         .with_ask_channel(ask_tx);
+
+    // Apply system allowlist if configured
+    if let Some(ref system) = config.system {
+        if !system.allowlist.is_empty() {
+            info!("System allowlist: {:?}", system.allowlist);
+            server = server.with_system_allowlist(system.allowlist.clone());
+        }
+    }
 
     // Initialize DLP scanner if enabled in config
     if let Some(ref dlp_config) = config.dlp {
@@ -108,30 +118,44 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
                 Some(patterns) => Arc::new(RegexScanner::with_patterns(patterns)),
                 None => Arc::new(RegexScanner::new()),
             };
-            println!("DLP scanner enabled");
+            info!("DLP scanner enabled");
             server = server.with_dlp(scanner);
         }
     }
 
+    // Initialize notification if configured
+    if let Some(ref notif_config) = config.notification {
+        if notif_config.enabled {
+            if let Some(ref tg) = notif_config.telegram {
+                let notifier: Arc<dyn Notifier> = Arc::new(TelegramNotifier::new(
+                    tg.bot_token.clone(),
+                    tg.chat_id.clone(),
+                ));
+                info!("Telegram notification enabled (chat_id: {})", tg.chat_id);
+                server = server.with_notifier(notifier);
+            }
+        }
+    }
+
     let addr = server.start().await?;
-    println!("Proxy running on {}", addr);
-    println!(
+    info!("Proxy running on {}", addr);
+    info!(
         "Set HTTPS_PROXY=http://{} to route traffic through AgentShield",
         addr
     );
 
     // Keep running until interrupted
     tokio::signal::ctrl_c().await?;
-    println!("\nShutting down...");
+    info!("Shutting down...");
     Ok(())
 }
 
 fn cmd_stop() -> anyhow::Result<()> {
-    println!("Stopping AgentShield proxy...");
+    info!("Stopping AgentShield proxy...");
     let pid_path = dirs_path().join("agentshield.pid");
     if pid_path.exists() {
         let pid_str = std::fs::read_to_string(&pid_path)?;
-        println!("Stopping process {}", pid_str.trim());
+        info!("Stopping process {}", pid_str.trim());
         std::fs::remove_file(&pid_path)?;
     } else {
         println!("No running AgentShield instance found.");
@@ -249,25 +273,25 @@ fn cmd_policy_template(config_path: &Path, name: &str) -> anyhow::Result<()> {
 }
 
 fn cmd_init(config_path: &Path) -> anyhow::Result<()> {
-    println!("Initializing AgentShield...");
+    info!("Initializing AgentShield...");
 
     // Create data directory
     let data_dir = dirs_path();
     std::fs::create_dir_all(&data_dir)?;
-    println!("  Created data dir: {}", data_dir.display());
+    info!("Created data dir: {}", data_dir.display());
 
     // Initialize database
     let db = db_path();
     logging::open_db(&db)?;
-    println!("  Initialized database: {}", db.display());
+    info!("Initialized database: {}", db.display());
 
     // Create default config if not exists
     if !config_path.exists() {
         let default_config = include_str!("../templates/strict.toml");
         std::fs::write(config_path, default_config)?;
-        println!("  Created config: {}", config_path.display());
+        info!("Created config: {}", config_path.display());
     } else {
-        println!("  Config already exists: {}", config_path.display());
+        info!("Config already exists: {}", config_path.display());
     }
 
     println!("\nDone! Next steps:");

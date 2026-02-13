@@ -2,25 +2,27 @@ pub mod connect;
 pub mod tls;
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-
-use rusqlite::Connection;
+use std::sync::Arc;
 
 use crate::error::Result;
+use crate::logging::DbPool;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::cli::prompt::AskRequest;
 use crate::dlp::DlpScanner;
+use crate::notification::Notifier;
 use crate::policy::config::PolicyConfig;
 
 pub struct ProxyServer {
     listen_addr: String,
     policy: Option<Arc<PolicyConfig>>,
-    db: Option<Arc<Mutex<Connection>>>,
+    db: Option<DbPool>,
     ask_tx: Option<mpsc::Sender<AskRequest>>,
     dlp_scanner: Option<Arc<dyn DlpScanner>>,
+    system_allowlist: Option<Arc<Vec<String>>>,
+    notifier: Option<Arc<dyn Notifier>>,
 }
 
 impl ProxyServer {
@@ -31,6 +33,8 @@ impl ProxyServer {
             db: None,
             ask_tx: None,
             dlp_scanner: None,
+            system_allowlist: None,
+            notifier: None,
         }
     }
 
@@ -39,7 +43,7 @@ impl ProxyServer {
         self
     }
 
-    pub fn with_db(mut self, db: Arc<Mutex<Connection>>) -> Self {
+    pub fn with_db(mut self, db: DbPool) -> Self {
         self.db = Some(db);
         self
     }
@@ -54,6 +58,18 @@ impl ProxyServer {
         self
     }
 
+    pub fn with_system_allowlist(mut self, allowlist: Vec<String>) -> Self {
+        if !allowlist.is_empty() {
+            self.system_allowlist = Some(Arc::new(allowlist));
+        }
+        self
+    }
+
+    pub fn with_notifier(mut self, notifier: Arc<dyn Notifier>) -> Self {
+        self.notifier = Some(notifier);
+        self
+    }
+
     /// Start the proxy server and return the actual bound address.
     pub async fn start(&self) -> Result<SocketAddr> {
         let listener = TcpListener::bind(&self.listen_addr).await?;
@@ -64,8 +80,10 @@ impl ProxyServer {
         let db = self.db.clone();
         let ask_tx = self.ask_tx.clone();
         let dlp = self.dlp_scanner.clone();
+        let allowlist = self.system_allowlist.clone();
+        let notifier = self.notifier.clone();
         tokio::spawn(async move {
-            connect::accept_loop(listener, policy, db, ask_tx, dlp).await;
+            connect::accept_loop(listener, policy, db, ask_tx, dlp, allowlist, notifier).await;
         });
 
         Ok(local_addr)

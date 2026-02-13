@@ -18,10 +18,12 @@ flowchart LR
     C -->|Ask| F[Terminal Prompt]
     F -->|Approve| D
     F -->|Deny| E
-    B --> G[(SQLite Log)]
+    B --> G[(SQLite Pool)]
     B --> H{DLP Scanner}
     H -->|Critical| E
     H -->|Clean| D
+    E -->|Notify| I[Telegram]
+    H -->|Critical| I
 ```
 
 ## Quick Start
@@ -94,6 +96,18 @@ action = "ask"
 [dlp]
 enabled = true
 # patterns = ["openai-api-key", "aws-access-key"]  # optional: subset of built-in patterns
+
+# System allowlist: bypass policy for internal services (e.g., notification endpoints)
+# [system]
+# allowlist = ["api.telegram.org"]
+
+# Notifications: receive Telegram alerts on deny/DLP events
+# [notification]
+# enabled = true
+# [notification.telegram]
+# bot_token = "YOUR_BOT_TOKEN"
+# chat_id = "YOUR_CHAT_ID"
+# events = ["deny", "dlp"]
 ```
 
 ### Policy Actions
@@ -104,13 +118,36 @@ enabled = true
 | `deny` | Request blocked with `403 Forbidden` + `X-AgentShield-Reason` header |
 | `ask` | Terminal prompt for approval. Timeout (30s) defaults to deny |
 
+### System Allowlist
+
+Domains in `[system] allowlist` bypass policy evaluation entirely. This prevents the proxy from blocking its own notification traffic.
+
+```toml
+[system]
+allowlist = ["api.telegram.org"]
+```
+
+### Notifications
+
+AgentShield can send alerts to Telegram when requests are denied or DLP findings occur. Notifications are fire-and-forget — failures never block the proxy.
+
+```toml
+[notification]
+enabled = true
+
+[notification.telegram]
+bot_token = "123456:ABC-DEF"
+chat_id = "-1001234567890"
+events = ["deny", "dlp"]
+```
+
 ### DLP (Data Loss Prevention)
 
 When `[dlp] enabled = true`, AgentShield scans HTTP request bodies for sensitive data before forwarding:
 
 | Severity | Patterns | Action |
 |----------|----------|--------|
-| Critical | OpenAI API key, AWS access key, private key, GitHub token | Block (403) |
+| Critical | OpenAI, Anthropic, Google AI, HuggingFace, Cohere, Replicate, Mistral, Groq, Together AI, Fireworks AI API keys, AWS access key, private key, GitHub token | Block (403) |
 | High | Generic API key | Log warning, allow |
 | Medium | Email address | Log warning, allow |
 
@@ -174,7 +211,7 @@ AgentShield complements tools like [PipeLock](https://github.com/nichochar/pipel
 - **MSRV:** Rust 1.85 (edition 2024)
 
 ```bash
-cargo test --all     # Run all tests (87 tests)
+cargo test --all     # Run all tests (117+ tests)
 cargo clippy         # Lint
 cargo fmt            # Format
 ```

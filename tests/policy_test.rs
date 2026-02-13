@@ -112,6 +112,63 @@ fn invalid_toml_returns_error() {
 }
 
 #[test]
+fn parse_system_config_with_allowlist() {
+    let toml_str = r#"
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+[system]
+allowlist = ["api.telegram.org", "internal.service.local"]
+"#;
+    let config: AppConfig = toml::from_str(toml_str).unwrap();
+    let system = config.system.unwrap();
+    assert_eq!(system.allowlist.len(), 2);
+    assert!(system.allowlist.contains(&"api.telegram.org".to_string()));
+    assert!(
+        system
+            .allowlist
+            .contains(&"internal.service.local".to_string())
+    );
+}
+
+#[test]
+fn parse_config_without_system_section() {
+    let config: AppConfig = toml::from_str(MINIMAL_TOML).unwrap();
+    assert!(config.system.is_none());
+}
+
+#[test]
+fn parse_notification_config() {
+    let toml_str = r#"
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+[notification]
+enabled = true
+
+[notification.telegram]
+bot_token = "123456:ABC-DEF"
+chat_id = "-1001234567890"
+events = ["deny", "dlp"]
+"#;
+    let config: AppConfig = toml::from_str(toml_str).unwrap();
+    let notif = config.notification.unwrap();
+    assert!(notif.enabled);
+    let tg = notif.telegram.unwrap();
+    assert_eq!(tg.bot_token, "123456:ABC-DEF");
+    assert_eq!(tg.chat_id, "-1001234567890");
+    assert_eq!(tg.events, vec!["deny", "dlp"]);
+}
+
+#[test]
 fn config_load_from_file() {
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
