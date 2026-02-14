@@ -15,10 +15,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
+use tokio::sync::broadcast;
+
 use crate::ask::AskBroadcaster;
 use crate::dlp::{DlpScanner, Severity};
 use crate::logging;
-use crate::logging::DbPool;
+use crate::logging::{DbPool, LogEvent};
 use crate::notification::{NotificationEvent, Notifier};
 use crate::policy::config::{Action, PolicyConfig};
 use crate::policy::evaluator::{self, RequestInfo, domain_matches};
@@ -43,6 +45,8 @@ pub struct ConnectionContext {
     pub system_allowlist: Option<Arc<Vec<String>>>,
     /// Notification backend for deny/DLP alerts.
     pub notifier: Option<Arc<dyn Notifier>>,
+    /// Broadcast channel for real-time log events (web dashboard SSE, etc.).
+    pub event_tx: Option<broadcast::Sender<LogEvent>>,
 }
 
 /// Main accept loop: accept incoming connections and handle them.
@@ -74,12 +78,14 @@ fn log_to_db(
     action: &str,
     reason: &str,
 ) {
+    let timestamp = chrono::Utc::now().to_rfc3339();
+
     if let Some(ref pool) = ctx.db {
         match pool.get() {
             Ok(conn) => {
                 let log = logging::RequestLog {
                     id: None,
-                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    timestamp: timestamp.clone(),
                     method: method.to_string(),
                     domain: domain.to_string(),
                     path: path.to_string(),
@@ -94,6 +100,18 @@ fn log_to_db(
                 warn!("Failed to get DB connection from pool: {}", e);
             }
         }
+    }
+
+    // Broadcast log event for real-time subscribers (SSE, etc.)
+    if let Some(ref tx) = ctx.event_tx {
+        let _ = tx.send(LogEvent {
+            timestamp,
+            method: method.to_string(),
+            domain: domain.to_string(),
+            path: path.to_string(),
+            action: action.to_string(),
+            reason: reason.to_string(),
+        });
     }
 }
 
@@ -666,5 +684,104 @@ mod tests {
         assert!(!validate_domain("evil.com:443\r\nInjected: header"));
         assert!(!validate_domain("domain with spaces"));
         assert!(!validate_domain("evil.com\0null"));
+    }
+
+    #[test]
+    fn log_to_db_broadcasts_event() {
+        let (tx, mut rx) = broadcast::channel::<LogEvent>(16);
+        let ctx = ConnectionContext {
+            policy: None,
+            db: None,
+            ask_broadcaster: None,
+            dlp_scanner: None,
+            system_allowlist: None,
+            notifier: None,
+            event_tx: Some(tx),
+        };
+
+        log_to_db(&ctx, "GET", "example.com", "/api", "allow", "test rule");
+
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.method, "GET");
+        assert_eq!(event.domain, "example.com");
+        assert_eq!(event.path, "/api");
+        assert_eq!(event.action, "allow");
+        assert_eq!(event.reason, "test rule");
+        assert!(!event.timestamp.is_empty());
+    }
+
+    #[test]
+    fn log_to_db_no_event_tx_does_not_panic() {
+        let ctx = ConnectionContext {
+            policy: None,
+            db: None,
+            ask_broadcaster: None,
+            dlp_scanner: None,
+            system_allowlist: None,
+            notifier: None,
+            event_tx: None,
+        };
+
+        // Should not panic when event_tx is None
+        log_to_db(&ctx, "POST", "api.test.com", "/v1", "deny", "blocked");
+    }
+
+    #[test]
+    fn log_to_db_no_receivers_does_not_panic() {
+        let (tx, _) = broadcast::channel::<LogEvent>(16);
+        // Drop the receiver — send should silently fail
+        let ctx = ConnectionContext {
+            policy: None,
+            db: None,
+            ask_broadcaster: None,
+            dlp_scanner: None,
+            system_allowlist: None,
+            notifier: None,
+            event_tx: Some(tx),
+        };
+
+        // Should not panic even with no active receivers
+        log_to_db(&ctx, "DELETE", "api.test.com", "/v1", "deny", "no receiver");
+    }
+
+    #[test]
+    fn log_to_db_multiple_subscribers_receive_event() {
+        let (tx, mut rx1) = broadcast::channel::<LogEvent>(16);
+        let mut rx2 = tx.subscribe();
+        let ctx = ConnectionContext {
+            policy: None,
+            db: None,
+            ask_broadcaster: None,
+            dlp_scanner: None,
+            system_allowlist: None,
+            notifier: None,
+            event_tx: Some(tx),
+        };
+
+        log_to_db(&ctx, "PUT", "multi.com", "/data", "allow", "multi test");
+
+        let e1 = rx1.try_recv().unwrap();
+        let e2 = rx2.try_recv().unwrap();
+        assert_eq!(e1.domain, "multi.com");
+        assert_eq!(e2.domain, "multi.com");
+        assert_eq!(e1.action, "allow");
+        assert_eq!(e2.action, "allow");
+    }
+
+    #[test]
+    fn log_event_clone_and_debug() {
+        let event = LogEvent {
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            method: "GET".to_string(),
+            domain: "test.com".to_string(),
+            path: "/".to_string(),
+            action: "allow".to_string(),
+            reason: "ok".to_string(),
+        };
+        let cloned = event.clone();
+        assert_eq!(cloned.domain, "test.com");
+        // Debug trait works
+        let debug_str = format!("{:?}", event);
+        assert!(debug_str.contains("test.com"));
     }
 }
