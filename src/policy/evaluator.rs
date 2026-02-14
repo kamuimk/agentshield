@@ -268,12 +268,7 @@ mod tests {
     fn exact_domain_does_not_match_subdomains() {
         let policy = make_policy(
             Action::Deny,
-            vec![make_rule(
-                "exact",
-                vec!["example.com"],
-                None,
-                Action::Allow,
-            )],
+            vec![make_rule("exact", vec!["example.com"], None, Action::Allow)],
         );
         // Exact match works
         let req = make_req("example.com", "GET", "/");

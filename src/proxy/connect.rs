@@ -142,8 +142,12 @@ async fn ask_and_wait(
     body: Option<String>,
 ) -> bool {
     if let Some(ref tx) = ctx.ask_tx {
-        let (req, rx) =
-            AskRequest::new(domain.to_string(), method.to_string(), path.to_string(), body);
+        let (req, rx) = AskRequest::new(
+            domain.to_string(),
+            method.to_string(),
+            path.to_string(),
+            body,
+        );
         if tx.send(req).await.is_ok() {
             // Wait up to 30 seconds for a response
             match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
@@ -391,8 +395,8 @@ async fn handle_http_request(
                         path: path.clone(),
                     },
                 );
-                let body_str = extract_body(raw_request)
-                    .and_then(|b| String::from_utf8(b.to_vec()).ok());
+                let body_str =
+                    extract_body(raw_request).and_then(|b| String::from_utf8(b.to_vec()).ok());
                 let allowed = ask_and_wait(ctx, &host, method, &path, body_str).await;
                 if allowed {
                     log_to_db(ctx, method, &host, &path, "allow", "approved via ASK");

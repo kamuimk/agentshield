@@ -164,11 +164,7 @@ fn substitute_env_vars(input: &str) -> Result<String> {
         let m = cap.get(0).unwrap();
         result.push_str(&input[last_end..m.start()]);
 
-        let var_name = cap
-            .get(1)
-            .or_else(|| cap.get(2))
-            .unwrap()
-            .as_str();
+        let var_name = cap.get(1).or_else(|| cap.get(2)).unwrap().as_str();
         let value = std::env::var(var_name)
             .map_err(|_| AgentShieldError::ConfigEnvVar(var_name.to_string()))?;
         result.push_str(&value);

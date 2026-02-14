@@ -183,7 +183,13 @@ pub fn handle_inspect<W: Write>(req: &PromptRequest, writer: &mut W) -> Result<(
     writeln!(writer, "\n--- Request Payload ---")?;
     match &req.body {
         Some(body) if body.len() > MAX_BODY_DISPLAY => {
-            writeln!(writer, "{} ... (truncated, showing {}/{} bytes)", &body[..MAX_BODY_DISPLAY], MAX_BODY_DISPLAY, body.len())?;
+            writeln!(
+                writer,
+                "{} ... (truncated, showing {}/{} bytes)",
+                &body[..MAX_BODY_DISPLAY],
+                MAX_BODY_DISPLAY,
+                body.len()
+            )?;
         }
         Some(body) => writeln!(writer, "{}", body)?,
         None => writeln!(writer, "(no body available)")?,
@@ -327,12 +333,7 @@ default = "deny"
 
     #[test]
     fn ask_request_without_body() {
-        let (req, _rx) = AskRequest::new(
-            "example.com".into(),
-            "CONNECT".into(),
-            "/".into(),
-            None,
-        );
+        let (req, _rx) = AskRequest::new("example.com".into(), "CONNECT".into(), "/".into(), None);
         assert_eq!(req.body, None);
     }
 
