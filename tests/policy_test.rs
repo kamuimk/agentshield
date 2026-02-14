@@ -329,3 +329,112 @@ default = "deny"
         std::env::remove_var("AGENTSHIELD_TEST_DOLLAR");
     }
 }
+
+#[test]
+fn parse_web_config() {
+    let toml_str = r#"
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+[web]
+enabled = true
+listen = "127.0.0.1:9090"
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("agentshield.toml");
+    std::fs::write(&config_path, toml_str).unwrap();
+
+    let config = AppConfig::load_from_path(&config_path).unwrap();
+    let web = config.web.unwrap();
+    assert!(web.enabled);
+    assert_eq!(web.listen, "127.0.0.1:9090");
+}
+
+#[test]
+fn parse_web_config_defaults() {
+    let toml_str = r#"
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+[web]
+enabled = true
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("agentshield.toml");
+    std::fs::write(&config_path, toml_str).unwrap();
+
+    let config = AppConfig::load_from_path(&config_path).unwrap();
+    let web = config.web.unwrap();
+    assert!(web.enabled);
+    assert_eq!(web.listen, "127.0.0.1:18081"); // default
+}
+
+#[test]
+fn parse_telegram_interactive() {
+    let toml_str = r#"
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+[notification]
+enabled = true
+
+[notification.telegram]
+bot_token = "test-token"
+chat_id = "12345"
+interactive = true
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("agentshield.toml");
+    std::fs::write(&config_path, toml_str).unwrap();
+
+    let config = AppConfig::load_from_path(&config_path).unwrap();
+    let notif = config.notification.unwrap();
+    assert!(notif.enabled);
+    let tg = notif.telegram.unwrap();
+    assert!(tg.interactive);
+    assert_eq!(tg.bot_token, "test-token");
+}
+
+#[test]
+fn parse_telegram_interactive_default_false() {
+    let toml_str = r#"
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+[notification]
+enabled = true
+
+[notification.telegram]
+bot_token = "test-token"
+chat_id = "12345"
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("agentshield.toml");
+    std::fs::write(&config_path, toml_str).unwrap();
+
+    let config = AppConfig::load_from_path(&config_path).unwrap();
+    let tg = config.notification.unwrap().telegram.unwrap();
+    assert!(!tg.interactive); // defaults to false
+}
+
+#[test]
+fn config_without_web_section() {
+    let config: AppConfig = toml::from_str(MINIMAL_TOML).unwrap();
+    assert!(config.web.is_none());
+}

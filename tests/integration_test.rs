@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -593,4 +594,177 @@ async fn ask_channel_deny_returns_403() {
         "Expected 403 after denial, got: {}",
         response
     );
+}
+
+// ===== Web Dashboard Integration Tests =====
+
+#[tokio::test]
+async fn web_dashboard_serves_html() {
+    use tokio::sync::broadcast;
+    use agentshield::logging::LogEvent;
+    use agentshield::web;
+    use agentshield::web::ask::{AskState, PendingAsks};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("web_test.db");
+    let pool = logging::open_pool(&db_path).unwrap();
+    let (event_tx, _rx) = broadcast::channel::<LogEvent>(16);
+    let policy = PolicyConfig {
+        default: Action::Deny,
+        rules: vec![],
+    };
+
+    let state = Arc::new(web::AppState {
+        db: Some(pool),
+        event_tx,
+        policy: Some(Arc::new(RwLock::new(policy))),
+    });
+    let (ask_tx, _ask_rx) = broadcast::channel(16);
+    let ask_state = AskState {
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        ask_event_tx: ask_tx,
+    };
+
+    let app = web::full_router(state, ask_state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // Fetch the dashboard
+    let resp = reqwest::get(format!("http://{}/", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("AgentShield Dashboard"));
+}
+
+#[tokio::test]
+async fn web_api_status_endpoint() {
+    use tokio::sync::broadcast;
+    use agentshield::logging::LogEvent;
+    use agentshield::web;
+    use agentshield::web::ask::{AskState, PendingAsks};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("status_test.db");
+    let pool = logging::open_pool(&db_path).unwrap();
+
+    // Insert some test data
+    let conn = pool.get().unwrap();
+    logging::log_request(&conn, &logging::RequestLog {
+        id: None,
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        method: "GET".to_string(),
+        domain: "test.com".to_string(),
+        path: "/".to_string(),
+        action: "allow".to_string(),
+        reason: "test".to_string(),
+    }).unwrap();
+    drop(conn);
+
+    let (event_tx, _rx) = broadcast::channel::<LogEvent>(16);
+    let policy = PolicyConfig {
+        default: Action::Deny,
+        rules: vec![],
+    };
+
+    let state = Arc::new(web::AppState {
+        db: Some(pool),
+        event_tx,
+        policy: Some(Arc::new(RwLock::new(policy))),
+    });
+    let (ask_tx, _ask_rx) = broadcast::channel(16);
+    let ask_state = AskState {
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        ask_event_tx: ask_tx,
+    };
+
+    let app = web::full_router(state, ask_state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let resp = reqwest::get(format!("http://{}/api/status", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["total"], 1);
+    assert_eq!(json["allowed"], 1);
+}
+
+#[tokio::test]
+async fn web_ask_pending_and_resolve() {
+    use tokio::sync::broadcast;
+    use agentshield::logging::LogEvent;
+    use agentshield::web;
+    use agentshield::web::ask::{AskState, PendingAsks, PendingWebAsk, WebDashboardResponder};
+
+    let (event_tx, _rx) = broadcast::channel::<LogEvent>(16);
+    let (ask_tx, _ask_rx) = broadcast::channel(16);
+    let pending: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
+
+    // Add a pending ASK
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    {
+        let mut map = pending.lock().unwrap();
+        map.insert("test-req".to_string(), PendingWebAsk {
+            info: agentshield::ask::AskRequestInfo {
+                req_id: "test-req".to_string(),
+                domain: "api.example.com".to_string(),
+                method: "POST".to_string(),
+                path: "/data".to_string(),
+                body: None,
+            },
+            tx,
+        });
+    }
+
+    let state = Arc::new(web::AppState {
+        db: None,
+        event_tx,
+        policy: None,
+    });
+    let ask_state = AskState {
+        pending: pending.clone(),
+        ask_event_tx: ask_tx,
+    };
+
+    let app = web::full_router(state, ask_state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // Check pending
+    let resp = reqwest::get(format!("http://{}/api/ask/pending", addr))
+        .await
+        .unwrap();
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json.as_array().unwrap().len(), 1);
+    assert_eq!(json[0]["req_id"], "test-req");
+
+    // Resolve it
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/api/ask/test-req/allow", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Verify oneshot received the decision
+    assert_eq!(rx.await.unwrap(), true);
+
+    // Pending should be empty now
+    assert!(pending.lock().unwrap().is_empty());
 }

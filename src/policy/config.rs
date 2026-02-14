@@ -102,6 +102,9 @@ pub struct TelegramConfig {
     /// Event types to send (reserved for future filtering).
     #[serde(default)]
     pub events: Vec<String>,
+    /// Enable bidirectional ASK approval via inline keyboard.
+    #[serde(default)]
+    pub interactive: bool,
 }
 
 /// Notification configuration (`[notification]` section).
@@ -113,6 +116,21 @@ pub struct NotificationConfig {
     /// Optional Telegram backend configuration.
     #[serde(default)]
     pub telegram: Option<TelegramConfig>,
+}
+
+/// Web dashboard configuration (`[web]` section).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WebConfig {
+    /// Whether the web dashboard is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Address to bind the web server to (default: `"127.0.0.1:18081"`).
+    #[serde(default = "default_web_listen")]
+    pub listen: String,
+}
+
+fn default_web_listen() -> String {
+    "127.0.0.1:18081".to_string()
 }
 
 /// Top-level application configuration deserialized from `agentshield.toml`.
@@ -131,6 +149,9 @@ pub struct AppConfig {
     /// Optional notification configuration.
     #[serde(default)]
     pub notification: Option<NotificationConfig>,
+    /// Optional web dashboard configuration.
+    #[serde(default)]
+    pub web: Option<WebConfig>,
 }
 
 impl AppConfig {

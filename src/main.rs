@@ -7,20 +7,25 @@ use std::path::Path;
 use std::sync::Arc;
 
 use agentshield::ask::AskBroadcaster;
+use agentshield::ask::telegram::TelegramResponder;
 use agentshield::ask::terminal::TerminalResponder;
 use agentshield::cli::integrate;
 use agentshield::cli::{Cli, Commands, IntegrateTarget, PolicyAction};
 use agentshield::dlp::DlpScanner;
 use agentshield::dlp::patterns::RegexScanner;
-use agentshield::logging;
+use agentshield::logging::{self, LogEvent};
 use agentshield::notification::FilteredNotifier;
 use agentshield::notification::Notifier;
 use agentshield::notification::telegram::TelegramNotifier;
 use agentshield::policy::config::AppConfig;
 use agentshield::policy::reload;
 use agentshield::proxy::ProxyServer;
+use agentshield::web;
+use agentshield::web::ask::{AskState, PendingAsks, WebDashboardResponder};
 use clap::Parser;
-use std::sync::RwLock;
+use std::collections::HashMap;
+use std::sync::{Mutex, RwLock};
+use tokio::sync::broadcast;
 use tracing::{info, warn};
 
 /// Return the path to the SQLite log database (`~/.agentshield/agentshield.db`).
@@ -96,19 +101,56 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
     let db = db_path();
     let pool = logging::open_pool(&db)?;
 
+    // Shared policy state for hot-reload
+    let policy = Arc::new(RwLock::new(config.policy.clone()));
+
+    // Broadcast channel for real-time log events (SSE, web dashboard)
+    let (event_tx, _event_rx) = broadcast::channel::<LogEvent>(1024);
+
     // ASK broadcaster: broadcasts ASK requests to all registered responders
     let mut broadcaster = AskBroadcaster::new(120);
     let terminal = Arc::new(TerminalResponder::new(config_path.to_path_buf()));
     broadcaster.add_responder(terminal);
-    let broadcaster = Arc::new(broadcaster);
 
-    // Shared policy state for hot-reload
-    let policy = Arc::new(RwLock::new(config.policy.clone()));
+    // Pending ASK state (shared between WebDashboardResponder and web server)
+    let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
+    let (ask_event_tx, _ask_event_rx) = broadcast::channel(256);
+
+    // Add TelegramResponder if interactive mode is enabled
+    if let Some(ref notif_config) = config.notification {
+        if notif_config.enabled {
+            if let Some(ref tg) = notif_config.telegram {
+                if tg.interactive {
+                    let tg_responder = Arc::new(TelegramResponder::new(
+                        tg.bot_token.clone(),
+                        tg.chat_id.clone(),
+                    ));
+                    broadcaster.add_responder(tg_responder);
+                    info!("Telegram ASK responder enabled (interactive mode)");
+                }
+            }
+        }
+    }
+
+    // Add WebDashboardResponder if web is enabled
+    if let Some(ref web_config) = config.web {
+        if web_config.enabled {
+            let web_responder = Arc::new(WebDashboardResponder::new(
+                pending_asks.clone(),
+                ask_event_tx.clone(),
+            ));
+            broadcaster.add_responder(web_responder);
+            info!("Web dashboard ASK responder enabled");
+        }
+    }
+
+    let broadcaster = Arc::new(broadcaster);
 
     let mut server = ProxyServer::new(config.proxy.listen.clone())
         .with_policy(policy.clone())
-        .with_db(pool)
-        .with_ask_broadcaster(broadcaster);
+        .with_db(pool.clone())
+        .with_ask_broadcaster(broadcaster)
+        .with_event_channel(event_tx.clone());
 
     // Apply system allowlist if configured
     if let Some(ref system) = config.system {
@@ -162,6 +204,28 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
         "Set HTTPS_PROXY=http://{} to route traffic through AgentShield",
         addr
     );
+
+    // Start web dashboard if enabled
+    if let Some(ref web_config) = config.web {
+        if web_config.enabled {
+            let web_state = Arc::new(web::AppState {
+                db: Some(pool),
+                event_tx: event_tx.clone(),
+                policy: Some(policy.clone()),
+            });
+            let ask_state = AskState {
+                pending: pending_asks,
+                ask_event_tx,
+            };
+            let listen = web_config.listen.clone();
+            tokio::spawn(async move {
+                let app = web::full_router(web_state, ask_state);
+                let listener = tokio::net::TcpListener::bind(&listen).await.unwrap();
+                info!("Web dashboard listening on {}", listen);
+                axum::serve(listener, app).await.unwrap();
+            });
+        }
+    }
 
     // Policy hot-reload: file watcher + SIGHUP handler
     let _watcher = reload::start_file_watcher(config_path.to_path_buf(), policy.clone())
