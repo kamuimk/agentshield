@@ -111,7 +111,6 @@ pub fn start_sighup_handler(
 mod tests {
     use super::*;
     use crate::policy::config::Action;
-    use std::io::Write;
 
     fn make_toml(default: &str, rule_domain: &str) -> String {
         format!(

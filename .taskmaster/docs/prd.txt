@@ -1,4 +1,4 @@
-# AgentShield v0.4 PRD
+# AgentShield v0.5 PRD
 
 ## 프로젝트 개요
 
@@ -9,254 +9,313 @@ AgentShield는 AI 에이전트(OpenClaw, Claude Code 등)의 아웃바운드 네
 - Language: Rust (edition 2024, MSRV 1.85)
 - License: Apache-2.0
 
-## v0.3 현황
+## v0.4 현황
 
-프록시 → 정책 → DLP → 로깅(connection pool) → 알림 → system allowlist까지 전체 파이프라인이
-end-to-end로 동작하는 상태. CI 4회 연속 Green.
+PRD R1~R6 전체 이행 완료. 전체 파이프라인이 프로덕션 수준으로 동작.
 
-- 117개 테스트 (unit + integration)
-- 15개 DLP 패턴 (10개 AI 프로바이더 + 5개 인프라/범용)
-- r2d2 SQLite connection pool (max_size=4)
-- Telegram 알림 (fire-and-forget, Notifier trait)
-- System allowlist (정책 bypass)
-- tracing 전면 적용 (println! 제거)
-- OpenClaw integrate 커맨드
-- 3개 정책 템플릿 (openclaw-default, claude-code-default, strict)
+- 134개 테스트 (unit + integration)
+- 15개 DLP 패턴 (sk-ant- dedup 로직 포함)
+- ConnectionContext 리팩토링 완료 (clippy suppress 제거)
+- FilteredNotifier (events 필터링)
+- 환경변수 참조 (`${VAR}`, `$VAR`) 지원
+- SQL 집계 기반 cmd_status
+- cargo-llvm-cov + Codecov CI
+- GitHub Issue Templates (DLP Pattern Request, Bug Report, Feature Request, Policy Template)
 
-### v0.3 미해결 이슈 (본 PRD의 근거)
+### v0.4 미해결 이슈 (본 PRD의 근거)
 
 | # | 이슈 | 우선순위 | 근거 |
 |---|------|---------|------|
-| 1 | System allowlist가 DLP를 스킵하지 않음 | P1 | 알림 본문에 API key가 포함되면 Telegram 전송이 차단됨 |
-| 2 | Notification events 필터 미구현 | P1 | `events = ["deny"]` 설정해도 DLP 알림도 전송 |
-| 3 | Telegram bot_token TOML 평문 노출 | P2 | git 커밋 시 토큰 유출 위험 |
-| 4 | `handle_http_request` 인자 8개 | P2 | clippy suppress로 넘김, 확장성 한계 |
-| 5 | OpenAI `sk-None-`, `sk-admin-` 패턴 누락 | P2 | 최신 OpenAI 키 변형 미탐지 |
-| 6 | Fireworks AI `fw_` prefix 근거 없음 | P3 | 오탐 위험 |
-| 7 | `cmd_status()` 전체 테이블 로드 | P3 | 로그 증가 시 메모리 이슈 |
+| 1 | Inspect payload 미동작 | P1 | UI에 메뉴 존재하지만 handle_inspect 미호출, body 미전달. deny와 동일 동작. |
+| 2 | ASK 발생 시 알림 없음 | P2 | 터미널 앞에 없으면 30초 후 자동 deny. 확인 요청을 못 보는 시나리오. |
+| 3 | 환경변수 치환 이중 치환 위험 | P2 | `${VAR}` 값에 `$SOMETHING` 포함 시 두 번째 패스에서 환경변수로 해석 시도. |
+| 4 | substitute_env_vars Regex 매번 컴파일 | P3 | startup 시 한 번이라 실질적 성능 이슈 없으나 비관용적. |
+| 5 | Add Rule(r) 선택 시 실제 TOML 업데이트 미확인 | P2 | `generate_rule` + `append_rule_to_config` 존재하나 main.rs에서 호출 불명확. |
 
-## v0.4 목표
+### 논의된 향후 기능
 
-v0.3 코드 리뷰에서 발견된 P1/P2 이슈를 해결하고, HN 공개 전 마지막 품질 개선을 완료한다.
-코드 구조를 리팩토링하여 v0.5(rate limiting, wildcard 매칭 등) 확장에 대비한다.
+| 기능 | 출처 | 비고 |
+|------|------|------|
+| ASK Telegram 양방향 승인 | 대화 | 패턴 성숙 후 고려. v0.5 범위 밖. |
+| ASK 발생 시 알림 (단방향) | 대화 | `AskPending` event. 즉시 구현 가능. |
+| MITM HTTPS inspection | v0.4 PRD 향후 | DLP가 CONNECT 터널 스캔 불가 한계. v0.5 범위 밖. |
+| Wildcard 도메인 매칭 | v0.4 PRD 향후 | `*.github.com` 지원. |
+| Rate limiting | v0.4 PRD 향후 | v0.5 범위 밖. |
+
+## v0.5 목표
+
+v0.4에서 발견된 미완성 기능(Inspect, Add Rule)을 완성하고,
+ASK 알림과 wildcard 매칭을 추가하여 실사용 시나리오의 주요 gap을 해소한다.
 
 ## 요구사항
 
-### R1: System Allowlist DLP Bypass 정책 [P1]
+### R1: Inspect Payload 완성 [P1]
 
-**배경**: `system_allowlist`에 등록된 도메인(예: `api.telegram.org`)은 정책 평가를 bypass하지만,
-DLP 스캔은 여전히 실행된다. 알림 메시지 본문에 API key가 포함될 수 있는 edge case에서
-Telegram 전송 자체가 DLP에 의해 차단될 수 있다.
-
-**기능 요구사항**:
-1. `system_allowlist` 도메인으로의 요청은 DLP 스캔도 bypass
-2. `system-allow` action으로 로깅 시 "policy+dlp bypass" reason 명시
-3. 보안 주석 추가: system allowlist는 내부 서비스 전용이며, 외부 도메인 등록 시 DLP 보호가 해제됨을 경고
-
-**기술 설계**:
-- `connect.rs`의 `handle_http_request`에서 `system_allowed == true`일 때 DLP 블록(line 396-437) 건너뛰기
-- `handle_connect`는 이미 DLP를 스킵하므로 변경 불필요
-
-**테스트**:
-- system allowlist 도메인으로의 HTTP POST에 API key 포함 → 403이 아닌 통과 확인
-- system allowlist에 없는 도메인 → 기존 DLP 동작 유지 확인
-
-**예상 소요**: 30분
-
----
-
-### R2: Notification Events 필터 구현 [P1]
-
-**배경**: `TelegramConfig.events: Vec<String>`이 config에 정의되어 있지만, `connect.rs`에서
-이벤트 타입별 필터링을 하지 않는다. 모든 deny와 DLP critical이 무조건 알림으로 전송된다.
+**배경**: `[i] Inspect payload`가 프롬프트 메뉴에 표시되지만, 선택 시 `handle_inspect()`가
+호출되지 않고 `PromptDecision::Inspect`가 `matches!`에서 `false`로 처리되어 즉시 deny된다.
+또한 `PromptRequest.body`가 항상 `None`으로 하드코딩되어, inspect가 호출되더라도
+"(no body available)"만 출력된다.
 
 **기능 요구사항**:
-1. `events` 필드로 알림 이벤트 타입 필터링:
-   - `"deny"`: 정책에 의한 차단 (RequestDenied)
-   - `"dlp"`: DLP critical 탐지 (DlpFinding)
-   - `"start"`: 프록시 시작 (ProxyStarted)
-   - `"shutdown"`: 프록시 종료 (ProxyShutdown)
-   - 빈 배열 또는 미지정: 전체 이벤트 전송 (하위 호환)
-2. `NotificationEvent`에 이벤트 타입 문자열을 반환하는 `event_type()` 메서드 추가
-3. `Notifier` trait 래퍼 또는 `FilteredNotifier`에서 events 체크 후 전달
+1. `AskRequest`에 `body: Option<String>` 필드 추가
+2. `connect.rs`에서 ASK 전송 시 HTTP request body를 `AskRequest.body`에 포함
+3. `main.rs` ASK 루프에서 `Inspect` 선택 시:
+   - `handle_inspect()`를 호출하여 body 출력
+   - 다시 프롬프트를 표시하여 Allow/Deny/Add Rule 재선택 가능 (루프)
+4. CONNECT (HTTPS) 요청은 body가 없으므로 `body: None` 유지
+5. body가 큰 경우를 대비하여 최대 표시 길이 제한 (4096 bytes, 초과 시 truncate 표시)
 
 **기술 설계**:
 ```rust
-impl NotificationEvent {
-    pub fn event_type(&self) -> &str {
-        match self {
-            Self::RequestDenied { .. } => "deny",
-            Self::DlpFinding { .. } => "dlp",
-            Self::ProxyStarted { .. } => "start",
-            Self::ProxyShutdown => "shutdown",
+// AskRequest에 body 추가
+pub struct AskRequest {
+    pub domain: String,
+    pub method: String,
+    pub path: String,
+    pub body: Option<String>,  // NEW
+    response_tx: oneshot::Sender<bool>,
+}
+
+// main.rs ASK 루프 변경
+while let Some(ask_req) = ask_rx.recv().await {
+    let prompt_req = PromptRequest {
+        method: ask_req.method.clone(),
+        domain: ask_req.domain.clone(),
+        path: ask_req.path.clone(),
+        body: ask_req.body.clone(),  // body 전달
+    };
+    let mut reader = stdin.lock();
+    let mut writer = stdout.lock();
+    // Inspect 루프
+    loop {
+        match prompt_decision(&prompt_req, &mut reader, &mut writer) {
+            Ok(PromptDecision::Inspect) => {
+                handle_inspect(&prompt_req, &mut writer).ok();
+                continue;  // 다시 프롬프트
+            }
+            Ok(PromptDecision::AllowOnce | PromptDecision::AddRule) => {
+                ask_req.respond(true);
+                break;
+            }
+            _ => {
+                ask_req.respond(false);
+                break;
+            }
         }
     }
 }
+```
 
-pub struct FilteredNotifier {
-    inner: Arc<dyn Notifier>,
-    allowed_events: Vec<String>,
+**DLP 연계 고려**: Inspect에서 body를 보여줄 때, DLP 패턴에 매칭되는 부분을
+하이라이트하거나 별도 경고를 표시하면 사용자가 왜 주의해야 하는지 직관적으로 이해할 수 있다.
+다만 이는 nice-to-have이며, 기본 구현에서는 raw body만 표시한다.
+
+**테스트**:
+- Inspect 선택 → body 출력 확인 → 다시 프롬프트 표시 확인
+- Inspect 후 Allow 선택 → 요청 통과 확인
+- Inspect 후 Deny 선택 → 요청 차단 확인
+- body가 None인 경우 → "(no body available)" 표시 확인
+- 4096 bytes 초과 body → truncate 표시 확인
+
+**예상 소요**: 1.5시간
+
+---
+
+### R2: Add Rule 동작 완성 [P1]
+
+**배경**: `[r] Add rule`을 선택하면 `PromptDecision::AddRule`이 반환되고 요청이 허용되지만,
+실제로 `agentshield.toml`에 룰이 추가되는지 확인이 필요하다. `generate_rule()`과
+`append_rule_to_config()`가 구현되어 있지만 `main.rs`에서 `AddRule` 시
+해당 함수들을 호출하는 코드가 없다.
+
+**기능 요구사항**:
+1. `main.rs` ASK 루프에서 `AddRule` 선택 시:
+   - `generate_rule()`로 룰 생성
+   - `append_rule_to_config()`로 TOML 파일에 추가
+   - 추가된 룰 내용을 터미널에 출력 (사용자 확인)
+2. config_path를 ASK 루프에 전달
+3. 파일 쓰기 실패 시 경고 로그만 출력하고 요청은 허용 (allow)
+
+**기술 설계**:
+```rust
+Ok(PromptDecision::AddRule) => {
+    let rule = generate_rule(&prompt_req);
+    if let Err(e) = append_rule_to_config(&config_path, &rule) {
+        warn!("Failed to append rule to config: {}", e);
+    } else {
+        writeln!(writer, "✅ Rule '{}' added to config", rule.name).ok();
+    }
+    ask_req.respond(true);
+    break;
 }
 ```
 
-**TOML 예시**:
-```toml
-[notification]
-enabled = true
-
-[notification.telegram]
-bot_token = "123456:ABC"
-chat_id = "-100123"
-events = ["deny", "dlp"]    # start/shutdown 알림 제외
-```
-
 **테스트**:
-- `events = ["deny"]` → DLP finding 알림 미전송 확인
-- `events = ["dlp"]` → RequestDenied 알림 미전송 확인
-- `events = []` 또는 미지정 → 전체 이벤트 전송 확인 (하위 호환)
-- MockNotifier로 수신 이벤트 수 검증
+- AddRule 선택 → TOML 파일에 신규 룰 추가 확인
+- 생성된 룰의 name, domains, methods, action 정확성 확인
+- 동일 도메인 재요청 시 ASK 대신 allow 확인 (정책 reload 필요 여부)
+
+**주의**: 현재 정책은 startup에서 한 번만 로드되므로, TOML에 룰을 추가해도
+프록시 재시작 전까지 적용되지 않는다. v0.5에서는 "다음 재시작부터 적용됩니다" 메시지를
+표시하고, 정책 hot-reload는 v0.6 범위로 남긴다.
 
 **예상 소요**: 1시간
 
 ---
 
-### R3: Config 환경변수 참조 지원 [P2]
+### R3: ASK Pending 알림 [P2]
 
-**배경**: `agentshield.toml`에 Telegram bot_token이 평문으로 들어가며,
-git 커밋 시 토큰이 유출될 위험이 있다.
+**배경**: ASK가 발생하면 터미널 프롬프트가 뜨지만, 사용자가 터미널 앞에 없으면
+30초 타임아웃 후 자동 deny된다. 알림을 통해 "확인 요청이 대기 중"임을 알려줘야 한다.
 
 **기능 요구사항**:
-1. TOML 값에서 `${ENV_VAR}` 또는 `$ENV_VAR` 패턴을 환경변수 값으로 치환
-2. 환경변수 미설정 시 startup에서 명확한 에러 메시지 출력 후 종료
-3. bot_token, chat_id 등 시크릿성 필드에 우선 적용
-4. 일반 필드(listen, default 등)에도 동일하게 동작
-
-**기술 설계**:
-- `AppConfig::load_from_path`에서 TOML 파싱 전에 환경변수 치환 수행
-- regex: `\$\{([A-Za-z_][A-Za-z0-9_]*)\}` 또는 단순 `\$([A-Z_][A-Z0-9_]*)`
-- 치환 실패 시 `AgentShieldError::ConfigParse`로 에러
+1. `NotificationEvent`에 `AskPending` variant 추가:
+   ```rust
+   AskPending {
+       domain: String,
+       method: String,
+       path: String,
+   }
+   ```
+2. `connect.rs`에서 `ask_and_wait()` 호출 직전에 `notify_event()` 실행
+3. `event_type()`에 `"ask"` 반환 추가
+4. `format_message()`에 적절한 포맷 추가:
+   `"⚠️ *ASK Pending*\n\`GET httpbin.org/\`\nWaiting for terminal approval (30s timeout)"`
+5. `events` 필터에서 `"ask"` 타입으로 제어 가능
 
 **TOML 예시**:
 ```toml
 [notification.telegram]
 bot_token = "${AGENTSHIELD_TELEGRAM_TOKEN}"
 chat_id = "${AGENTSHIELD_TELEGRAM_CHAT_ID}"
+events = ["deny", "dlp", "ask"]    # ask 알림 포함
 ```
 
 **테스트**:
-- 환경변수 설정 → 정상 파싱 확인
-- 환경변수 미설정 → 에러 메시지에 변수명 포함 확인
-- `${}` 없는 일반 값 → 그대로 통과 확인
-
-**예상 소요**: 1시간
-
----
-
-### R4: ConnectionContext 리팩토링 [P2]
-
-**배경**: `handle_http_request`의 인자가 8개로, `#[allow(clippy::too_many_arguments)]`로
-suppress 중. v0.4에서 events 필터, v0.5에서 rate limiting 추가 시 더 늘어날 예정.
-
-**기능 요구사항**:
-1. 프록시 핸들러에 전달되는 공유 상태를 `ConnectionContext` struct로 통합
-2. `accept_loop`, `handle_connection`, `handle_connect`, `handle_http_request` 시그니처 정리
-3. `#[allow(clippy::too_many_arguments)]` 제거
-
-**기술 설계**:
-```rust
-pub struct ConnectionContext {
-    pub policy: Option<Arc<PolicyConfig>>,
-    pub db: Option<DbPool>,
-    pub ask_tx: Option<mpsc::Sender<AskRequest>>,
-    pub dlp_scanner: Option<Arc<dyn DlpScanner>>,
-    pub system_allowlist: Option<Arc<Vec<String>>>,
-    pub notifier: Option<Arc<dyn Notifier>>,
-}
-```
-- `Arc<ConnectionContext>`로 clone하여 각 connection task에 전달
-- `ProxyServer::start()`에서 `ConnectionContext` 생성
-
-**테스트**:
-- 기존 프록시 테스트 전부 통과 확인 (API 변경 없음, 내부 리팩토링)
-
-**예상 소요**: 1시간
-
----
-
-### R5: DLP 패턴 최신화 [P2]
-
-**배경**: 2026년 2월 기준 API key 포맷 조사 결과, 현재 패턴에 누락/오류가 발견됨.
-
-**변경 사항**:
-
-#### 5-1. OpenAI 패턴 업데이트
-현재: `sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}`
-
-OpenAI는 현재 4가지 키 변형을 사용:
-- `sk-proj-` (프로젝트 키)
-- `sk-svcacct-` (서비스 계정 키)
-- `sk-None-` (사용자 키, 프로젝트 미지정)
-- `sk-admin-` (Admin API 키)
-
-변경: `sk-(?:proj-|svcacct-|None-|admin-)?[A-Za-z0-9_-]{20,}`
-
-> 주의: `sk-admin-`은 Anthropic `sk-ant-`와 겹치지 않음 (Anthropic은 `sk-ant-api03-` 또는 `sk-ant-admin-`)
-
-#### 5-2. Fireworks AI 패턴 재검토
-현재: `fw_[A-Za-z0-9]{20,}` (prefix 기반)
-
-Fireworks AI 공식 문서, GitGuardian, liteLLM 어디에서도 `fw_` prefix를 확인할 수 없다.
-Fireworks는 API 응답의 `prefix` 필드로 사용자별 다른 prefix를 사용하는 구조.
-
-변경 옵션:
-- A) 컨텍스트 기반으로 변경: `(?i)(?:fireworks[_-]?(?:api[_-]?)?key)\s*[:=]\s*["']?([A-Za-z0-9_-]{32,})["']?`
-- B) 확인될 때까지 제거하고 `generic-api-key` 패턴에 의존
-- **권장: 옵션 A** (false positive 줄이면서 커버리지 유지)
-
-#### 5-3. Together AI 패턴 완화
-현재: `[A-Fa-f0-9]{64}` (hex 64자 고정)
-
-Together AI 키가 반드시 hex 64자인지 공식 문서에서 확인 불가.
-변경: `[A-Za-z0-9]{32,}` (alphanumeric 32자 이상)
-
-**테스트**:
-- `sk-None-xxx...` 키 탐지 확인
-- `sk-admin-xxx...` 키 탐지 확인 (OpenAI)
-- `sk-ant-admin...` 키 → anthropic-api-key로 탐지 확인 (OpenAI 아님)
-- Fireworks 컨텍스트 기반 탐지 확인
-- Together AI alphanumeric 키 탐지 확인
+- ASK 발생 시 AskPending 알림 전송 확인
+- `events = ["deny"]`일 때 AskPending 알림 미전송 확인
+- AskPending의 event_type이 "ask" 반환 확인
+- format_message 출력 포맷 확인
 
 **예상 소요**: 30분
 
 ---
 
-### R6: `cmd_status()` SQL 집계 최적화 [P3]
+### R4: Wildcard 도메인 매칭 [P2]
 
-**배경**: 현재 `query_recent(conn, usize::MAX)`로 전체 테이블을 메모리에 로드한 뒤
-Rust에서 filter/count. 로그가 수만 건 이상이면 메모리 낭비.
+**배경**: 현재 정책 룰에서 `domains = ["*"]`는 `evaluator.rs`에서 전체 매치로 처리되지만,
+`*.github.com` 같은 서브도메인 와일드카드는 지원하지 않는다. AI 에이전트가
+`api.github.com`, `raw.githubusercontent.com` 등 다양한 서브도메인에 접근하는
+시나리오에서 필요하다.
 
 **기능 요구사항**:
-1. SQL `COUNT(*) ... GROUP BY action`으로 DB 레벨 집계
-2. 총 요청 수, action별 카운트를 단일 쿼리로 반환
+1. 정책 도메인에 `*.example.com` 패턴 지원
+2. `*.example.com`은 `sub.example.com`, `deep.sub.example.com` 모두 매치
+3. `example.com` (와일드카드 없음)은 정확히 `example.com`만 매치 (기존 동작 유지)
+4. `*`는 모든 도메인 매치 (기존 동작 유지)
 
 **기술 설계**:
+`evaluator.rs`의 도메인 매칭 로직에 추가:
 ```rust
-pub struct RequestStats {
-    pub total: usize,
-    pub allowed: usize,
-    pub denied: usize,
-    pub asked: usize,
-    pub system_allowed: usize,
+fn domain_matches(pattern: &str, domain: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        // *.example.com → matches sub.example.com, deep.sub.example.com
+        domain == suffix || domain.ends_with(&format!(".{}", suffix))
+    } else {
+        domain == pattern
+    }
 }
+```
 
-pub fn query_stats(conn: &Connection) -> Result<RequestStats> {
-    // SELECT action, COUNT(*) as cnt FROM requests GROUP BY action
+**TOML 예시**:
+```toml
+[[policy.rules]]
+name = "github-all"
+domains = ["*.github.com", "*.githubusercontent.com"]
+action = "allow"
+```
+
+**테스트**:
+- `*.github.com` → `api.github.com` 매치 확인
+- `*.github.com` → `github.com` 매치 확인 (suffix가 일치)
+- `*.github.com` → `evil-github.com` 미매치 확인
+- `*.example.com` → `deep.sub.example.com` 매치 확인
+- `example.com` → `sub.example.com` 미매치 확인 (정확 매치)
+- `*` → 모든 도메인 매치 확인 (기존 동작)
+- system_allowlist에도 동일 와일드카드 적용 확인
+
+**예상 소요**: 1시간
+
+---
+
+### R5: 환경변수 치환 안전성 개선 [P2]
+
+**배경**: `substitute_env_vars`에서 `${VAR}` 치환 후 `$VAR` 패턴을 두 번째 패스로
+처리하는데, 첫 번째 치환 결과에 `$UPPERCASE_TEXT`가 포함되면 의도치 않게
+환경변수로 해석될 수 있다.
+
+**기능 요구사항**:
+1. 두 번째 패스(`$VAR`)는 원본 입력에서 위치를 추출하되, 이미 `${}`로 치환된 영역은 건너뛰기
+2. 또는 단일 패스로 `${VAR}`과 `$VAR`를 동시에 처리
+
+**기술 설계 (Option A: 단일 패스)**:
+```rust
+fn substitute_env_vars(input: &str) -> Result<String> {
+    // 단일 regex로 ${VAR} 또는 $VAR 모두 캡처
+    let re = Regex::new(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Z_][A-Z0-9_]*))").unwrap();
+    let mut result = String::new();
+    let mut last_end = 0;
+    for cap in re.captures_iter(input) {
+        let m = cap.get(0).unwrap();
+        result.push_str(&input[last_end..m.start()]);
+        let var_name = cap.get(1).or_else(|| cap.get(2)).unwrap().as_str();
+        let value = std::env::var(var_name)
+            .map_err(|_| AgentShieldError::ConfigEnvVar(var_name.to_string()))?;
+        result.push_str(&value);
+        last_end = m.end();
+    }
+    result.push_str(&input[last_end..]);
+    Ok(result)
 }
 ```
 
 **테스트**:
-- 10개 혼합 로그 insert 후 stats 정확성 확인
-- 빈 DB에서 all-zero 반환 확인
+- `${VAR}` 치환 정상 동작 확인
+- `$VAR` 치환 정상 동작 확인
+- 치환 결과에 `$LIKE_TEXT` 포함 → 이중 치환 안 됨 확인
+- 미설정 변수 → 에러 메시지에 변수명 포함 확인
+
+**추가**: `LazyLock`으로 regex 캐싱 (P3 이슈도 동시 해결)
+
+**예상 소요**: 30분
+
+---
+
+### R6: GitHub Release 생성 [P3]
+
+**배경**: 36개 커밋이 있지만 GitHub Release가 없다. 태그/릴리즈가 없으면
+"관리되지 않는 프로젝트"로 보일 수 있고, 변경 이력 추적이 어렵다.
+
+**기능 요구사항**:
+1. `v0.3.0`, `v0.4.0`, `v0.5.0` 태그 생성 및 GitHub Release 작성
+2. 각 릴리즈에 주요 변경사항 요약 (체인지로그)
+3. v0.5.0부터는 릴리즈 프로세스를 표준화
+
+**v0.3.0 릴리즈 노트 예시**:
+```
+## What's New
+- Telegram notification (fire-and-forget)
+- SQLite connection pool (r2d2, max_size=4)
+- System allowlist (policy bypass)
+- tracing 전면 적용
+- DLP: 9 new AI provider patterns (15 total)
+
+## Fixes
+- Rust 2024 edition compatibility (\- in character classes)
+```
 
 **예상 소요**: 30분
 
@@ -266,32 +325,36 @@ pub fn query_stats(conn: &Connection) -> Result<RequestStats> {
 
 | 요구사항 | 우선순위 | 예상 소요 | 의존성 |
 |---------|---------|----------|--------|
-| R1: System Allowlist DLP Bypass | P1 | 30분 | 없음 |
-| R2: Notification Events 필터 | P1 | 1시간 | 없음 |
-| R3: Config 환경변수 참조 | P2 | 1시간 | 없음 |
-| R4: ConnectionContext 리팩토링 | P2 | 1시간 | R1 이후 |
-| R5: DLP 패턴 최신화 | P2 | 30분 | 없음 |
-| R6: cmd_status SQL 집계 | P3 | 30분 | 없음 |
-| **합계** | | **~4.5시간** | |
+| R1: Inspect Payload 완성 | P1 | 1.5시간 | 없음 |
+| R2: Add Rule 동작 완성 | P1 | 1시간 | 없음 |
+| R3: ASK Pending 알림 | P2 | 30분 | 없음 |
+| R4: Wildcard 도메인 매칭 | P2 | 1시간 | 없음 |
+| R5: 환경변수 치환 안전성 | P2 | 30분 | 없음 |
+| R6: GitHub Release 생성 | P3 | 30분 | R1~R5 완료 후 |
+| **합계** | | **~5시간** | |
 
-**구현 순서 권장**: R1 → R5 → R2 → R3 → R4 → R6
+**구현 순서 권장**: R1 → R2 → R3 → R5 → R4 → R6
 
-- R1을 먼저 해야 R4 리팩토링 시 system_allowed 분기가 깔끔해짐
-- R5는 독립적이라 아무 때나 가능하지만 빨리 하는 게 좋음 (DLP 정확도)
-- R4는 R1, R2 완료 후에 해야 최종 인자 목록이 확정됨
+- R1, R2는 ASK 프롬프트 관련이라 연속 작업이 효율적
+- R3은 R1/R2에서 ASK 루프를 수정하는 김에 같이 하면 좋음
+- R5는 독립적이고 작음
+- R4는 evaluator 변경이라 별도 작업
+- R6은 모든 기능 완료 후 태그 찍기
 
 ## 비기능 요구사항
 
 - CI Green 유지 (cargo fmt + clippy + test)
-- 기존 117개 테스트 + R1~R6 신규 테스트 ≥ 130개
-- README.md 업데이트: 환경변수 참조 문법, events 필터 설명 추가
-- `version = "0.4.0"` Cargo.toml 업데이트
+- 기존 134개 테스트 + R1~R5 신규 테스트 ≥ 150개
+- README.md 업데이트: wildcard 도메인 문법, Inspect 설명
+- Codecov 배지 정상 동작 확인 (Repository not found 해결)
+- `version = "0.5.0"` Cargo.toml 업데이트
 
-## 향후 v0.5 고려사항 (본 PRD 범위 밖)
+## 향후 v0.6+ 고려사항 (본 PRD 범위 밖)
 
-- Rate limiting (도메인/메서드별 요청 속도 제한)
-- Wildcard 도메인 매칭 (`*.github.com`)
-- 정책 hot-reload (SIGHUP 또는 파일 감시)
-- Claude Code 연동 (`agentshield integrate claude-code`)
-- MITM HTTPS inspection (v0.3에서 "CONNECT tunnel은 DLP 불가" → 해결)
-- 웹 대시보드 (로그 조회, 정책 편집)
+- **정책 hot-reload**: SIGHUP 또는 파일 감시로 재시작 없이 정책 반영 (R2의 Add Rule 후속)
+- **ASK Telegram 양방향 승인**: callback query 기반 Allow/Deny 버튼 (패턴 성숙 후)
+- **Rate limiting**: 도메인/메서드별 요청 속도 제한
+- **MITM HTTPS inspection**: CONNECT 터널 DLP 스캔 한계 해결
+- **Claude Code 연동**: `agentshield integrate claude-code`
+- **웹 대시보드**: 로그 조회, 정책 편집 UI
+- **커뮤니티 패턴 레지스트리**: DLP 패턴 공유/구독 시스템

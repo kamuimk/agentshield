@@ -2,151 +2,159 @@
   "master": {
     "tasks": [
       {
-        "id": "21",
-        "title": "Implement System Allowlist DLP Bypass (R1)",
-        "description": "Modify handle_http_request to skip DLP scanning for system_allowlist domains and log 'policy+dlp bypass' reason",
-        "details": "In connect.rs handle_http_request, add early return when system_allowed == true before DLP block (lines 396-437). Update logging to include 'policy+dlp bypass' reason for system-allow actions. Add security comment warning that system allowlist bypasses DLP protection. handle_connect already skips DLP, no changes needed.",
-        "testStrategy": "Test system allowlist domain HTTP POST with API key in body -> expect 200 not 403. Test non-allowlist domain -> DLP blocks as before. Verify log contains 'policy+dlp bypass' reason.",
+        "id": "41",
+        "title": "Implement AskResponder trait and AskBroadcaster",
+        "description": "Define AskResponder trait and implement core AskBroadcaster logic for broadcasting ASK requests to multiple responders with tokio::select! first-response adoption",
+        "details": "Create src/ask/mod.rs with AskResponder trait (prompt, notify_resolved, name methods). Implement AskBroadcaster struct with Vec<Arc<dyn AskResponder>>. Add ask() method using uuid::Uuid::new_v4() for req_id, spawn futures for all responders, tokio::time::timeout(120s), first_response selection, notify_resolved to others. Add config ask_timeout_secs from TOML.",
+        "testStrategy": "Unit tests: single responder returns expected bool; multiple responders first wins; all timeout -> false; notify_resolved called on losers. Integration test: mock responders verify broadcast/selection logic.",
         "priority": "high",
         "dependencies": [],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-13T02:57:05.296Z"
+        "updatedAt": "2026-02-14T13:59:59.621Z"
       },
       {
-        "id": "22",
-        "title": "Update DLP Patterns for OpenAI, Fireworks, Together AI (R5)",
-        "description": "Update OpenAI regex to cover sk-None-, sk-admin- prefixes, implement Fireworks context-based detection, relax Together AI to alphanumeric 32+",
-        "details": "OpenAI: change `sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}` to `sk-(?:proj-|svcacct-|None-|admin-)?[A-Za-z0-9_-]{20,}`. Fireworks: `(?i)(?:fireworks[_-]?(?:api[_-]?)?key)\\s*[:=]\\s*[\"']?([A-Za-z0-9_-]{32,})[\"']?`. Together AI: `[A-Za-z0-9]{32,}`. Ensure no overlap with Anthropic sk-ant-admin-.",
-        "testStrategy": "Test sk-None-xxx, sk-admin-xxx detection (OpenAI). Test sk-ant-admin-xxx -> anthropic detection only. Test Fireworks context pattern. Test Together alphanumeric keys. Verify no false positives.",
-        "priority": "high",
-        "dependencies": [],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-13T03:03:25.925Z"
-      },
-      {
-        "id": "23",
-        "title": "Implement NotificationEvent event_type() method",
-        "description": "Add event_type() method to NotificationEvent enum returning deny/dlp/start/shutdown strings",
-        "details": "```rust\nimpl NotificationEvent {\n    pub fn event_type(&self) -> &'static str {\n        match self {\n            Self::RequestDenied { .. } => \"deny\",\n            Self::DlpFinding { .. } => \"dlp\",\n            Self::ProxyStarted { .. } => \"start\",\n            Self::ProxyShutdown => \"shutdown\",\n        }\n    }\n}```",
-        "testStrategy": "Unit test each variant returns correct string. Integration test with mock notifier verifies correct type returned.",
-        "priority": "high",
-        "dependencies": [],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-13T03:05:42.612Z"
-      },
-      {
-        "id": "24",
-        "title": "Implement FilteredNotifier for events filtering (R2)",
-        "description": "Create FilteredNotifier wrapper that filters events based on TelegramConfig.events array",
-        "details": "```rust\npub struct FilteredNotifier {\n    inner: Arc<dyn Notifier>,\n    allowed_events: Vec<String>,\n}\n\nimpl FilteredNotifier {\n    pub fn new(inner: Arc<dyn Notifier>, events: Vec<String>) -> Self { ... }\n}\n\nimpl Notifier for FilteredNotifier {\n    fn notify(&self, event: &NotificationEvent) -> Result<()> {\n        if self.allowed_events.is_empty() || \n           self.allowed_events.contains(&event.event_type().to_string()) {\n            self.inner.notify(event)\n        } else {\n            Ok(())\n        }\n    }\n}``` Empty or unspecified events = all events (backward compatible).",
-        "testStrategy": "events=[\"deny\"] -> DLP events filtered out. events=[\"dlp\"] -> deny events filtered. events=[] -> all events pass. MockNotifier count verification.",
+        "id": "42",
+        "title": "Migrate TerminalResponder from existing stdin logic",
+        "description": "Implement TerminalResponder implementing AskResponder trait, migrating existing stdin handler logic while maintaining 100% backward compatibility",
+        "details": "Create src/ask/terminal.rs. Implement TerminalResponder with existing stdin mpsc channel logic wrapped in prompt() async fn. Use oneshot::channel() for response synchronization. Ensure 30s timeout fallback. Register as first responder in AskBroadcaster.",
+        "testStrategy": "Test terminal-only mode identical to v0.5 behavior. Verify prompt() returns correct stdin response. Test timeout handling matches existing logic.",
         "priority": "high",
         "dependencies": [
-          "23"
+          "41"
         ],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-13T03:09:56.950Z"
+        "updatedAt": "2026-02-14T14:22:08.891Z"
       },
       {
-        "id": "25",
-        "title": "Implement TOML environment variable substitution (R3)",
-        "description": "Support ${ENV_VAR} and $ENV_VAR substitution in TOML config with clear error on missing vars",
-        "details": "In AppConfig::load_from_path, preprocess TOML string with regex `\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}` and `\\$([A-Z_][A-Z0-9_]*)`. Use std::env::var(), fail with AgentShieldError::ConfigParse if missing. Apply to all fields (bot_token, chat_id, listen, etc.).",
-        "testStrategy": "Set env vars -> correct substitution. Unset env var -> error contains var name. No ${} syntax -> passes unchanged.",
+        "id": "43",
+        "title": "Update ConnectionContext to use AskBroadcaster",
+        "description": "Replace ConnectionContext.ask_tx: mpsc::Sender with ask_broadcaster: Arc<AskBroadcaster> throughout proxy codebase",
+        "details": "Refactor all ask_tx.send() calls to ask_broadcaster.ask(&info).await. Update ConnectionContext struct. Migrate from oneshot receiver pattern to direct bool return. Ensure fail-closed (false) on broadcast failure.",
+        "testStrategy": "End-to-end proxy test: existing ASK flow unchanged. Verify ask_broadcaster.ask() called instead of mpsc.send(). Test proxy receives first response correctly.",
+        "priority": "high",
+        "dependencies": [
+          "41",
+          "42"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-14T14:28:15.751Z"
+      },
+      {
+        "id": "44",
+        "title": "Implement real-time LogEvent broadcast channel",
+        "description": "Add tokio::sync::broadcast channel for LogEvent to support web dashboard SSE and future extensions",
+        "details": "Define #[derive(Clone, Debug)] pub struct LogEvent { timestamp, method, domain, path, action, reason }. Add to ConnectionContext: event_tx: Option<broadcast::Sender<LogEvent>>. In connect.rs log_to_db(), clone event_tx and send(LogEvent). Buffer size 1024.",
+        "testStrategy": "Unit test: LogEvent serialization/deserialization. Integration test: log_to_db() emits to broadcast channel. Verify lagging receivers auto-skip.",
         "priority": "medium",
         "dependencies": [],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-13T03:19:25.778Z"
+        "updatedAt": "2026-02-14T15:15:20.750Z"
       },
       {
-        "id": "26",
-        "title": "Define and implement ConnectionContext struct (R4)",
-        "description": "Create ConnectionContext struct consolidating 8 handle_http_request arguments",
-        "details": "```rust\n#[derive(Clone)]\npub struct ConnectionContext {\n    pub policy: Option<Arc<PolicyConfig>>,\n    pub db: Option<DbPool>,\n    pub ask_tx: Option<mpsc::Sender<AskRequest>>,\n    pub dlp_scanner: Option<Arc<dyn DlpScanner>>,\n    pub system_allowlist: Option<Arc<Vec<String>>>,\n    pub notifier: Option<Arc<dyn Notifier>>,\n}``` Use Arc<ConnectionContext> passed to all handlers. Create in ProxyServer::start().",
-        "testStrategy": "Refactor all handlers to use context. Run full test suite (117+ tests) to verify no functional changes.",
+        "id": "45",
+        "title": "Implement policy hot-reload with Arc<RwLock<PolicyConfig>>",
+        "description": "Convert policy to thread-safe shared state with file watching, SIGHUP, and API triggers",
+        "details": "Add notify = \"7\" dependency. Change ConnectionContext.policy: Option<Arc<RwLock<PolicyConfig>>>. Implement reload_policy() with TOML parse + write lock. Add notify::Watcher for config file changes. Handle SIGHUP signal. Add [policy.hot_reload = true] TOML parsing. Fail-safe: invalid TOML keeps old policy.",
+        "testStrategy": "Test TOML file change triggers reload. Test invalid TOML preserves old policy. Test concurrent read/write lock performance. Verify SIGHUP triggers reload.",
         "priority": "medium",
         "dependencies": [
-          "21",
-          "24"
+          "43"
         ],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-13T03:28:39.450Z"
+        "updatedAt": "2026-02-14T15:44:07.374Z"
       },
       {
-        "id": "27",
-        "title": "Update handler signatures to use ConnectionContext",
-        "description": "Refactor accept_loop, handle_connection, handle_connect, handle_http_request to use ConnectionContext",
-        "details": "Replace 8 individual args with single Arc<ConnectionContext> parameter. Remove #[allow(clippy::too_many_arguments)]. Update all call sites. Ensure system_allowed access works post-R1 changes.",
-        "testStrategy": "Full proxy integration tests pass. clippy passes without too_many_arguments suppression. Verify R1 DLP bypass still works.",
-        "priority": "medium",
+        "id": "46",
+        "title": "Implement TelegramResponder with bidirectional approval",
+        "description": "Create Telegram bot with inline keyboard for ASK approval/denial using getUpdates long polling",
+        "details": "Create src/ask/telegram.rs. Implement TelegramResponder with bot_token, chat_id, reqwest::Client. Spawn tokio task for getUpdates polling loop. Handle callback_query with chat_id validation, parse 'allow:req_id'/'deny:req_id', oneshot response, message edit. Auto-add api.telegram.org to system_allowlist when interactive=true.",
+        "testStrategy": "Mock Telegram API test: callback -> correct oneshot response. Test wrong chat_id ignored. Test already-resolved callback. Verify message edit on notify_resolved().",
+        "priority": "high",
         "dependencies": [
-          "21",
-          "24",
-          "26"
+          "41"
         ],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-13T03:28:47.869Z"
+        "updatedAt": "2026-02-14T15:34:33.554Z"
       },
       {
-        "id": "28",
-        "title": "Optimize cmd_status() with SQL aggregation (R6)",
-        "description": "Replace full table load with SQL COUNT(*) GROUP BY action query",
-        "details": "```rust\npub struct RequestStats {\n    pub total: usize,\n    pub allowed: usize,\n    pub denied: usize,\n    pub asked: usize,\n    pub system_allowed: usize,\n}\n\npub fn query_stats(conn: &Connection) -> Result<RequestStats> {\n    let rows: Vec<(String, i64)> = sqlx::query_as(\n        \"SELECT action, COUNT(*) as cnt FROM requests GROUP BY action\"\n    ).fetch_all(conn)?;\n    // Aggregate counts\n}```",
-        "testStrategy": "Insert 10 mixed log entries -> stats match expected counts. Empty DB -> all zeros. Performance test with 10k rows.",
-        "priority": "low",
-        "dependencies": [],
+        "id": "47",
+        "title": "Add axum web server with API endpoints",
+        "description": "Implement core web dashboard backend with axum including logs API, ASK endpoints, policy API",
+        "details": "Add axum, tower-http, uuid dependencies. Create src/web/mod.rs with WebServer struct (db, ask_pending, policy_state, sse_tx). Implement axum::Router with: GET /api/logs, GET /api/logs/stream (SSE), GET /api/ask/pending, POST /api/ask/{id}/[allow|deny], GET/ PUT /api/policy, GET /api/status. Bind to 127.0.0.1:18081.",
+        "testStrategy": "Test all API endpoints return correct JSON. Test SSE stream receives LogEvent broadcasts. Test ASK endpoints trigger AskBroadcaster. Verify 127.0.0.1 binding.",
+        "priority": "high",
+        "dependencies": [
+          "43",
+          "44"
+        ],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-13T03:32:04.510Z"
+        "updatedAt": "2026-02-14T15:54:58.275Z"
       },
       {
-        "id": "29",
-        "title": "Update Cargo.toml to v0.4.0 and run CI checks",
-        "description": "Bump version, run cargo fmt/clippy/test, ensure ≥130 tests pass",
-        "details": "Update Cargo.toml: version = \"0.4.0\". Run `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`. Ensure 117 existing + 13+ new tests ≥130 total. Rust 1.85+ compatible.",
-        "testStrategy": "CI pipeline green. Test count verification. No clippy warnings.",
+        "id": "48",
+        "title": "Implement WebDashboardResponder AskResponder",
+        "description": "Create WebDashboardResponder that implements AskResponder trait using REST API endpoints",
+        "details": "In src/web/, implement WebDashboardResponder struct with Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>> pending_asks. On prompt(): POST pending ask to /api/ask/pending SSE clients. Handle POST /api/ask/{id}/allow|deny -> oneshot.send(). notify_resolved() -> SSE broadcast to UI.",
+        "testStrategy": "Test prompt() stores oneshot in pending map. Test REST endpoints resolve correct req_id. Test notify_resolved() updates UI via SSE.",
+        "priority": "high",
+        "dependencies": [
+          "41",
+          "47"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-14T16:17:25.980Z"
+      },
+      {
+        "id": "49",
+        "title": "Embed single-file SPA dashboard with Tailwind CSS",
+        "description": "Create embedded HTML/JS dashboard with Tailwind CDN showing logs, stats, pending ASK, policy editor",
+        "details": "Create assets/dashboard.html with Tailwind CDN, vanilla JS. Implement SSE client for /api/logs/stream and /api/ask/pending. Add buttons for policy edit/save (PUT /api/policy). Include status display, log filtering, responsive layout matching PRD screenshot. Use include_str!(\"dashboard.html\") in axum handler.",
+        "testStrategy": "Manual browser test: verify SPA loads, SSE updates real-time, ASK buttons work, policy editor saves. Test responsive layout on mobile/desktop.",
         "priority": "medium",
         "dependencies": [
-          "21",
-          "22",
-          "24",
-          "25",
-          "27",
-          "28"
+          "47",
+          "48"
         ],
-        "status": "in-progress",
+        "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-13T03:32:10.909Z"
+        "updatedAt": "2026-02-14T16:20:05.654Z"
       },
       {
-        "id": "30",
-        "title": "Update README.md with new features documentation",
-        "description": "Document env var substitution syntax, events filtering, system allowlist DLP bypass",
-        "details": "Add sections: 1) Environment variables: `${AGENTSHIELD_TELEGRAM_TOKEN}` syntax with examples. 2) Events filtering: `events = [\"deny\", \"dlp\"]` with all types. 3) System allowlist warning: DLP bypass security note. Include TOML examples.",
-        "testStrategy": "Manual review: all new features documented accurately. Examples parse/validate correctly.",
-        "priority": "low",
+        "id": "50",
+        "title": "Integrate all features and add comprehensive tests",
+        "description": "Wire up Telegram/Web responders to AskBroadcaster, add config parsing, update README, bump version",
+        "details": "In main.rs: conditionally spawn TelegramResponder, WebServer tasks based on TOML config. Register all responders to AskBroadcaster. Parse new TOML sections [ask], [notification.telegram.interactive], [web]. Update Cargo.toml version=\"0.6.0\". Add 30+ new tests. Update README with screenshots/config examples.",
+        "testStrategy": "End-to-end integration: proxy + terminal + telegram + web all working together. Test config variations (web disabled, telegram disabled). Verify 180+ total tests pass. Smoke test all new features.",
+        "priority": "high",
         "dependencies": [
-          "21",
-          "22",
-          "24",
-          "25"
+          "41",
+          "42",
+          "43",
+          "44",
+          "45",
+          "46",
+          "47",
+          "48",
+          "49"
         ],
-        "status": "pending",
-        "subtasks": []
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-14T16:24:36.650Z"
       }
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2026-02-13T03:32:10.909Z",
+      "lastModified": "2026-02-14T16:24:36.650Z",
       "taskCount": 10,
-      "completedCount": 8,
+      "completedCount": 10,
       "tags": [
         "master"
       ]

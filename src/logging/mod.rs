@@ -47,6 +47,27 @@ pub fn open_memory_pool() -> Result<DbPool> {
     Ok(pool)
 }
 
+/// A real-time log event broadcast to subscribers (e.g., web dashboard SSE).
+///
+/// Created alongside each [`RequestLog`] insert and sent via a
+/// `tokio::sync::broadcast` channel. Subscribers that lag behind
+/// automatically skip missed events.
+#[derive(Debug, Clone)]
+pub struct LogEvent {
+    /// ISO 8601 timestamp.
+    pub timestamp: String,
+    /// HTTP method.
+    pub method: String,
+    /// Target domain.
+    pub domain: String,
+    /// Request path.
+    pub path: String,
+    /// Decision taken: `"allow"`, `"deny"`, etc.
+    pub action: String,
+    /// Human-readable reason.
+    pub reason: String,
+}
+
 /// A single logged request record stored in the `requests` table.
 #[derive(Debug, Clone)]
 pub struct RequestLog {
