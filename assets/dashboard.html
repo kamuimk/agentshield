@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AgentShield Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .fade-in { animation: fadeIn 0.3s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+    <nav class="bg-gray-800 border-b border-gray-700 px-6 py-4">
+        <div class="flex items-center justify-between max-w-7xl mx-auto">
+            <h1 class="text-xl font-bold text-blue-400">AgentShield Dashboard</h1>
+            <span id="connectionStatus" class="text-sm text-gray-400">Connecting...</span>
+        </div>
+    </nav>
+
+    <main class="max-w-7xl mx-auto px-6 py-6 space-y-6">
+        <!-- Stats -->
+        <section class="grid grid-cols-2 md:grid-cols-5 gap-4">
+            <div class="bg-gray-800 rounded-lg p-4 text-center">
+                <div id="statTotal" class="text-2xl font-bold text-white">0</div>
+                <div class="text-sm text-gray-400">Total</div>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-4 text-center">
+                <div id="statAllowed" class="text-2xl font-bold text-green-400">0</div>
+                <div class="text-sm text-gray-400">Allowed</div>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-4 text-center">
+                <div id="statDenied" class="text-2xl font-bold text-red-400">0</div>
+                <div class="text-sm text-gray-400">Denied</div>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-4 text-center">
+                <div id="statAsked" class="text-2xl font-bold text-yellow-400">0</div>
+                <div class="text-sm text-gray-400">Asked</div>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-4 text-center">
+                <div id="statSystemAllowed" class="text-2xl font-bold text-blue-400">0</div>
+                <div class="text-sm text-gray-400">System</div>
+            </div>
+        </section>
+
+        <!-- Pending ASK Requests -->
+        <section id="askSection" class="hidden">
+            <h2 class="text-lg font-semibold mb-3 text-yellow-400">Pending ASK Requests</h2>
+            <div id="askList" class="space-y-2"></div>
+        </section>
+
+        <!-- Tabs -->
+        <div class="flex space-x-4 border-b border-gray-700">
+            <button onclick="showTab('logs')" id="tabLogs" class="pb-2 px-1 text-sm font-medium border-b-2 border-blue-500 text-blue-400">Live Logs</button>
+            <button onclick="showTab('policy')" id="tabPolicy" class="pb-2 px-1 text-sm font-medium border-b-2 border-transparent text-gray-400 hover:text-gray-200">Policy</button>
+        </div>
+
+        <!-- Logs Tab -->
+        <section id="panelLogs">
+            <div class="flex items-center space-x-3 mb-3">
+                <input id="filterInput" type="text" placeholder="Filter by domain..." class="bg-gray-800 border border-gray-600 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500 w-64">
+                <select id="filterAction" class="bg-gray-800 border border-gray-600 rounded px-3 py-1.5 text-sm focus:outline-none">
+                    <option value="">All actions</option>
+                    <option value="allow">Allow</option>
+                    <option value="deny">Deny</option>
+                    <option value="ask">Ask</option>
+                    <option value="system-allow">System-allow</option>
+                </select>
+            </div>
+            <div class="bg-gray-800 rounded-lg overflow-hidden">
+                <table class="w-full text-sm">
+                    <thead class="bg-gray-750">
+                        <tr class="text-gray-400 text-left">
+                            <th class="px-4 py-2">Time</th>
+                            <th class="px-4 py-2">Method</th>
+                            <th class="px-4 py-2">Domain</th>
+                            <th class="px-4 py-2">Path</th>
+                            <th class="px-4 py-2">Action</th>
+                            <th class="px-4 py-2">Reason</th>
+                        </tr>
+                    </thead>
+                    <tbody id="logTableBody"></tbody>
+                </table>
+                <div id="emptyLogs" class="text-center py-8 text-gray-500">No log entries yet. Waiting for traffic...</div>
+            </div>
+        </section>
+
+        <!-- Policy Tab -->
+        <section id="panelPolicy" class="hidden">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-lg font-semibold">Policy Configuration</h2>
+                <button onclick="savePolicy()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded text-sm">Save Policy</button>
+            </div>
+            <textarea id="policyEditor" class="w-full h-96 bg-gray-800 border border-gray-600 rounded-lg p-4 font-mono text-sm focus:outline-none focus:border-blue-500" spellcheck="false"></textarea>
+            <div id="policySaveStatus" class="mt-2 text-sm hidden"></div>
+        </section>
+    </main>
+
+    <script>
+    const API_BASE = window.location.origin;
+    let allLogs = [];
+    const MAX_LOGS = 500;
+
+    // ─── Stats ──────────────────────────────────────────────
+    async function loadStats() {
+        try {
+            const res = await fetch(`${API_BASE}/api/status`);
+            const data = await res.json();
+            document.getElementById('statTotal').textContent = data.total;
+            document.getElementById('statAllowed').textContent = data.allowed;
+            document.getElementById('statDenied').textContent = data.denied;
+            document.getElementById('statAsked').textContent = data.asked;
+            document.getElementById('statSystemAllowed').textContent = data.system_allowed;
+        } catch (e) { console.error('Stats error:', e); }
+    }
+
+    // ─── Logs ───────────────────────────────────────────────
+    async function loadLogs() {
+        try {
+            const res = await fetch(`${API_BASE}/api/logs?limit=100`);
+            const data = await res.json();
+            allLogs = data.reverse();
+            renderLogs();
+        } catch (e) { console.error('Logs error:', e); }
+    }
+
+    function renderLogs() {
+        const filter = document.getElementById('filterInput').value.toLowerCase();
+        const actionFilter = document.getElementById('filterAction').value;
+        const tbody = document.getElementById('logTableBody');
+        const empty = document.getElementById('emptyLogs');
+
+        const filtered = allLogs.filter(l => {
+            if (filter && !l.domain.toLowerCase().includes(filter)) return false;
+            if (actionFilter && l.action !== actionFilter) return false;
+            return true;
+        });
+
+        if (filtered.length === 0) {
+            tbody.innerHTML = '';
+            empty.classList.remove('hidden');
+            return;
+        }
+
+        empty.classList.add('hidden');
+        tbody.innerHTML = filtered.slice(-200).reverse().map(l => `
+            <tr class="border-t border-gray-700 hover:bg-gray-750 fade-in">
+                <td class="px-4 py-2 text-gray-400 whitespace-nowrap">${formatTime(l.timestamp)}</td>
+                <td class="px-4 py-2 font-mono">${l.method}</td>
+                <td class="px-4 py-2">${l.domain}</td>
+                <td class="px-4 py-2 text-gray-400 max-w-xs truncate">${l.path}</td>
+                <td class="px-4 py-2">${actionBadge(l.action)}</td>
+                <td class="px-4 py-2 text-gray-400 max-w-xs truncate">${l.reason}</td>
+            </tr>
+        `).join('');
+    }
+
+    function formatTime(ts) {
+        try { return new Date(ts).toLocaleTimeString(); }
+        catch { return ts; }
+    }
+
+    function actionBadge(action) {
+        const colors = {
+            'allow': 'bg-green-900 text-green-300',
+            'deny': 'bg-red-900 text-red-300',
+            'ask': 'bg-yellow-900 text-yellow-300',
+            'system-allow': 'bg-blue-900 text-blue-300',
+        };
+        const cls = colors[action] || 'bg-gray-700 text-gray-300';
+        return `<span class="px-2 py-0.5 rounded text-xs font-medium ${cls}">${action}</span>`;
+    }
+
+    // ─── SSE Log Stream ─────────────────────────────────────
+    function connectLogStream() {
+        const es = new EventSource(`${API_BASE}/api/logs/stream`);
+        es.onopen = () => {
+            document.getElementById('connectionStatus').textContent = 'Connected';
+            document.getElementById('connectionStatus').className = 'text-sm text-green-400';
+        };
+        es.onmessage = (e) => {
+            try {
+                const log = JSON.parse(e.data);
+                allLogs.push(log);
+                if (allLogs.length > MAX_LOGS) allLogs.shift();
+                renderLogs();
+                loadStats();
+            } catch (err) { console.error('SSE parse error:', err); }
+        };
+        es.onerror = () => {
+            document.getElementById('connectionStatus').textContent = 'Disconnected';
+            document.getElementById('connectionStatus').className = 'text-sm text-red-400';
+            setTimeout(connectLogStream, 3000);
+        };
+    }
+
+    // ─── ASK ────────────────────────────────────────────────
+    function connectAskStream() {
+        const es = new EventSource(`${API_BASE}/api/ask/stream`);
+        es.onmessage = (e) => {
+            try {
+                const event = JSON.parse(e.data);
+                if (event.type === 'new_ask') addAskCard(event);
+                else if (event.type === 'resolved') removeAskCard(event.req_id);
+            } catch (err) { console.error('ASK SSE error:', err); }
+        };
+        es.onerror = () => setTimeout(connectAskStream, 3000);
+    }
+
+    async function loadPendingAsks() {
+        try {
+            const res = await fetch(`${API_BASE}/api/ask/pending`);
+            const data = await res.json();
+            data.forEach(addAskCard);
+        } catch (e) { console.error('Pending ASK error:', e); }
+    }
+
+    function addAskCard(ask) {
+        const section = document.getElementById('askSection');
+        section.classList.remove('hidden');
+        const list = document.getElementById('askList');
+
+        if (document.getElementById(`ask-${ask.req_id}`)) return;
+
+        const card = document.createElement('div');
+        card.id = `ask-${ask.req_id}`;
+        card.className = 'bg-yellow-900/30 border border-yellow-700 rounded-lg p-4 flex items-center justify-between fade-in';
+        card.innerHTML = `
+            <div>
+                <span class="font-mono text-yellow-300">${ask.method}</span>
+                <span class="text-white ml-2">${ask.domain}</span>
+                <span class="text-gray-400 ml-2">${ask.path}</span>
+            </div>
+            <div class="flex space-x-2">
+                <button onclick="resolveAsk('${ask.req_id}', 'allow')" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm">Allow</button>
+                <button onclick="resolveAsk('${ask.req_id}', 'deny')" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-sm">Deny</button>
+            </div>
+        `;
+        list.prepend(card);
+    }
+
+    function removeAskCard(reqId) {
+        const card = document.getElementById(`ask-${reqId}`);
+        if (card) card.remove();
+        const list = document.getElementById('askList');
+        if (list.children.length === 0) {
+            document.getElementById('askSection').classList.add('hidden');
+        }
+    }
+
+    async function resolveAsk(reqId, action) {
+        try {
+            await fetch(`${API_BASE}/api/ask/${reqId}/${action}`, { method: 'POST' });
+            removeAskCard(reqId);
+        } catch (e) { console.error('Resolve ASK error:', e); }
+    }
+
+    // ─── Policy ─────────────────────────────────────────────
+    async function loadPolicy() {
+        try {
+            const res = await fetch(`${API_BASE}/api/policy`);
+            const data = await res.json();
+            document.getElementById('policyEditor').value = JSON.stringify(data, null, 2);
+        } catch (e) { console.error('Policy error:', e); }
+    }
+
+    async function savePolicy() {
+        const status = document.getElementById('policySaveStatus');
+        try {
+            const body = document.getElementById('policyEditor').value;
+            JSON.parse(body); // validate JSON
+            const res = await fetch(`${API_BASE}/api/policy`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: body,
+            });
+            const data = await res.json();
+            status.textContent = `Saved (${data.rules} rules)`;
+            status.className = 'mt-2 text-sm text-green-400';
+            status.classList.remove('hidden');
+            setTimeout(() => status.classList.add('hidden'), 3000);
+        } catch (e) {
+            status.textContent = `Error: ${e.message}`;
+            status.className = 'mt-2 text-sm text-red-400';
+            status.classList.remove('hidden');
+        }
+    }
+
+    // ─── Tabs ───────────────────────────────────────────────
+    function showTab(name) {
+        document.getElementById('panelLogs').classList.toggle('hidden', name !== 'logs');
+        document.getElementById('panelPolicy').classList.toggle('hidden', name !== 'policy');
+        document.getElementById('tabLogs').className = name === 'logs'
+            ? 'pb-2 px-1 text-sm font-medium border-b-2 border-blue-500 text-blue-400'
+            : 'pb-2 px-1 text-sm font-medium border-b-2 border-transparent text-gray-400 hover:text-gray-200';
+        document.getElementById('tabPolicy').className = name === 'policy'
+            ? 'pb-2 px-1 text-sm font-medium border-b-2 border-blue-500 text-blue-400'
+            : 'pb-2 px-1 text-sm font-medium border-b-2 border-transparent text-gray-400 hover:text-gray-200';
+
+        if (name === 'policy') loadPolicy();
+    }
+
+    // ─── Filters ────────────────────────────────────────────
+    document.getElementById('filterInput').addEventListener('input', renderLogs);
+    document.getElementById('filterAction').addEventListener('change', renderLogs);
+
+    // ─── Init ───────────────────────────────────────────────
+    loadStats();
+    loadLogs();
+    loadPendingAsks();
+    connectLogStream();
+    connectAskStream();
+    </script>
+</body>
+</html>

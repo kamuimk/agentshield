@@ -39,14 +39,30 @@ pub struct AppState {
     pub policy: Option<Arc<RwLock<PolicyConfig>>>,
 }
 
-/// Build the axum router with all API endpoints.
+/// Build the axum router with all API endpoints and embedded dashboard.
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/", get(dashboard_handler))
         .route("/api/logs", get(get_logs))
         .route("/api/logs/stream", get(get_logs_stream))
         .route("/api/status", get(get_status))
         .route("/api/policy", get(get_policy).put(put_policy))
         .with_state(state)
+}
+
+/// Build the full router including ASK endpoints.
+pub fn full_router(state: Arc<AppState>, ask_state: ask::AskState) -> Router {
+    let api_router = router(state);
+    let ask_router = ask::ask_router(ask_state);
+    api_router.merge(ask_router)
+}
+
+/// Embedded dashboard HTML (compiled into the binary).
+const DASHBOARD_HTML: &str = include_str!("../../assets/dashboard.html");
+
+/// `GET /` — serve the embedded SPA dashboard.
+async fn dashboard_handler() -> axum::response::Html<&'static str> {
+    axum::response::Html(DASHBOARD_HTML)
 }
 
 /// Start the web server on the given address.
@@ -475,5 +491,26 @@ mod tests {
             app.into_service().oneshot(req).await.unwrap()
         };
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn dashboard_returns_html() {
+        let (state, _dir) = test_state();
+        let app = router(state);
+
+        use tower::ServiceExt as _;
+        let req = Request::builder()
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let html = std::str::from_utf8(&body).unwrap();
+        assert!(html.contains("AgentShield Dashboard"));
+        assert!(html.contains("tailwindcss"));
     }
 }
