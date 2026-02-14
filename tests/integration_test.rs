@@ -1,13 +1,48 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use agentshield::cli::prompt::{self, AskRequest, PromptRequest};
+use agentshield::ask::{AskBroadcaster, AskRequestInfo, AskResponder};
+use agentshield::cli::prompt::{self, PromptRequest};
 use agentshield::logging;
 use agentshield::policy::config::{Action, AppConfig, PolicyConfig, Rule};
 use agentshield::policy::evaluator::{self, RequestInfo};
 use agentshield::proxy::ProxyServer;
+
+// ===== Test AskResponder that auto-responds =====
+
+/// A simple AskResponder for integration tests that returns a fixed decision.
+struct AutoAskResponder {
+    decision: bool,
+}
+
+impl AutoAskResponder {
+    fn new(allow: bool) -> Self {
+        Self { decision: allow }
+    }
+}
+
+#[async_trait::async_trait]
+impl AskResponder for AutoAskResponder {
+    async fn prompt(&self, _req: &AskRequestInfo) -> Option<bool> {
+        Some(self.decision)
+    }
+
+    async fn notify_resolved(&self, _req_id: &str, _allowed: bool) {}
+
+    fn name(&self) -> &str {
+        "auto-test"
+    }
+}
+
+/// Helper: create an AskBroadcaster with an auto-responding responder.
+fn auto_broadcaster(allow: bool) -> Arc<AskBroadcaster> {
+    let mut broadcaster = AskBroadcaster::new(5);
+    broadcaster.add_responder(Arc::new(AutoAskResponder::new(allow)));
+    Arc::new(broadcaster)
+}
 
 // ===== Template tests =====
 
@@ -95,17 +130,9 @@ async fn e2e_openclaw_full_flow() {
     let template = include_str!("../templates/openclaw-default.toml");
     let config: AppConfig = toml::from_str(template).unwrap();
 
-    // ASK channel with auto-approve handler
-    let (ask_tx, mut ask_rx) = tokio::sync::mpsc::channel::<AskRequest>(10);
-    tokio::spawn(async move {
-        while let Some(req) = ask_rx.recv().await {
-            req.respond(true); // auto-approve for testing
-        }
-    });
-
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(config.policy.clone())
-        .with_ask_channel(ask_tx);
+        .with_ask_broadcaster(auto_broadcaster(true));
     let addr = server.start().await.unwrap();
 
     // 1. Anthropic API - should be ALLOWED
@@ -332,7 +359,7 @@ fn prompt_add_rule_roundtrip() {
     assert_eq!(config.policy.rules.len(), 2);
 }
 
-// ===== ASK without channel defaults to deny =====
+// ===== ASK without broadcaster defaults to deny =====
 
 #[tokio::test]
 async fn ask_policy_without_channel_defaults_to_deny() {
@@ -347,7 +374,7 @@ async fn ask_policy_without_channel_defaults_to_deny() {
         }],
     };
 
-    // No ASK channel attached — should default to deny (fail-closed)
+    // No ASK broadcaster attached — should default to deny (fail-closed)
     let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(policy);
     let addr = server.start().await.unwrap();
 
@@ -362,7 +389,7 @@ async fn ask_policy_without_channel_defaults_to_deny() {
     let response = String::from_utf8_lossy(&buf[..n]);
     assert!(
         response.contains("403"),
-        "ASK without channel should deny, got: {}",
+        "ASK without broadcaster should deny, got: {}",
         response
     );
 }
@@ -496,7 +523,7 @@ async fn proxy_logs_requests_to_sqlite() {
     assert_eq!(allowed.action, "allow");
 }
 
-// ===== ASK channel infrastructure =====
+// ===== ASK broadcaster integration =====
 
 #[tokio::test]
 async fn ask_channel_sends_request_on_ask_policy() {
@@ -511,37 +538,21 @@ async fn ask_channel_sends_request_on_ask_policy() {
         }],
     };
 
-    let (ask_tx, mut ask_rx) = tokio::sync::mpsc::channel::<AskRequest>(10);
-
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(policy)
-        .with_ask_channel(ask_tx);
+        .with_ask_broadcaster(auto_broadcaster(true));
     let addr = server.start().await.unwrap();
 
-    // Send CONNECT to example.com (ASK rule)
-    let connect_handle = tokio::spawn(async move {
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream
-            .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
-            .await
-            .unwrap();
-        let mut buf = [0u8; 1024];
-        let n = stream.read(&mut buf).await.unwrap();
-        String::from_utf8_lossy(&buf[..n]).to_string()
-    });
-
-    // Receive the ASK request on the channel and approve it
-    let ask_req = tokio::time::timeout(std::time::Duration::from_secs(5), ask_rx.recv())
+    // Send CONNECT to example.com (ASK rule) — auto-approved by broadcaster
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
         .await
-        .expect("Timeout waiting for ASK request")
-        .expect("Channel closed");
+        .unwrap();
 
-    assert_eq!(ask_req.domain, "example.com");
-    assert_eq!(ask_req.method, "CONNECT");
-    // Approve the request
-    ask_req.respond(true);
-
-    let response = connect_handle.await.unwrap();
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf).await.unwrap();
+    let response = String::from_utf8_lossy(&buf[..n]);
     // Should get 200 (approved) not 403 (denied)
     assert!(
         response.contains("200"),
@@ -563,32 +574,20 @@ async fn ask_channel_deny_returns_403() {
         }],
     };
 
-    let (ask_tx, mut ask_rx) = tokio::sync::mpsc::channel::<AskRequest>(10);
-
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(policy)
-        .with_ask_channel(ask_tx);
+        .with_ask_broadcaster(auto_broadcaster(false));
     let addr = server.start().await.unwrap();
 
-    let connect_handle = tokio::spawn(async move {
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream
-            .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
-            .await
-            .unwrap();
-        let mut buf = [0u8; 1024];
-        let n = stream.read(&mut buf).await.unwrap();
-        String::from_utf8_lossy(&buf[..n]).to_string()
-    });
-
-    // Deny the request
-    let ask_req = tokio::time::timeout(std::time::Duration::from_secs(5), ask_rx.recv())
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
         .await
-        .expect("Timeout waiting for ASK request")
-        .expect("Channel closed");
-    ask_req.respond(false);
+        .unwrap();
 
-    let response = connect_handle.await.unwrap();
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf).await.unwrap();
+    let response = String::from_utf8_lossy(&buf[..n]);
     assert!(
         response.contains("403"),
         "Expected 403 after denial, got: {}",

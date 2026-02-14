@@ -13,10 +13,9 @@
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use crate::cli::prompt::AskRequest;
+use crate::ask::AskBroadcaster;
 use crate::dlp::{DlpScanner, Severity};
 use crate::logging;
 use crate::logging::DbPool;
@@ -36,8 +35,8 @@ pub struct ConnectionContext {
     pub policy: Option<Arc<PolicyConfig>>,
     /// SQLite connection pool for request logging.
     pub db: Option<DbPool>,
-    /// Channel for sending ASK prompts to the CLI handler.
-    pub ask_tx: Option<mpsc::Sender<AskRequest>>,
+    /// Broadcaster for ASK prompts to all registered responders.
+    pub ask_broadcaster: Option<Arc<AskBroadcaster>>,
     /// DLP scanner for inspecting HTTP request bodies.
     pub dlp_scanner: Option<Arc<dyn DlpScanner>>,
     /// Domains that bypass policy and DLP evaluation.
@@ -132,8 +131,8 @@ async fn handle_connection(
     }
 }
 
-/// Send an ASK request through the channel and wait for the response.
-/// Returns true if allowed, false if denied. Defaults to deny on timeout or error.
+/// Broadcast an ASK request to all registered responders and wait for the first response.
+/// Returns true if allowed, false if denied. Defaults to deny if no broadcaster is configured.
 async fn ask_and_wait(
     ctx: &ConnectionContext,
     domain: &str,
@@ -141,23 +140,17 @@ async fn ask_and_wait(
     path: &str,
     body: Option<String>,
 ) -> bool {
-    if let Some(ref tx) = ctx.ask_tx {
-        let (req, rx) = AskRequest::new(
-            domain.to_string(),
-            method.to_string(),
-            path.to_string(),
-            body,
-        );
-        if tx.send(req).await.is_ok() {
-            // Wait up to 30 seconds for a response
-            match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
-                Ok(Ok(allowed)) => return allowed,
-                Ok(Err(_)) => warn!("ASK response channel closed for {}", domain),
-                Err(_) => warn!("ASK timeout (30s) for {} - defaulting to deny", domain),
-            }
-        }
+    if let Some(ref broadcaster) = ctx.ask_broadcaster {
+        return broadcaster
+            .ask(
+                domain.to_string(),
+                method.to_string(),
+                path.to_string(),
+                body,
+            )
+            .await;
     }
-    // No channel or error: default to deny (fail-closed)
+    // No broadcaster: default to deny (fail-closed)
     false
 }
 

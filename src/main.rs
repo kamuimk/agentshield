@@ -3,14 +3,12 @@
 //! Parses command-line arguments via [`clap`] and dispatches to the appropriate
 //! handler: `start`, `stop`, `status`, `logs`, `policy`, `init`, or `integrate`.
 
-use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
+use agentshield::ask::AskBroadcaster;
+use agentshield::ask::terminal::TerminalResponder;
 use agentshield::cli::integrate;
-use agentshield::cli::prompt::{
-    AskRequest, PromptDecision, PromptRequest, append_rule_to_config, generate_rule,
-};
 use agentshield::cli::{Cli, Commands, IntegrateTarget, PolicyAction};
 use agentshield::dlp::DlpScanner;
 use agentshield::dlp::patterns::RegexScanner;
@@ -21,7 +19,7 @@ use agentshield::notification::telegram::TelegramNotifier;
 use agentshield::policy::config::AppConfig;
 use agentshield::proxy::ProxyServer;
 use clap::Parser;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Return the path to the SQLite log database (`~/.agentshield/agentshield.db`).
 fn db_path() -> std::path::PathBuf {
@@ -96,66 +94,16 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
     let db = db_path();
     let pool = logging::open_pool(&db)?;
 
-    // ASK channel: proxy sends ASK requests, handler prompts user via stdin/stdout
-    let (ask_tx, mut ask_rx) = tokio::sync::mpsc::channel::<AskRequest>(100);
-    let config_path_owned = config_path.to_path_buf();
-    tokio::spawn(async move {
-        let stdin = std::io::stdin();
-        let stdout = std::io::stdout();
-        while let Some(ask_req) = ask_rx.recv().await {
-            let prompt_req = PromptRequest {
-                method: ask_req.method.clone(),
-                domain: ask_req.domain.clone(),
-                path: ask_req.path.clone(),
-                body: ask_req.body.clone(),
-            };
-            let mut reader = stdin.lock();
-            let mut writer = stdout.lock();
-            loop {
-                match agentshield::cli::prompt::prompt_decision(
-                    &prompt_req,
-                    &mut reader,
-                    &mut writer,
-                ) {
-                    Ok(PromptDecision::Inspect) => {
-                        agentshield::cli::prompt::handle_inspect(&prompt_req, &mut writer).ok();
-                        continue; // Re-prompt after inspect
-                    }
-                    Ok(PromptDecision::AllowOnce) => {
-                        ask_req.respond(true);
-                        break;
-                    }
-                    Ok(PromptDecision::AddRule) => {
-                        let rule = generate_rule(&prompt_req);
-                        match append_rule_to_config(&config_path_owned, &rule) {
-                            Ok(()) => {
-                                writeln!(
-                                    writer,
-                                    "Rule '{}' added to config (effective next restart)",
-                                    rule.name
-                                )
-                                .ok();
-                            }
-                            Err(e) => {
-                                warn!("Failed to append rule: {}", e);
-                            }
-                        }
-                        ask_req.respond(true);
-                        break;
-                    }
-                    _ => {
-                        ask_req.respond(false);
-                        break;
-                    }
-                }
-            }
-        }
-    });
+    // ASK broadcaster: broadcasts ASK requests to all registered responders
+    let mut broadcaster = AskBroadcaster::new(120);
+    let terminal = Arc::new(TerminalResponder::new(config_path.to_path_buf()));
+    broadcaster.add_responder(terminal);
+    let broadcaster = Arc::new(broadcaster);
 
     let mut server = ProxyServer::new(config.proxy.listen.clone())
         .with_policy(config.policy.clone())
         .with_db(pool)
-        .with_ask_channel(ask_tx);
+        .with_ask_broadcaster(broadcaster);
 
     // Apply system allowlist if configured
     if let Some(ref system) = config.system {

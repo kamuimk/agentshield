@@ -11,13 +11,12 @@ pub mod tls;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use crate::ask::AskBroadcaster;
 use crate::error::Result;
 use crate::logging::DbPool;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
 use tracing::info;
 
-use crate::cli::prompt::AskRequest;
 use crate::dlp::DlpScanner;
 use crate::notification::Notifier;
 use crate::policy::config::PolicyConfig;
@@ -37,7 +36,7 @@ pub struct ProxyServer {
     listen_addr: String,
     policy: Option<Arc<PolicyConfig>>,
     db: Option<DbPool>,
-    ask_tx: Option<mpsc::Sender<AskRequest>>,
+    ask_broadcaster: Option<Arc<AskBroadcaster>>,
     dlp_scanner: Option<Arc<dyn DlpScanner>>,
     system_allowlist: Option<Arc<Vec<String>>>,
     notifier: Option<Arc<dyn Notifier>>,
@@ -50,7 +49,7 @@ impl ProxyServer {
             listen_addr,
             policy: None,
             db: None,
-            ask_tx: None,
+            ask_broadcaster: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -69,9 +68,9 @@ impl ProxyServer {
         self
     }
 
-    /// Attach an async channel for sending ASK prompts to the CLI handler.
-    pub fn with_ask_channel(mut self, ask_tx: mpsc::Sender<AskRequest>) -> Self {
-        self.ask_tx = Some(ask_tx);
+    /// Attach an ASK broadcaster for multi-channel interactive approval.
+    pub fn with_ask_broadcaster(mut self, broadcaster: Arc<AskBroadcaster>) -> Self {
+        self.ask_broadcaster = Some(broadcaster);
         self
     }
 
@@ -104,7 +103,7 @@ impl ProxyServer {
         let ctx = Arc::new(ConnectionContext {
             policy: self.policy.clone(),
             db: self.db.clone(),
-            ask_tx: self.ask_tx.clone(),
+            ask_broadcaster: self.ask_broadcaster.clone(),
             dlp_scanner: self.dlp_scanner.clone(),
             system_allowlist: self.system_allowlist.clone(),
             notifier: self.notifier.clone(),
