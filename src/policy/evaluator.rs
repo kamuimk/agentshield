@@ -48,25 +48,32 @@ pub fn evaluate(req: &RequestInfo, config: &PolicyConfig) -> EvalResult {
     }
 }
 
+/// Check if a domain matches a pattern.
+///
+/// Supports three forms:
+/// - `"example.com"` — exact match only
+/// - `"*.example.com"` — matches subdomains (`api.example.com`) and the base domain (`example.com`)
+/// - `"*"` — matches everything
+pub fn domain_matches(pattern: &str, domain: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        let dot_suffix = &pattern[1..]; // ".example.com"
+        return domain.ends_with(dot_suffix) || domain == suffix;
+    }
+    domain == pattern
+}
+
 /// Check if a request matches a given rule by domain and optional HTTP method.
 ///
 /// Domain matching supports exact match, `"*"` wildcard (matches everything),
 /// and `"*.example.com"` subdomain wildcard (matches `foo.example.com` and `example.com`).
 fn matches_rule(req: &RequestInfo, rule: &Rule) -> bool {
     // Check domain match
-    let domain_matches = rule.domains.iter().any(|d| {
-        if d == "*" {
-            true
-        } else if let Some(stripped) = d.strip_prefix("*.") {
-            // Wildcard subdomain match: "*.example.com" matches "foo.example.com"
-            let suffix = &d[1..]; // ".example.com"
-            req.domain.ends_with(suffix) || req.domain == stripped
-        } else {
-            req.domain == *d
-        }
-    });
+    let domain_match = rule.domains.iter().any(|d| domain_matches(d, &req.domain));
 
-    if !domain_matches {
+    if !domain_match {
         return false;
     }
 
