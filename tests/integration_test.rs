@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -109,7 +109,7 @@ async fn e2e_proxy_policy_deny_logs_nothing_yet() {
         default: Action::Deny,
         rules: vec![],
     };
-    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(policy);
+    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
     let addr = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -131,7 +131,7 @@ async fn e2e_openclaw_full_flow() {
     let config: AppConfig = toml::from_str(template).unwrap();
 
     let server = ProxyServer::new("127.0.0.1:0".to_string())
-        .with_policy(config.policy.clone())
+        .with_policy(Arc::new(RwLock::new(config.policy.clone())))
         .with_ask_broadcaster(auto_broadcaster(true));
     let addr = server.start().await.unwrap();
 
@@ -375,7 +375,7 @@ async fn ask_policy_without_channel_defaults_to_deny() {
     };
 
     // No ASK broadcaster attached — should default to deny (fail-closed)
-    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(policy);
+    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
     let addr = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -409,7 +409,7 @@ async fn proxy_handles_concurrent_connections() {
         }],
     };
 
-    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(policy);
+    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
     let addr = server.start().await.unwrap();
 
     // Spawn 10 concurrent requests
@@ -475,7 +475,7 @@ async fn proxy_logs_requests_to_sqlite() {
     let pool = logging::open_pool(&db_path).unwrap();
 
     let server = ProxyServer::new("127.0.0.1:0".to_string())
-        .with_policy(policy)
+        .with_policy(Arc::new(RwLock::new(policy)))
         .with_db(pool.clone());
     let addr = server.start().await.unwrap();
 
@@ -539,7 +539,7 @@ async fn ask_channel_sends_request_on_ask_policy() {
     };
 
     let server = ProxyServer::new("127.0.0.1:0".to_string())
-        .with_policy(policy)
+        .with_policy(Arc::new(RwLock::new(policy)))
         .with_ask_broadcaster(auto_broadcaster(true));
     let addr = server.start().await.unwrap();
 
@@ -575,7 +575,7 @@ async fn ask_channel_deny_returns_403() {
     };
 
     let server = ProxyServer::new("127.0.0.1:0".to_string())
-        .with_policy(policy)
+        .with_policy(Arc::new(RwLock::new(policy)))
         .with_ask_broadcaster(auto_broadcaster(false));
     let addr = server.start().await.unwrap();
 

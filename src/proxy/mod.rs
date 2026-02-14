@@ -9,15 +9,16 @@ pub mod connect;
 pub mod tls;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use crate::ask::AskBroadcaster;
-use crate::error::Result;
-use crate::logging::DbPool;
 use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 use tracing::info;
 
+use crate::ask::AskBroadcaster;
 use crate::dlp::DlpScanner;
+use crate::error::Result;
+use crate::logging::{DbPool, LogEvent};
 use crate::notification::Notifier;
 use crate::policy::config::PolicyConfig;
 use connect::ConnectionContext;
@@ -34,12 +35,13 @@ use connect::ConnectionContext;
 /// ```
 pub struct ProxyServer {
     listen_addr: String,
-    policy: Option<Arc<PolicyConfig>>,
+    policy: Option<Arc<RwLock<PolicyConfig>>>,
     db: Option<DbPool>,
     ask_broadcaster: Option<Arc<AskBroadcaster>>,
     dlp_scanner: Option<Arc<dyn DlpScanner>>,
     system_allowlist: Option<Arc<Vec<String>>>,
     notifier: Option<Arc<dyn Notifier>>,
+    event_tx: Option<broadcast::Sender<LogEvent>>,
 }
 
 impl ProxyServer {
@@ -53,12 +55,16 @@ impl ProxyServer {
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
+            event_tx: None,
         }
     }
 
     /// Attach a policy configuration for request evaluation.
-    pub fn with_policy(mut self, policy: PolicyConfig) -> Self {
-        self.policy = Some(Arc::new(policy));
+    ///
+    /// Accepts an `Arc<RwLock<PolicyConfig>>` so the policy can be
+    /// hot-reloaded while the server is running.
+    pub fn with_policy(mut self, policy: Arc<RwLock<PolicyConfig>>) -> Self {
+        self.policy = Some(policy);
         self
     }
 
@@ -94,6 +100,12 @@ impl ProxyServer {
         self
     }
 
+    /// Attach a broadcast channel for real-time log events.
+    pub fn with_event_channel(mut self, tx: broadcast::Sender<LogEvent>) -> Self {
+        self.event_tx = Some(tx);
+        self
+    }
+
     /// Start the proxy server and return the actual bound address.
     pub async fn start(&self) -> Result<SocketAddr> {
         let listener = TcpListener::bind(&self.listen_addr).await?;
@@ -107,6 +119,7 @@ impl ProxyServer {
             dlp_scanner: self.dlp_scanner.clone(),
             system_allowlist: self.system_allowlist.clone(),
             notifier: self.notifier.clone(),
+            event_tx: self.event_tx.clone(),
         });
         tokio::spawn(async move {
             connect::accept_loop(listener, ctx).await;

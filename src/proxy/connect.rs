@@ -24,7 +24,7 @@ use crate::logging::{DbPool, LogEvent};
 use crate::notification::{NotificationEvent, Notifier};
 use crate::policy::config::{Action, PolicyConfig};
 use crate::policy::evaluator::{self, RequestInfo, domain_matches};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// Shared context for all connection handlers, consolidating the various
 /// optional components that each handler needs access to.
@@ -33,8 +33,8 @@ use std::sync::Arc;
 /// shared via `Arc` across all spawned connection tasks.
 #[derive(Clone)]
 pub struct ConnectionContext {
-    /// Policy configuration for request evaluation.
-    pub policy: Option<Arc<PolicyConfig>>,
+    /// Policy configuration for request evaluation (hot-reloadable via `RwLock`).
+    pub policy: Option<Arc<RwLock<PolicyConfig>>>,
     /// SQLite connection pool for request logging.
     pub db: Option<DbPool>,
     /// Broadcaster for ASK prompts to all registered responders.
@@ -215,13 +215,16 @@ async fn handle_connect(
         );
     }
     // Policy evaluation for CONNECT (domain-level only)
-    else if let Some(ref policy) = ctx.policy {
+    else if let Some(ref policy_lock) = ctx.policy {
         let req_info = RequestInfo {
             domain: domain.to_string(),
             method: "CONNECT".to_string(),
             path: "/".to_string(),
         };
-        let result = evaluator::evaluate(&req_info, policy);
+        let result = {
+            let policy = policy_lock.read().unwrap();
+            evaluator::evaluate(&req_info, &policy)
+        };
         match result.action {
             Action::Deny => {
                 warn!("BLOCKED CONNECT to {} - {}", target, result.reason);
@@ -369,13 +372,16 @@ async fn handle_http_request(
         );
     }
     // Policy evaluation for HTTP
-    else if let Some(ref policy) = ctx.policy {
+    else if let Some(ref policy_lock) = ctx.policy {
         let req_info = RequestInfo {
             domain: host.clone(),
             method: method.to_string(),
             path: path.clone(),
         };
-        let result = evaluator::evaluate(&req_info, policy);
+        let result = {
+            let policy = policy_lock.read().unwrap();
+            evaluator::evaluate(&req_info, &policy)
+        };
         match result.action {
             Action::Deny => {
                 warn!("BLOCKED {} {} - {}", method, uri, result.reason);

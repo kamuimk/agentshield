@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -112,7 +112,7 @@ async fn proxy_handles_http_request() {
 
 #[tokio::test]
 async fn policy_deny_all_blocks_connect() {
-    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(deny_all_policy());
+    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(deny_all_policy())));
     let addr = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -136,7 +136,7 @@ async fn policy_deny_all_blocks_connect() {
 
 #[tokio::test]
 async fn policy_deny_all_blocks_http() {
-    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(deny_all_policy());
+    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(deny_all_policy())));
     let addr = server.start().await.unwrap();
 
     let request = "GET http://evil.com/ HTTP/1.1\r\nHost: evil.com\r\n\r\n";
@@ -151,7 +151,7 @@ async fn policy_deny_all_blocks_http() {
 
 #[tokio::test]
 async fn policy_allows_whitelisted_domain_connect() {
-    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(allow_example_policy());
+    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(allow_example_policy())));
     let addr = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -167,7 +167,7 @@ async fn policy_allows_whitelisted_domain_connect() {
 
 #[tokio::test]
 async fn policy_blocks_non_whitelisted_domain() {
-    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(allow_example_policy());
+    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(allow_example_policy())));
     let addr = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -189,7 +189,7 @@ async fn openclaw_policy_allows_anthropic() {
     let template = include_str!("../templates/openclaw-default.toml");
     let config: AppConfig = toml::from_str(template).unwrap();
 
-    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(config.policy.clone());
+    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(config.policy.clone())));
     let addr = server.start().await.unwrap();
 
     // api.anthropic.com should be allowed
@@ -213,7 +213,7 @@ async fn openclaw_policy_allows_anthropic() {
 #[tokio::test]
 async fn system_allowlist_bypasses_deny_all_connect() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
-        .with_policy(deny_all_policy())
+        .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_system_allowlist(vec!["example.com".to_string()]);
     let addr = server.start().await.unwrap();
 
@@ -236,7 +236,7 @@ async fn system_allowlist_bypasses_deny_all_connect() {
 #[tokio::test]
 async fn system_allowlist_does_not_affect_unlisted_domain() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
-        .with_policy(deny_all_policy())
+        .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_system_allowlist(vec!["api.telegram.org".to_string()]);
     let addr = server.start().await.unwrap();
 
@@ -262,7 +262,7 @@ async fn system_allowlist_does_not_affect_unlisted_domain() {
 async fn dlp_blocks_http_request_with_critical_finding() {
     let scanner: Arc<dyn DlpScanner> = Arc::new(RegexScanner::new());
     let server = ProxyServer::new("127.0.0.1:0".to_string())
-        .with_policy(allow_example_policy())
+        .with_policy(Arc::new(RwLock::new(allow_example_policy())))
         .with_dlp(scanner);
     let addr = server.start().await.unwrap();
 
@@ -280,7 +280,7 @@ async fn dlp_blocks_http_request_with_critical_finding() {
 async fn dlp_allows_clean_http_request() {
     let scanner: Arc<dyn DlpScanner> = Arc::new(RegexScanner::new());
     let server = ProxyServer::new("127.0.0.1:0".to_string())
-        .with_policy(allow_example_policy())
+        .with_policy(Arc::new(RwLock::new(allow_example_policy())))
         .with_dlp(scanner);
     let addr = server.start().await.unwrap();
 
@@ -298,7 +298,7 @@ async fn dlp_allows_clean_http_request() {
 async fn dlp_does_not_scan_connect_tunnels() {
     let scanner: Arc<dyn DlpScanner> = Arc::new(RegexScanner::new());
     let server = ProxyServer::new("127.0.0.1:0".to_string())
-        .with_policy(allow_example_policy())
+        .with_policy(Arc::new(RwLock::new(allow_example_policy())))
         .with_dlp(scanner);
     let addr = server.start().await.unwrap();
 
@@ -324,7 +324,7 @@ async fn system_allowlist_bypasses_dlp_for_http() {
     // System allowlist domain should bypass BOTH policy AND DLP
     let scanner: Arc<dyn DlpScanner> = Arc::new(RegexScanner::new());
     let server = ProxyServer::new("127.0.0.1:0".to_string())
-        .with_policy(deny_all_policy())
+        .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_dlp(scanner)
         .with_system_allowlist(vec!["example.com".to_string()]);
     let addr = server.start().await.unwrap();
@@ -344,7 +344,7 @@ async fn non_allowlist_domain_still_blocked_by_dlp() {
     // Non-allowlist domain should still be subject to DLP scanning
     let scanner: Arc<dyn DlpScanner> = Arc::new(RegexScanner::new());
     let server = ProxyServer::new("127.0.0.1:0".to_string())
-        .with_policy(allow_example_policy())
+        .with_policy(Arc::new(RwLock::new(allow_example_policy())))
         .with_dlp(scanner)
         .with_system_allowlist(vec!["api.telegram.org".to_string()]);
     let addr = server.start().await.unwrap();
@@ -365,7 +365,7 @@ async fn non_allowlist_domain_still_blocked_by_dlp() {
 async fn notification_fires_on_deny() {
     let (notifier, events) = TestNotifier::new();
     let server = ProxyServer::new("127.0.0.1:0".to_string())
-        .with_policy(deny_all_policy())
+        .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_notifier(notifier);
     let addr = server.start().await.unwrap();
 
@@ -398,7 +398,7 @@ async fn notification_fires_on_dlp_critical() {
     let (notifier, events) = TestNotifier::new();
     let scanner: Arc<dyn DlpScanner> = Arc::new(RegexScanner::new());
     let server = ProxyServer::new("127.0.0.1:0".to_string())
-        .with_policy(allow_example_policy())
+        .with_policy(Arc::new(RwLock::new(allow_example_policy())))
         .with_dlp(scanner)
         .with_notifier(notifier);
     let addr = server.start().await.unwrap();
@@ -424,7 +424,7 @@ async fn notification_fires_on_dlp_critical() {
 async fn notification_does_not_fire_on_allow() {
     let (notifier, events) = TestNotifier::new();
     let server = ProxyServer::new("127.0.0.1:0".to_string())
-        .with_policy(allow_example_policy())
+        .with_policy(Arc::new(RwLock::new(allow_example_policy())))
         .with_notifier(notifier);
     let addr = server.start().await.unwrap();
 
@@ -466,7 +466,7 @@ async fn notification_failure_does_not_crash_proxy() {
 
     let notifier: Arc<dyn Notifier> = Arc::new(FailNotifier);
     let server = ProxyServer::new("127.0.0.1:0".to_string())
-        .with_policy(deny_all_policy())
+        .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_notifier(notifier);
     let addr = server.start().await.unwrap();
 

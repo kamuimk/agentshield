@@ -17,9 +17,11 @@ use agentshield::notification::FilteredNotifier;
 use agentshield::notification::Notifier;
 use agentshield::notification::telegram::TelegramNotifier;
 use agentshield::policy::config::AppConfig;
+use agentshield::policy::reload;
 use agentshield::proxy::ProxyServer;
 use clap::Parser;
-use tracing::info;
+use std::sync::RwLock;
+use tracing::{info, warn};
 
 /// Return the path to the SQLite log database (`~/.agentshield/agentshield.db`).
 fn db_path() -> std::path::PathBuf {
@@ -100,8 +102,11 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
     broadcaster.add_responder(terminal);
     let broadcaster = Arc::new(broadcaster);
 
+    // Shared policy state for hot-reload
+    let policy = Arc::new(RwLock::new(config.policy.clone()));
+
     let mut server = ProxyServer::new(config.proxy.listen.clone())
-        .with_policy(config.policy.clone())
+        .with_policy(policy.clone())
         .with_db(pool)
         .with_ask_broadcaster(broadcaster);
 
@@ -157,6 +162,15 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
         "Set HTTPS_PROXY=http://{} to route traffic through AgentShield",
         addr
     );
+
+    // Policy hot-reload: file watcher + SIGHUP handler
+    let _watcher = reload::start_file_watcher(config_path.to_path_buf(), policy.clone())
+        .map_err(|e| {
+            warn!("Failed to start config file watcher: {}", e);
+            e
+        })
+        .ok();
+    reload::start_sighup_handler(config_path.to_path_buf(), policy);
 
     // Keep running until interrupted
     tokio::signal::ctrl_c().await?;
