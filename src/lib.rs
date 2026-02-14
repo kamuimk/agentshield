@@ -31,6 +31,7 @@
 //! export HTTPS_PROXY=http://127.0.0.1:18080
 //! ```
 
+pub mod ask;
 pub mod cli;
 pub mod dlp;
 pub mod error;
