@@ -41,6 +41,12 @@ pub enum NotificationEvent {
     ProxyStarted { listen_addr: String },
     /// The proxy server is shutting down.
     ProxyShutdown,
+    /// A request is pending interactive approval via the ASK prompt.
+    AskPending {
+        domain: String,
+        method: String,
+        path: String,
+    },
 }
 
 impl NotificationEvent {
@@ -51,6 +57,7 @@ impl NotificationEvent {
             Self::DlpFinding { .. } => "dlp",
             Self::ProxyStarted { .. } => "start",
             Self::ProxyShutdown => "shutdown",
+            Self::AskPending { .. } => "ask",
         }
     }
 }
@@ -146,6 +153,16 @@ pub fn format_message(event: &NotificationEvent) -> String {
             format!("✅ *AgentShield Started*\nListening on `{}`", listen_addr)
         }
         NotificationEvent::ProxyShutdown => "⏹ *AgentShield Shutdown*".to_string(),
+        NotificationEvent::AskPending {
+            domain,
+            method,
+            path,
+        } => {
+            format!(
+                "⚠️ *ASK Pending*\n`{} {}{}`\nWaiting for terminal approval",
+                method, domain, path
+            )
+        }
     }
 }
 
@@ -340,5 +357,28 @@ mod tests {
             "start"
         );
         assert_eq!(NotificationEvent::ProxyShutdown.event_type(), "shutdown");
+        assert_eq!(
+            NotificationEvent::AskPending {
+                domain: "api.github.com".into(),
+                method: "POST".into(),
+                path: "/repos".into(),
+            }
+            .event_type(),
+            "ask"
+        );
+    }
+
+    #[test]
+    fn format_ask_pending_message() {
+        let event = NotificationEvent::AskPending {
+            domain: "api.github.com".to_string(),
+            method: "POST".to_string(),
+            path: "/repos/user/repo/pulls".to_string(),
+        };
+        let msg = format_message(&event);
+        assert!(msg.contains("ASK Pending"));
+        assert!(msg.contains("api.github.com"));
+        assert!(msg.contains("POST"));
+        assert!(msg.contains("/repos/user/repo/pulls"));
     }
 }
