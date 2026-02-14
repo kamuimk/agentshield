@@ -229,6 +229,14 @@ async fn handle_connect(
             }
             Action::Ask => {
                 info!("ASK CONNECT to {} - {}", target, result.reason);
+                notify_event(
+                    ctx,
+                    NotificationEvent::AskPending {
+                        domain: domain.to_string(),
+                        method: "CONNECT".to_string(),
+                        path: "/".to_string(),
+                    },
+                );
                 let allowed = ask_and_wait(ctx, domain, "CONNECT", "/", None).await;
                 if allowed {
                     log_to_db(ctx, "CONNECT", domain, "/", "allow", "approved via ASK");
@@ -375,6 +383,14 @@ async fn handle_http_request(
             }
             Action::Ask => {
                 info!("ASK {} {} - {}", method, uri, result.reason);
+                notify_event(
+                    ctx,
+                    NotificationEvent::AskPending {
+                        domain: host.clone(),
+                        method: method.to_string(),
+                        path: path.clone(),
+                    },
+                );
                 let body_str = extract_body(raw_request)
                     .and_then(|b| String::from_utf8(b.to_vec()).ok());
                 let allowed = ask_and_wait(ctx, &host, method, &path, body_str).await;
