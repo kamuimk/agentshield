@@ -9,6 +9,8 @@
 //! - `GET  /api/policy`      — current policy configuration
 //! - `PUT  /api/policy`      — replace policy configuration
 
+pub mod ask;
+
 use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
 
