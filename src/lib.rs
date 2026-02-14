@@ -39,3 +39,4 @@ pub mod logging;
 pub mod notification;
 pub mod policy;
 pub mod proxy;
+pub mod web;
