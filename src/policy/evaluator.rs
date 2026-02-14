@@ -225,6 +225,66 @@ mod tests {
     }
 
     #[test]
+    fn wildcard_subdomain_matches_subdomains() {
+        let policy = make_policy(
+            Action::Deny,
+            vec![make_rule(
+                "github-wild",
+                vec!["*.github.com"],
+                None,
+                Action::Allow,
+            )],
+        );
+        // Subdomain should match
+        let req = make_req("api.github.com", "GET", "/");
+        assert_eq!(evaluate(&req, &policy).action, Action::Allow);
+
+        // Deep subdomain should match
+        let req = make_req("deep.api.github.com", "GET", "/");
+        assert_eq!(evaluate(&req, &policy).action, Action::Allow);
+
+        // Base domain should also match
+        let req = make_req("github.com", "GET", "/");
+        assert_eq!(evaluate(&req, &policy).action, Action::Allow);
+    }
+
+    #[test]
+    fn wildcard_subdomain_does_not_match_similar_domains() {
+        let policy = make_policy(
+            Action::Deny,
+            vec![make_rule(
+                "github-wild",
+                vec!["*.github.com"],
+                None,
+                Action::Allow,
+            )],
+        );
+        // "evil-github.com" should NOT match "*.github.com"
+        let req = make_req("evil-github.com", "GET", "/");
+        assert_eq!(evaluate(&req, &policy).action, Action::Deny);
+    }
+
+    #[test]
+    fn exact_domain_does_not_match_subdomains() {
+        let policy = make_policy(
+            Action::Deny,
+            vec![make_rule(
+                "exact",
+                vec!["example.com"],
+                None,
+                Action::Allow,
+            )],
+        );
+        // Exact match works
+        let req = make_req("example.com", "GET", "/");
+        assert_eq!(evaluate(&req, &policy).action, Action::Allow);
+
+        // Subdomain should NOT match exact domain
+        let req = make_req("sub.example.com", "GET", "/");
+        assert_eq!(evaluate(&req, &policy).action, Action::Deny);
+    }
+
+    #[test]
     fn first_matching_rule_wins() {
         let policy = make_policy(
             Action::Deny,

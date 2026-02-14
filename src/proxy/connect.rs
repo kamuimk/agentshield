@@ -497,7 +497,22 @@ fn extract_body(raw_request: &[u8]) -> Option<&[u8]> {
 
 /// Check if a domain is in the system allowlist (bypass policy evaluation).
 fn is_system_allowed(domain: &str, allowlist: Option<&[String]>) -> bool {
-    allowlist.is_some_and(|list| list.iter().any(|d| d == domain))
+    allowlist.is_some_and(|list| list.iter().any(|d| domain_matches(d, domain)))
+}
+
+/// Check if a domain matches a pattern.
+///
+/// Supports exact match, `"*"` (matches everything),
+/// and `"*.example.com"` (matches subdomains and the base domain itself).
+fn domain_matches(pattern: &str, domain: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        let dot_suffix = &pattern[1..]; // ".example.com"
+        return domain.ends_with(dot_suffix) || domain == suffix;
+    }
+    domain == pattern
 }
 
 /// Validate that a domain name contains only safe characters.
@@ -624,6 +639,21 @@ mod tests {
     #[test]
     fn system_allowlist_none() {
         assert!(!is_system_allowed("api.telegram.org", None));
+    }
+
+    #[test]
+    fn system_allowlist_wildcard_subdomain() {
+        let list = vec!["*.github.com".to_string()];
+        assert!(is_system_allowed("api.github.com", Some(&list)));
+        assert!(is_system_allowed("github.com", Some(&list)));
+        assert!(is_system_allowed("deep.api.github.com", Some(&list)));
+        assert!(!is_system_allowed("evil-github.com", Some(&list)));
+    }
+
+    #[test]
+    fn system_allowlist_wildcard_all() {
+        let list = vec!["*".to_string()];
+        assert!(is_system_allowed("anything.com", Some(&list)));
     }
 
     #[test]
