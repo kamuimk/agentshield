@@ -28,7 +28,7 @@ We follow **TDD (Test-Driven Development)**:
 ```bash
 cargo fmt --check       # Formatting
 cargo clippy -- -D warnings  # Linting (zero warnings)
-cargo test --all        # All tests pass (134+)
+cargo test --all        # All tests pass (145+)
 ```
 
 All three must pass. CI enforces these checks on every PR.

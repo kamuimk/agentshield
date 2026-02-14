@@ -74,10 +74,10 @@ mode = "transparent"
 [policy]
 default = "deny"    # deny | allow | ask
 
-# Allow LLM API calls
+# Allow LLM API calls (wildcard: *.anthropic.com matches all subdomains)
 [[policy.rules]]
 name = "anthropic-api"
-domains = ["api.anthropic.com"]
+domains = ["*.anthropic.com"]
 action = "allow"
 
 # Allow GitHub reads, require approval for writes
@@ -117,7 +117,32 @@ enabled = true
 |--------|----------|
 | `allow` | Request passes through, logged to SQLite |
 | `deny` | Request blocked with `403 Forbidden` + `X-AgentShield-Reason` header |
-| `ask` | Terminal prompt for approval. Timeout (30s) defaults to deny |
+| `ask` | Terminal prompt for approval with payload inspection. Timeout (30s) defaults to deny |
+
+### Interactive ASK Prompt
+
+When a request matches an `ask` rule, AgentShield displays a terminal prompt with four options:
+
+| Key | Action |
+|-----|--------|
+| `a` | **Allow once** — permit this single request |
+| `r` | **Add rule** — auto-generate a permanent allow rule in the config file |
+| `d` | **Deny** — block the request |
+| `i` | **Inspect** — view the request payload (truncated at 4KB) before deciding |
+
+Unknown input defaults to deny (fail-closed). An `AskPending` notification is sent to Telegram before the prompt appears.
+
+### Wildcard Domain Matching
+
+Domain patterns support wildcards:
+
+| Pattern | Matches | Does NOT Match |
+|---------|---------|----------------|
+| `api.github.com` | `api.github.com` | `sub.api.github.com` |
+| `*.github.com` | `api.github.com`, `github.com`, `deep.api.github.com` | `evil-github.com` |
+| `*` | Everything | — |
+
+Wildcards work in both `[[policy.rules]]` domains and `[system] allowlist`.
 
 ### Environment Variable Substitution
 
@@ -162,6 +187,7 @@ The `events` field filters which event types trigger a notification:
 |------------|-------------|
 | `deny` | Request blocked by policy |
 | `dlp` | DLP scanner detected sensitive data |
+| `ask` | Request pending interactive approval |
 | `start` | Proxy server started |
 | `shutdown` | Proxy server shutting down |
 
@@ -237,7 +263,7 @@ AgentShield complements tools like [PipeLock](https://github.com/nichochar/pipel
 - **MSRV:** Rust 1.85 (edition 2024)
 
 ```bash
-cargo test --all     # Run all tests (134+ tests)
+cargo test --all     # Run all tests (145+ tests)
 cargo clippy         # Lint
 cargo fmt            # Format
 ```
