@@ -297,3 +297,35 @@ default = "deny"
     let config = AppConfig::load_from_path(&config_path).unwrap();
     assert_eq!(config.proxy.listen, "127.0.0.1:18080");
 }
+
+#[test]
+fn env_var_no_double_substitution() {
+    use std::io::Write;
+    // SAFETY: test-only, single-threaded access to unique env var names
+    unsafe {
+        // Value contains $DOLLAR which should NOT be substituted again
+        std::env::set_var("AGENTSHIELD_TEST_DOLLAR", "value-with-$DOLLAR");
+    }
+
+    let toml_str = r##"
+[proxy]
+listen = "${AGENTSHIELD_TEST_DOLLAR}"
+mode = "transparent"
+
+[policy]
+default = "deny"
+"##;
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("agentshield.toml");
+    let mut file = std::fs::File::create(&config_path).unwrap();
+    write!(file, "{}", toml_str).unwrap();
+
+    let config = AppConfig::load_from_path(&config_path).unwrap();
+    // The literal value should be preserved, NOT double-substituted
+    assert_eq!(config.proxy.listen, "value-with-$DOLLAR");
+
+    // SAFETY: test cleanup
+    unsafe {
+        std::env::remove_var("AGENTSHIELD_TEST_DOLLAR");
+    }
+}

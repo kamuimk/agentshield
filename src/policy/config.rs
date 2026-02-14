@@ -149,33 +149,32 @@ impl AppConfig {
 
 /// Replace `${VAR_NAME}` and `$VAR_NAME` placeholders with environment variable values.
 ///
+/// Uses a single-pass regex to avoid double-substitution when a resolved value
+/// itself contains `$` characters.
+///
 /// Returns an error containing the variable name if the variable is not set.
 fn substitute_env_vars(input: &str) -> Result<String> {
-    // Match ${VAR_NAME} (braces form)
-    let re_braces = Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").unwrap();
-    // Match $VAR_NAME (no braces, uppercase + underscore only to avoid false positives)
-    let re_bare = Regex::new(r"\$([A-Z_][A-Z0-9_]*)").unwrap();
+    // Single regex matching both ${VAR} (group 1) and $VAR (group 2) forms
+    let re = Regex::new(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Z_][A-Z0-9_]*))").unwrap();
 
-    let mut result = input.to_string();
+    let mut result = String::with_capacity(input.len());
+    let mut last_end = 0;
 
-    // First pass: ${VAR} form
-    for cap in re_braces.captures_iter(input) {
-        let var_name = &cap[1];
+    for cap in re.captures_iter(input) {
+        let m = cap.get(0).unwrap();
+        result.push_str(&input[last_end..m.start()]);
+
+        let var_name = cap
+            .get(1)
+            .or_else(|| cap.get(2))
+            .unwrap()
+            .as_str();
         let value = std::env::var(var_name)
             .map_err(|_| AgentShieldError::ConfigEnvVar(var_name.to_string()))?;
-        result = result.replace(&cap[0], &value);
+        result.push_str(&value);
+        last_end = m.end();
     }
 
-    // Second pass: $VAR form (on already-substituted string, but only matches remaining $VAR)
-    let intermediate = result.clone();
-    for cap in re_bare.captures_iter(&intermediate) {
-        let full_match = &cap[0];
-        // Skip if this was part of a ${...} that was already handled (shouldn't happen after replacement)
-        let var_name = &cap[1];
-        let value = std::env::var(var_name)
-            .map_err(|_| AgentShieldError::ConfigEnvVar(var_name.to_string()))?;
-        result = result.replace(full_match, &value);
-    }
-
+    result.push_str(&input[last_end..]);
     Ok(result)
 }
