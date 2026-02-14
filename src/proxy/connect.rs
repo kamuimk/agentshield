@@ -395,8 +395,12 @@ async fn handle_http_request(
                         path: path.clone(),
                     },
                 );
-                let body_str =
-                    extract_body(raw_request).and_then(|b| String::from_utf8(b.to_vec()).ok());
+                // Truncate body to 4KB for display purposes to avoid large allocations
+                const MAX_BODY_CAPTURE: usize = 4096;
+                let body_str = extract_body(raw_request).and_then(|b| {
+                    let slice = &b[..b.len().min(MAX_BODY_CAPTURE)];
+                    String::from_utf8(slice.to_vec()).ok()
+                });
                 let allowed = ask_and_wait(ctx, &host, method, &path, body_str).await;
                 if allowed {
                     log_to_db(ctx, method, &host, &path, "allow", "approved via ASK");
