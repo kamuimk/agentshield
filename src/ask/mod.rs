@@ -9,6 +9,8 @@
 //! If no responder answers within the configured timeout, the request is denied
 //! (fail-closed).
 
+pub mod terminal;
+
 use std::sync::Arc;
 use std::time::Duration;
 
