@@ -53,22 +53,17 @@ pub fn start_file_watcher(
     policy_lock: Arc<RwLock<PolicyConfig>>,
 ) -> notify::Result<RecommendedWatcher> {
     let path = config_path.clone();
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
-        match res {
-            Ok(event) => {
-                if matches!(
-                    event.kind,
-                    EventKind::Modify(_) | EventKind::Create(_)
-                ) {
-                    info!("Config file changed, reloading policy...");
-                    if let Err(e) = reload_policy(&policy_lock, &path) {
-                        warn!("Policy reload failed (keeping old policy): {}", e);
-                    }
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| match res {
+        Ok(event) => {
+            if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                info!("Config file changed, reloading policy...");
+                if let Err(e) = reload_policy(&policy_lock, &path) {
+                    warn!("Policy reload failed (keeping old policy): {}", e);
                 }
             }
-            Err(e) => {
-                warn!("File watcher error: {}", e);
-            }
+        }
+        Err(e) => {
+            warn!("File watcher error: {}", e);
         }
     })?;
 
@@ -81,10 +76,7 @@ pub fn start_file_watcher(
 ///
 /// On non-Unix platforms this is a no-op.
 #[cfg(unix)]
-pub fn start_sighup_handler(
-    config_path: PathBuf,
-    policy_lock: Arc<RwLock<PolicyConfig>>,
-) {
+pub fn start_sighup_handler(config_path: PathBuf, policy_lock: Arc<RwLock<PolicyConfig>>) {
     tokio::spawn(async move {
         use tokio::signal::unix::{SignalKind, signal};
         let mut sig = signal(SignalKind::hangup()).expect("Failed to register SIGHUP handler");
@@ -100,10 +92,7 @@ pub fn start_sighup_handler(
 
 /// No-op SIGHUP handler for non-Unix platforms.
 #[cfg(not(unix))]
-pub fn start_sighup_handler(
-    _config_path: PathBuf,
-    _policy_lock: Arc<RwLock<PolicyConfig>>,
-) {
+pub fn start_sighup_handler(_config_path: PathBuf, _policy_lock: Arc<RwLock<PolicyConfig>>) {
     // SIGHUP is not available on this platform
 }
 

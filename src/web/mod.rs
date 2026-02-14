@@ -14,16 +14,16 @@ pub mod ask;
 use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
 
+use axum::Router;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json};
 use axum::routing::get;
-use axum::Router;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 
 use crate::logging::{self, DbPool, LogEvent, RequestStats};
 use crate::policy::config::PolicyConfig;
@@ -134,7 +134,11 @@ async fn get_logs(
     Query(params): Query<LogsQuery>,
 ) -> impl IntoResponse {
     let Some(ref pool) = state.db else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "no database"}))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "no database"})),
+        )
+            .into_response();
     };
 
     let conn = match pool.get() {
@@ -198,7 +202,11 @@ async fn get_logs_stream(
 /// `GET /api/status` — aggregated request statistics.
 async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let Some(ref pool) = state.db else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "no database"}))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "no database"})),
+        )
+            .into_response();
     };
 
     let conn = match pool.get() {
@@ -225,7 +233,11 @@ async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 /// `GET /api/policy` — current policy configuration as JSON.
 async fn get_policy(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let Some(ref policy_lock) = state.policy else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "no policy loaded"}))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "no policy loaded"})),
+        )
+            .into_response();
     };
 
     let policy = policy_lock.read().unwrap();
@@ -238,7 +250,11 @@ async fn put_policy(
     Json(new_policy): Json<PolicyConfig>,
 ) -> impl IntoResponse {
     let Some(ref policy_lock) = state.policy else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "no policy loaded"}))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "no policy loaded"})),
+        )
+            .into_response();
     };
 
     let mut policy = policy_lock.write().unwrap();
@@ -256,10 +272,10 @@ async fn put_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
-    use axum::http::Request;
     use crate::logging;
     use crate::policy::config::{Action, Rule};
+    use axum::body::Body;
+    use axum::http::Request;
 
     fn test_state() -> (Arc<AppState>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -290,10 +306,7 @@ mod tests {
     /// Send a GET request to the router and parse the JSON response body.
     async fn response_json(app: Router, uri: &str) -> serde_json::Value {
         use tower::ServiceExt as _;
-        let req = Request::builder()
-            .uri(uri)
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
         let resp = app.into_service().oneshot(req).await.unwrap();
         let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
             .await
@@ -499,10 +512,7 @@ mod tests {
         let app = router(state);
 
         use tower::ServiceExt as _;
-        let req = Request::builder()
-            .uri("/")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::builder().uri("/").body(Body::empty()).unwrap();
         let resp = app.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 

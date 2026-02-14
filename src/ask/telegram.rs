@@ -43,8 +43,7 @@ impl TelegramResponder {
     /// Create a new Telegram responder and start the `getUpdates` polling loop.
     pub fn new(bot_token: String, chat_id: String) -> Self {
         let client = reqwest::Client::new();
-        let pending: Arc<Mutex<HashMap<String, PendingAsk>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<Mutex<HashMap<String, PendingAsk>>> = Arc::new(Mutex::new(HashMap::new()));
         let message_ids: Arc<Mutex<HashMap<String, i64>>> = Arc::new(Mutex::new(HashMap::new()));
 
         // Spawn the background polling loop
@@ -83,20 +82,14 @@ impl TelegramResponder {
 impl AskResponder for TelegramResponder {
     async fn prompt(&self, req: &AskRequestInfo) -> Option<bool> {
         // Send message with inline keyboard
-        let message_id = match send_ask_message(
-            &self.client,
-            &self.bot_token,
-            &self.chat_id,
-            req,
-        )
-        .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                error!("Failed to send Telegram ASK message: {}", e);
-                return None;
-            }
-        };
+        let message_id =
+            match send_ask_message(&self.client, &self.bot_token, &self.chat_id, req).await {
+                Ok(id) => id,
+                Err(e) => {
+                    error!("Failed to send Telegram ASK message: {}", e);
+                    return None;
+                }
+            };
 
         info!(
             "Telegram ASK sent for {} {} {} (msg_id: {})",
@@ -107,10 +100,7 @@ impl AskResponder for TelegramResponder {
         let (tx, rx) = oneshot::channel();
         {
             let mut map = self.pending.lock().unwrap();
-            map.insert(
-                req.req_id.clone(),
-                PendingAsk { tx },
-            );
+            map.insert(req.req_id.clone(), PendingAsk { tx });
         }
         {
             let mut ids = self.message_ids.lock().unwrap();
@@ -142,9 +132,14 @@ impl AskResponder for TelegramResponder {
         };
 
         if let Some(msg_id) = message_id {
-            if let Err(e) =
-                edit_message_result(&self.client, &self.bot_token, &self.chat_id, msg_id, allowed)
-                    .await
+            if let Err(e) = edit_message_result(
+                &self.client,
+                &self.bot_token,
+                &self.chat_id,
+                msg_id,
+                allowed,
+            )
+            .await
             {
                 warn!("Failed to edit Telegram message: {}", e);
             }
@@ -209,10 +204,7 @@ async fn send_ask_message(
     chat_id: &str,
     req: &AskRequestInfo,
 ) -> Result<i64, String> {
-    let url = format!(
-        "https://api.telegram.org/bot{}/sendMessage",
-        bot_token
-    );
+    let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
     let text = format_ask_text(req);
     let keyboard = build_inline_keyboard(&req.req_id);
 
@@ -233,7 +225,10 @@ async fn send_ask_message(
         return Err(format!("Telegram API error: {}", body));
     }
 
-    let json: serde_json::Value = resp.json().await.map_err(|e| format!("JSON error: {}", e))?;
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("JSON error: {}", e))?;
     json["result"]["message_id"]
         .as_i64()
         .ok_or_else(|| "No message_id in response".to_string())
@@ -247,10 +242,7 @@ async fn edit_message_result(
     message_id: i64,
     allowed: bool,
 ) -> Result<(), String> {
-    let url = format!(
-        "https://api.telegram.org/bot{}/editMessageText",
-        bot_token
-    );
+    let url = format!("https://api.telegram.org/bot{}/editMessageText", bot_token);
 
     let status = if allowed {
         "✅ *ALLOWED*"
@@ -285,10 +277,7 @@ async fn polling_loop(
     let mut offset: i64 = 0;
 
     loop {
-        let url = format!(
-            "https://api.telegram.org/bot{}/getUpdates",
-            bot_token
-        );
+        let url = format!("https://api.telegram.org/bot{}/getUpdates", bot_token);
 
         let resp = client
             .post(&url)

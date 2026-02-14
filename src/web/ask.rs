@@ -16,16 +16,16 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 
+use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::Json;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
-use axum::Router;
 use serde::Serialize;
 use tokio::sync::{broadcast, oneshot};
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 
 use crate::ask::{AskRequestInfo, AskResponder};
 
@@ -55,10 +55,7 @@ pub enum AskSseEvent {
     },
     /// A pending ASK request has been resolved.
     #[serde(rename = "resolved")]
-    Resolved {
-        req_id: String,
-        allowed: bool,
-    },
+    Resolved { req_id: String, allowed: bool },
 }
 
 /// Web dashboard ASK responder.
@@ -72,10 +69,7 @@ pub struct WebDashboardResponder {
 
 impl WebDashboardResponder {
     /// Create a new web dashboard responder with shared state.
-    pub fn new(
-        pending: PendingAsks,
-        ask_event_tx: broadcast::Sender<AskSseEvent>,
-    ) -> Self {
+    pub fn new(pending: PendingAsks, ask_event_tx: broadcast::Sender<AskSseEvent>) -> Self {
         Self {
             pending,
             ask_event_tx,
@@ -228,7 +222,11 @@ async fn post_deny(
 }
 
 /// Resolve a pending ASK request by sending the decision via oneshot.
-fn resolve_ask(state: &AskState, req_id: &str, allowed: bool) -> (StatusCode, Json<serde_json::Value>) {
+fn resolve_ask(
+    state: &AskState,
+    req_id: &str,
+    allowed: bool,
+) -> (StatusCode, Json<serde_json::Value>) {
     let pending_ask = {
         let mut map = state.pending.lock().unwrap();
         map.remove(req_id)
@@ -272,7 +270,11 @@ mod tests {
         }
     }
 
-    async fn json_response(app: Router, method: &str, uri: &str) -> (StatusCode, serde_json::Value) {
+    async fn json_response(
+        app: Router,
+        method: &str,
+        uri: &str,
+    ) -> (StatusCode, serde_json::Value) {
         use tower::ServiceExt as _;
         let req = Request::builder()
             .method(method)
@@ -522,16 +524,19 @@ mod tests {
         });
 
         // Should receive a NewAsk SSE event
-        let event = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            rx.recv(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
 
         match event {
-            AskSseEvent::NewAsk { req_id, domain, method, path, body } => {
+            AskSseEvent::NewAsk {
+                req_id,
+                domain,
+                method,
+                path,
+                body,
+            } => {
                 assert_eq!(req_id, "sse-new");
                 assert_eq!(domain, "sse.com");
                 assert_eq!(method, "POST");

@@ -112,7 +112,8 @@ async fn proxy_handles_http_request() {
 
 #[tokio::test]
 async fn policy_deny_all_blocks_connect() {
-    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(deny_all_policy())));
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_policy(Arc::new(RwLock::new(deny_all_policy())));
     let addr = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -136,7 +137,8 @@ async fn policy_deny_all_blocks_connect() {
 
 #[tokio::test]
 async fn policy_deny_all_blocks_http() {
-    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(deny_all_policy())));
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_policy(Arc::new(RwLock::new(deny_all_policy())));
     let addr = server.start().await.unwrap();
 
     let request = "GET http://evil.com/ HTTP/1.1\r\nHost: evil.com\r\n\r\n";
@@ -151,7 +153,8 @@ async fn policy_deny_all_blocks_http() {
 
 #[tokio::test]
 async fn policy_allows_whitelisted_domain_connect() {
-    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(allow_example_policy())));
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_policy(Arc::new(RwLock::new(allow_example_policy())));
     let addr = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -167,7 +170,8 @@ async fn policy_allows_whitelisted_domain_connect() {
 
 #[tokio::test]
 async fn policy_blocks_non_whitelisted_domain() {
-    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(allow_example_policy())));
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_policy(Arc::new(RwLock::new(allow_example_policy())));
     let addr = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -189,7 +193,8 @@ async fn openclaw_policy_allows_anthropic() {
     let template = include_str!("../templates/openclaw-default.toml");
     let config: AppConfig = toml::from_str(template).unwrap();
 
-    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(config.policy.clone())));
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_policy(Arc::new(RwLock::new(config.policy.clone())));
     let addr = server.start().await.unwrap();
 
     // api.anthropic.com should be allowed

@@ -140,8 +140,12 @@ mod tests {
         let req = sample_request();
         let mut input = Cursor::new(b"a\n");
         let mut output = Vec::new();
-        let result =
-            handle_prompt_loop(&req, std::path::Path::new("/tmp/noop.toml"), &mut input, &mut output);
+        let result = handle_prompt_loop(
+            &req,
+            std::path::Path::new("/tmp/noop.toml"),
+            &mut input,
+            &mut output,
+        );
         assert_eq!(result, Some(true));
     }
 
@@ -150,8 +154,12 @@ mod tests {
         let req = sample_request();
         let mut input = Cursor::new(b"d\n");
         let mut output = Vec::new();
-        let result =
-            handle_prompt_loop(&req, std::path::Path::new("/tmp/noop.toml"), &mut input, &mut output);
+        let result = handle_prompt_loop(
+            &req,
+            std::path::Path::new("/tmp/noop.toml"),
+            &mut input,
+            &mut output,
+        );
         assert_eq!(result, Some(false));
     }
 
@@ -160,8 +168,12 @@ mod tests {
         let req = sample_request();
         let mut input = Cursor::new(b"xyz\n");
         let mut output = Vec::new();
-        let result =
-            handle_prompt_loop(&req, std::path::Path::new("/tmp/noop.toml"), &mut input, &mut output);
+        let result = handle_prompt_loop(
+            &req,
+            std::path::Path::new("/tmp/noop.toml"),
+            &mut input,
+            &mut output,
+        );
         assert_eq!(result, Some(false));
     }
 
@@ -170,8 +182,12 @@ mod tests {
         let req = sample_request();
         let mut input = Cursor::new(b"i\na\n");
         let mut output = Vec::new();
-        let result =
-            handle_prompt_loop(&req, std::path::Path::new("/tmp/noop.toml"), &mut input, &mut output);
+        let result = handle_prompt_loop(
+            &req,
+            std::path::Path::new("/tmp/noop.toml"),
+            &mut input,
+            &mut output,
+        );
         assert_eq!(result, Some(true));
         let output_str = String::from_utf8(output).unwrap();
         assert!(output_str.contains("Request Payload")); // inspect output shown

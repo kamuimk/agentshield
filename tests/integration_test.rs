@@ -110,7 +110,8 @@ async fn e2e_proxy_policy_deny_logs_nothing_yet() {
         default: Action::Deny,
         rules: vec![],
     };
-    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
+    let server =
+        ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
     let addr = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -376,7 +377,8 @@ async fn ask_policy_without_channel_defaults_to_deny() {
     };
 
     // No ASK broadcaster attached — should default to deny (fail-closed)
-    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
+    let server =
+        ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
     let addr = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -410,7 +412,8 @@ async fn proxy_handles_concurrent_connections() {
         }],
     };
 
-    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
+    let server =
+        ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
     let addr = server.start().await.unwrap();
 
     // Spawn 10 concurrent requests
@@ -600,10 +603,10 @@ async fn ask_channel_deny_returns_403() {
 
 #[tokio::test]
 async fn web_dashboard_serves_html() {
-    use tokio::sync::broadcast;
     use agentshield::logging::LogEvent;
     use agentshield::web;
     use agentshield::web::ask::{AskState, PendingAsks};
+    use tokio::sync::broadcast;
 
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("web_test.db");
@@ -634,9 +637,7 @@ async fn web_dashboard_serves_html() {
     });
 
     // Fetch the dashboard
-    let resp = reqwest::get(format!("http://{}/", addr))
-        .await
-        .unwrap();
+    let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
     assert!(body.contains("AgentShield Dashboard"));
@@ -644,10 +645,10 @@ async fn web_dashboard_serves_html() {
 
 #[tokio::test]
 async fn web_api_status_endpoint() {
-    use tokio::sync::broadcast;
     use agentshield::logging::LogEvent;
     use agentshield::web;
     use agentshield::web::ask::{AskState, PendingAsks};
+    use tokio::sync::broadcast;
 
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("status_test.db");
@@ -655,15 +656,19 @@ async fn web_api_status_endpoint() {
 
     // Insert some test data
     let conn = pool.get().unwrap();
-    logging::log_request(&conn, &logging::RequestLog {
-        id: None,
-        timestamp: "2026-01-01T00:00:00Z".to_string(),
-        method: "GET".to_string(),
-        domain: "test.com".to_string(),
-        path: "/".to_string(),
-        action: "allow".to_string(),
-        reason: "test".to_string(),
-    }).unwrap();
+    logging::log_request(
+        &conn,
+        &logging::RequestLog {
+            id: None,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            method: "GET".to_string(),
+            domain: "test.com".to_string(),
+            path: "/".to_string(),
+            action: "allow".to_string(),
+            reason: "test".to_string(),
+        },
+    )
+    .unwrap();
     drop(conn);
 
     let (event_tx, _rx) = broadcast::channel::<LogEvent>(16);
@@ -702,10 +707,10 @@ async fn web_api_status_endpoint() {
 
 #[tokio::test]
 async fn web_ask_pending_and_resolve() {
-    use tokio::sync::broadcast;
     use agentshield::logging::LogEvent;
     use agentshield::web;
     use agentshield::web::ask::{AskState, PendingAsks, PendingWebAsk, WebDashboardResponder};
+    use tokio::sync::broadcast;
 
     let (event_tx, _rx) = broadcast::channel::<LogEvent>(16);
     let (ask_tx, _ask_rx) = broadcast::channel(16);
@@ -715,16 +720,19 @@ async fn web_ask_pending_and_resolve() {
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
         let mut map = pending.lock().unwrap();
-        map.insert("test-req".to_string(), PendingWebAsk {
-            info: agentshield::ask::AskRequestInfo {
-                req_id: "test-req".to_string(),
-                domain: "api.example.com".to_string(),
-                method: "POST".to_string(),
-                path: "/data".to_string(),
-                body: None,
+        map.insert(
+            "test-req".to_string(),
+            PendingWebAsk {
+                info: agentshield::ask::AskRequestInfo {
+                    req_id: "test-req".to_string(),
+                    domain: "api.example.com".to_string(),
+                    method: "POST".to_string(),
+                    path: "/data".to_string(),
+                    body: None,
+                },
+                tx,
             },
-            tx,
-        });
+        );
     }
 
     let state = Arc::new(web::AppState {

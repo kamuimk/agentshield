@@ -137,8 +137,8 @@ impl AskBroadcaster {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// A mock responder that returns a fixed decision after a delay.
     struct MockResponder {
