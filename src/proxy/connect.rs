@@ -22,7 +22,7 @@ use crate::logging;
 use crate::logging::DbPool;
 use crate::notification::{NotificationEvent, Notifier};
 use crate::policy::config::{Action, PolicyConfig};
-use crate::policy::evaluator::{self, domain_matches, RequestInfo};
+use crate::policy::evaluator::{self, RequestInfo, domain_matches};
 use std::sync::Arc;
 
 /// Shared context for all connection handlers, consolidating the various
