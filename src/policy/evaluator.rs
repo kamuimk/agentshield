@@ -326,4 +326,23 @@ mod tests {
         let result = evaluate(&req, &config.policy);
         assert_eq!(result.action, Action::Ask);
     }
+
+    #[test]
+    fn domain_matches_unit_tests() {
+        // Exact match
+        assert!(domain_matches("example.com", "example.com"));
+        assert!(!domain_matches("example.com", "sub.example.com"));
+        assert!(!domain_matches("example.com", "other.com"));
+
+        // Wildcard subdomain
+        assert!(domain_matches("*.github.com", "api.github.com"));
+        assert!(domain_matches("*.github.com", "github.com"));
+        assert!(domain_matches("*.github.com", "deep.api.github.com"));
+        assert!(!domain_matches("*.github.com", "evil-github.com"));
+        assert!(!domain_matches("*.github.com", "com"));
+
+        // Global wildcard
+        assert!(domain_matches("*", "anything.com"));
+        assert!(domain_matches("*", ""));
+    }
 }

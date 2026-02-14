@@ -368,6 +368,33 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn filtered_notifier_passes_ask_events() {
+        let (mock, events) = MockNotifier::new();
+        let filtered = FilteredNotifier::new(Arc::new(mock), vec!["ask".to_string()]);
+        // AskPending event → should pass through
+        filtered
+            .notify(&NotificationEvent::AskPending {
+                domain: "api.github.com".into(),
+                method: "POST".into(),
+                path: "/repos".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(events.lock().unwrap().len(), 1);
+        // deny event → should be filtered out
+        filtered
+            .notify(&NotificationEvent::RequestDenied {
+                domain: "x".into(),
+                method: "GET".into(),
+                path: "/".into(),
+                reason: "r".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(events.lock().unwrap().len(), 1);
+    }
+
     #[test]
     fn format_ask_pending_message() {
         let event = NotificationEvent::AskPending {

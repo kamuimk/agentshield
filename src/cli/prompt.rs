@@ -384,4 +384,76 @@ default = "deny"
         assert!(!output_str.contains("truncated"));
         assert!(output_str.contains(&small_body));
     }
+
+    #[test]
+    fn inspect_then_allow_sequence() {
+        let req = sample_request();
+        // Simulate: user types "i" (inspect), then "a" (allow)
+        let mut input = Cursor::new(b"i\na\n");
+        let mut output = Vec::new();
+
+        // First prompt → inspect
+        let decision = prompt_decision(&req, &mut input, &mut output).unwrap();
+        assert_eq!(decision, PromptDecision::Inspect);
+
+        // Show inspect output
+        handle_inspect(&req, &mut output).unwrap();
+
+        // Second prompt → allow
+        let decision = prompt_decision(&req, &mut input, &mut output).unwrap();
+        assert_eq!(decision, PromptDecision::AllowOnce);
+    }
+
+    #[test]
+    fn inspect_then_deny_sequence() {
+        let req = sample_request();
+        // Simulate: user types "i" (inspect), then "d" (deny)
+        let mut input = Cursor::new(b"i\nd\n");
+        let mut output = Vec::new();
+
+        let decision = prompt_decision(&req, &mut input, &mut output).unwrap();
+        assert_eq!(decision, PromptDecision::Inspect);
+
+        handle_inspect(&req, &mut output).unwrap();
+
+        let decision = prompt_decision(&req, &mut input, &mut output).unwrap();
+        assert_eq!(decision, PromptDecision::Deny);
+    }
+
+    #[test]
+    fn add_rule_generates_valid_config_with_methods() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("agentshield.toml");
+        std::fs::write(
+            &config_path,
+            r#"[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+"#,
+        )
+        .unwrap();
+
+        // Simulate AddRule flow: generate → append → reload
+        let req = PromptRequest {
+            method: "PUT".to_string(),
+            domain: "api.openai.com".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            body: None,
+        };
+        let rule = generate_rule(&req);
+        assert_eq!(rule.methods.as_ref().unwrap(), &vec!["PUT".to_string()]);
+
+        append_rule_to_config(&config_path, &rule).unwrap();
+
+        // Reload and verify
+        let config: AppConfig =
+            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(config.policy.rules.len(), 1);
+        assert_eq!(config.policy.rules[0].name, "auto-api-openai-com");
+        assert_eq!(config.policy.rules[0].domains, vec!["api.openai.com"]);
+        assert_eq!(config.policy.rules[0].action, Action::Allow);
+    }
 }
