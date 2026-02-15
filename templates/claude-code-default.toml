@@ -42,3 +42,8 @@ action = "allow"
 # bot_token = "YOUR_BOT_TOKEN"
 # chat_id = "YOUR_CHAT_ID"
 # events = ["deny", "dlp"]
+
+# Web dashboard: real-time logs, policy editor, ASK approval
+[web]
+enabled = true
+listen = "127.0.0.1:18081"
