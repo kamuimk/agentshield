@@ -16,15 +16,19 @@ flowchart LR
     B --> C{Policy Engine}
     C -->|Allow| D[External API<br/>api.anthropic.com]
     C -->|Deny| E[403 Blocked]
-    C -->|Ask| F[Terminal Prompt]
-    F -->|Approve| D
-    F -->|Deny| E
+    C -->|Ask| F{ASK Broadcaster}
+    F --> F1[Terminal]
+    F --> F2[Telegram Bot]
+    F --> F3[Web Dashboard]
+    F1 -->|Approve| D
+    F1 -->|Deny| E
     B --> G[(SQLite Pool)]
     B --> H{DLP Scanner}
     H -->|Critical| E
     H -->|Clean| D
     E -->|Notify| I[Telegram]
     H -->|Critical| I
+    B -->|SSE| J[Web Dashboard<br/>:18081]
 ```
 
 ## Quick Start
@@ -109,6 +113,11 @@ enabled = true
 # bot_token = "${AGENTSHIELD_TELEGRAM_TOKEN}"
 # chat_id = "${AGENTSHIELD_TELEGRAM_CHAT_ID}"
 # events = ["deny", "dlp"]
+
+# Web dashboard: real-time logs, policy editor, ASK approval
+[web]
+enabled = true
+listen = "127.0.0.1:18081"
 ```
 
 ### Policy Actions
@@ -131,6 +140,8 @@ When a request matches an `ask` rule, AgentShield displays a terminal prompt wit
 | `i` | **Inspect** — view the request payload (truncated at 4KB) before deciding |
 
 Unknown input defaults to deny (fail-closed). An `AskPending` notification is sent to Telegram before the prompt appears.
+
+ASK requests are broadcast to all enabled channels simultaneously (Terminal, Telegram, Web Dashboard). The first response from any channel is applied.
 
 ### Wildcard Domain Matching
 
@@ -192,6 +203,59 @@ The `events` field filters which event types trigger a notification:
 | `shutdown` | Proxy server shutting down |
 
 If `events` is empty or omitted, all event types are forwarded (backward compatible).
+
+#### Interactive Telegram ASK
+
+Enable bidirectional ASK approval via Telegram inline keyboard:
+
+```toml
+[notification.telegram]
+bot_token = "${AGENTSHIELD_TELEGRAM_TOKEN}"
+chat_id = "${AGENTSHIELD_TELEGRAM_CHAT_ID}"
+interactive = true  # Enable inline keyboard for ASK approval
+```
+
+When `interactive = true`, ASK requests appear as Telegram messages with Allow/Deny buttons. The first response from any channel (Terminal, Telegram, or Web Dashboard) wins.
+
+### Web Dashboard
+
+AgentShield includes a built-in web dashboard for real-time monitoring and ASK approval:
+
+```toml
+[web]
+enabled = true
+listen = "127.0.0.1:18081"  # default
+```
+
+Open `http://127.0.0.1:18081` in your browser to access:
+
+- **Live Logs** — real-time request stream via Server-Sent Events (SSE)
+- **Statistics** — total, allowed, denied, asked, system-allowed counts
+- **Policy Editor** — view and edit policy rules as JSON
+- **ASK Approval** — approve or deny pending ASK requests from the browser
+
+#### REST API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/logs?limit=50` | Recent request logs |
+| `GET` | `/api/logs/stream` | SSE real-time log stream |
+| `GET` | `/api/status` | Request statistics |
+| `GET` | `/api/policy` | Current policy (JSON) |
+| `PUT` | `/api/policy` | Update policy rules |
+| `GET` | `/api/ask/pending` | Pending ASK requests |
+| `GET` | `/api/ask/stream` | SSE ASK event stream |
+| `POST` | `/api/ask/:id/allow` | Approve a pending ASK |
+| `POST` | `/api/ask/:id/deny` | Deny a pending ASK |
+
+### Policy Hot-Reload
+
+Policy rules reload automatically without restarting the proxy:
+
+- **File watcher** — changes to `agentshield.toml` are detected and applied instantly
+- **SIGHUP signal** — send `kill -HUP <pid>` to trigger a manual reload
+
+Invalid configuration changes are safely ignored (the previous policy remains active).
 
 ### DLP (Data Loss Prevention)
 
@@ -263,7 +327,7 @@ AgentShield complements tools like [PipeLock](https://github.com/nichochar/pipel
 - **MSRV:** Rust 1.85 (edition 2024)
 
 ```bash
-cargo test --all     # Run all tests (145+ tests)
+cargo test --all     # Run all tests (219 tests)
 cargo clippy         # Lint
 cargo fmt            # Format
 ```

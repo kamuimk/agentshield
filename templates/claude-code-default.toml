@@ -31,6 +31,10 @@ domains = ["registry.npmjs.org"]
 methods = ["GET"]
 action = "allow"
 
+# DLP (Data Loss Prevention): scan HTTP request bodies for sensitive data
+[dlp]
+enabled = true
+
 # System allowlist: domains that bypass policy evaluation (e.g., notification endpoints)
 # [system]
 # allowlist = ["api.telegram.org"]
