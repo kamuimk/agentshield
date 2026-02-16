@@ -97,6 +97,15 @@ domains = ["api.github.com"]
 methods = ["POST", "PUT", "PATCH", "DELETE"]
 action = "ask"
 
+# Rate limit: max 100 requests per 60 seconds
+[[policy.rules]]
+name = "rate-limited-api"
+domains = ["api.example.com"]
+action = "allow"
+[policy.rules.rate_limit]
+max_requests = 100
+window_secs = 60
+
 # Enable DLP scanning on HTTP requests
 [dlp]
 enabled = true
@@ -127,6 +136,7 @@ listen = "127.0.0.1:18081"
 | `allow` | Request passes through, logged to SQLite |
 | `deny` | Request blocked with `403 Forbidden` + `X-AgentShield-Reason` header |
 | `ask` | Terminal prompt for approval with payload inspection. Timeout (30s) defaults to deny |
+| `allow` + `rate_limit` | Allowed up to the configured limit; excess requests blocked with `429 Too Many Requests` |
 
 ### Interactive ASK Prompt
 
@@ -199,6 +209,7 @@ The `events` field filters which event types trigger a notification:
 | `deny` | Request blocked by policy |
 | `dlp` | DLP scanner detected sensitive data |
 | `ask` | Request pending interactive approval |
+| `rate-limited` | Request blocked by rate limiter |
 | `start` | Proxy server started |
 | `shutdown` | Proxy server shutting down |
 
@@ -225,14 +236,29 @@ AgentShield includes a built-in web dashboard for real-time monitoring and ASK a
 [web]
 enabled = true
 listen = "127.0.0.1:18081"  # default
+auth_token = "${AGENTSHIELD_WEB_TOKEN}"  # optional: Bearer token for API auth
 ```
 
-Open `http://127.0.0.1:18081` in your browser to access:
+Open `http://127.0.0.1:18081` in your browser (or run `agentshield dashboard`) to access:
 
 - **Live Logs** — real-time request stream via Server-Sent Events (SSE)
-- **Statistics** — total, allowed, denied, asked, system-allowed counts
+- **Statistics** — total, allowed, denied, asked, system-allowed, rate-limited counts
 - **Policy Editor** — view and edit policy rules as JSON
 - **ASK Approval** — approve or deny pending ASK requests from the browser
+
+#### Authentication
+
+When `auth_token` is set, all `/api/*` endpoints require a Bearer token. The dashboard page (`/`) is always public.
+
+```bash
+# Via header
+curl -H "Authorization: Bearer <token>" http://127.0.0.1:18081/api/status
+
+# Via query parameter (for SSE/EventSource)
+curl http://127.0.0.1:18081/api/logs/stream?token=<token>
+```
+
+The web frontend shows a token input modal on first visit. The token is stored in `sessionStorage` and sent automatically with all API requests.
 
 #### REST API Endpoints
 
@@ -256,6 +282,22 @@ Policy rules reload automatically without restarting the proxy:
 - **SIGHUP signal** — send `kill -HUP <pid>` to trigger a manual reload
 
 Invalid configuration changes are safely ignored (the previous policy remains active).
+
+### Rate Limiting
+
+Per-domain sliding window rate limiting prevents excessive API calls:
+
+```toml
+[[policy.rules]]
+name = "rate-limited-api"
+domains = ["api.example.com"]
+action = "allow"
+[policy.rules.rate_limit]
+max_requests = 100    # max requests allowed
+window_secs = 60      # time window in seconds
+```
+
+When a domain exceeds its limit, the proxy returns `429 Too Many Requests`. Rate-limited requests are logged and counted in `agentshield status`. A `rate-limited` notification event is also emitted.
 
 ### DLP (Data Loss Prevention)
 
@@ -294,6 +336,7 @@ agentshield policy show               # Display current policy
 agentshield policy template <name>    # Apply a template
 agentshield integrate openclaw        # Configure OpenClaw to use proxy
 agentshield integrate remove          # Remove proxy configuration
+agentshield dashboard                 # Open web dashboard in browser
 ```
 
 ## Using with Docker (OpenClaw)
@@ -327,7 +370,7 @@ AgentShield complements tools like [PipeLock](https://github.com/nichochar/pipel
 - **MSRV:** Rust 1.85 (edition 2024)
 
 ```bash
-cargo test --all     # Run all tests (219 tests)
+cargo test --all     # Run all tests (252 tests)
 cargo clippy         # Lint
 cargo fmt            # Format
 ```
