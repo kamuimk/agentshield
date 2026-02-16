@@ -105,7 +105,7 @@ pub struct SystemConfig {
 }
 
 /// Telegram Bot API configuration (nested under `[notification.telegram]`).
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct TelegramConfig {
     /// Bot API token from @BotFather.
     pub bot_token: String,
@@ -117,6 +117,17 @@ pub struct TelegramConfig {
     /// Enable bidirectional ASK approval via inline keyboard.
     #[serde(default)]
     pub interactive: bool,
+}
+
+impl std::fmt::Debug for TelegramConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramConfig")
+            .field("bot_token", &"***")
+            .field("chat_id", &self.chat_id)
+            .field("events", &self.events)
+            .field("interactive", &self.interactive)
+            .finish()
+    }
 }
 
 /// Notification configuration (`[notification]` section).
@@ -131,7 +142,7 @@ pub struct NotificationConfig {
 }
 
 /// Web dashboard configuration (`[web]` section).
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct WebConfig {
     /// Whether the web dashboard is enabled.
     #[serde(default)]
@@ -143,6 +154,16 @@ pub struct WebConfig {
     /// If set, all `/api/*` endpoints require `Authorization: Bearer <token>`.
     #[serde(default)]
     pub auth_token: Option<String>,
+}
+
+impl std::fmt::Debug for WebConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebConfig")
+            .field("enabled", &self.enabled)
+            .field("listen", &self.listen)
+            .field("auth_token", &self.auth_token.as_ref().map(|_| "***"))
+            .finish()
+    }
 }
 
 fn default_web_listen() -> String {

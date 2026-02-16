@@ -1,4 +1,4 @@
-use agentshield::policy::config::{Action, AppConfig};
+use agentshield::policy::config::{Action, AppConfig, TelegramConfig, WebConfig};
 
 const MINIMAL_TOML: &str = r#"
 [proxy]
@@ -527,4 +527,46 @@ action = "allow"
     let config: AppConfig = toml::from_str(toml).unwrap();
     let rule = &config.policy.rules[0];
     assert!(rule.rate_limit.is_none());
+}
+
+#[test]
+fn web_config_debug_masks_auth_token() {
+    let web = WebConfig {
+        enabled: true,
+        listen: "127.0.0.1:18081".to_string(),
+        auth_token: Some("super-secret-token".to_string()),
+    };
+    let debug_output = format!("{:?}", web);
+    assert!(
+        !debug_output.contains("super-secret-token"),
+        "Debug output must not contain the actual token"
+    );
+    assert!(debug_output.contains("***"));
+}
+
+#[test]
+fn web_config_debug_shows_none_without_token() {
+    let web = WebConfig {
+        enabled: true,
+        listen: "127.0.0.1:18081".to_string(),
+        auth_token: None,
+    };
+    let debug_output = format!("{:?}", web);
+    assert!(debug_output.contains("None"));
+}
+
+#[test]
+fn telegram_config_debug_masks_bot_token() {
+    let tg = TelegramConfig {
+        bot_token: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11".to_string(),
+        chat_id: "12345".to_string(),
+        events: vec![],
+        interactive: false,
+    };
+    let debug_output = format!("{:?}", tg);
+    assert!(
+        !debug_output.contains("123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"),
+        "Debug output must not contain the actual bot_token"
+    );
+    assert!(debug_output.contains("***"));
 }

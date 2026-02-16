@@ -21,8 +21,9 @@
         "testStrategy": "Debug print tests: verify `auth_token: ***` and `bot_token: ***` appear in output, actual values never logged.",
         "priority": "high",
         "dependencies": [],
-        "status": "pending",
-        "subtasks": []
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-16T22:31:24.751Z"
       },
       {
         "id": "77",
@@ -135,9 +136,9 @@
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2026-02-16T22:29:33.504Z",
+      "lastModified": "2026-02-16T22:31:24.751Z",
       "taskCount": 10,
-      "completedCount": 1,
+      "completedCount": 2,
       "tags": [
         "master"
       ]
