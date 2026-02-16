@@ -161,6 +161,8 @@ pub struct RequestStats {
     pub asked: usize,
     /// Requests bypassed via system allowlist.
     pub system_allowed: usize,
+    /// Requests blocked by rate limiting.
+    pub rate_limited: usize,
 }
 
 /// Query aggregated request counts grouped by action.
@@ -184,6 +186,7 @@ pub fn query_stats(conn: &Connection) -> Result<RequestStats> {
             "deny" => stats.denied = count,
             "ask" => stats.asked = count,
             "system-allow" => stats.system_allowed = count,
+            "rate-limited" => stats.rate_limited = count,
             _ => {} // unknown actions still count in total
         }
     }
@@ -292,7 +295,7 @@ mod tests {
     #[test]
     fn query_stats_mixed_entries() {
         let conn = open_memory_db().unwrap();
-        // Insert 10 mixed entries
+        // Insert 11 mixed entries
         log_request(&conn, &sample_log("a.com", "GET", "allow")).unwrap();
         log_request(&conn, &sample_log("b.com", "GET", "allow")).unwrap();
         log_request(&conn, &sample_log("c.com", "POST", "deny")).unwrap();
@@ -303,13 +306,28 @@ mod tests {
         log_request(&conn, &sample_log("h.com", "GET", "system-allow")).unwrap();
         log_request(&conn, &sample_log("i.com", "GET", "allow")).unwrap();
         log_request(&conn, &sample_log("j.com", "DELETE", "deny")).unwrap();
+        log_request(&conn, &sample_log("k.com", "GET", "rate-limited")).unwrap();
 
         let stats = query_stats(&conn).unwrap();
-        assert_eq!(stats.total, 10);
+        assert_eq!(stats.total, 11);
         assert_eq!(stats.allowed, 3);
         assert_eq!(stats.denied, 4);
         assert_eq!(stats.asked, 1);
         assert_eq!(stats.system_allowed, 2);
+        assert_eq!(stats.rate_limited, 1);
+    }
+
+    #[test]
+    fn query_stats_counts_rate_limited() {
+        let conn = open_memory_db().unwrap();
+        log_request(&conn, &sample_log("a.com", "GET", "rate-limited")).unwrap();
+        log_request(&conn, &sample_log("b.com", "POST", "rate-limited")).unwrap();
+        log_request(&conn, &sample_log("c.com", "GET", "allow")).unwrap();
+
+        let stats = query_stats(&conn).unwrap();
+        assert_eq!(stats.total, 3);
+        assert_eq!(stats.rate_limited, 2);
+        assert_eq!(stats.allowed, 1);
     }
 
     #[test]

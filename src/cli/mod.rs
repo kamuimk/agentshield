@@ -65,6 +65,8 @@ pub enum Commands {
         #[command(subcommand)]
         target: IntegrateTarget,
     },
+    /// Open the web dashboard in a browser
+    Dashboard,
 }
 
 /// Targets for the `integrate` subcommand.

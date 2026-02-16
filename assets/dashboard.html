@@ -4,8 +4,132 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AgentShield Dashboard</title>
-    <script src="https://cdn.tailwindcss.com"></script>
     <style>
+        /* Reset & Base */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+        table { border-collapse: collapse; }
+        select, input, textarea, button { font-family: inherit; font-size: inherit; line-height: inherit; }
+        button { cursor: pointer; }
+
+        /* Layout */
+        .flex { display: flex; }
+        .grid { display: grid; }
+        .grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .items-center { align-items: center; }
+        .justify-between { justify-content: space-between; }
+        .hidden { display: none; }
+        .overflow-hidden { overflow: hidden; }
+
+        /* Sizing */
+        .w-full { width: 100%; }
+        .w-64 { width: 16rem; }
+        .h-96 { height: 24rem; }
+        .min-h-screen { min-height: 100vh; }
+        .max-w-7xl { max-width: 80rem; }
+        .max-w-xs { max-width: 20rem; }
+
+        /* Spacing */
+        .mx-auto { margin-left: auto; margin-right: auto; }
+        .space-y-6 > * + * { margin-top: 1.5rem; }
+        .space-y-2 > * + * { margin-top: 0.5rem; }
+        .space-x-4 > * + * { margin-left: 1rem; }
+        .space-x-3 > * + * { margin-left: 0.75rem; }
+        .space-x-2 > * + * { margin-left: 0.5rem; }
+        .gap-4 { gap: 1rem; }
+        .px-6 { padding-left: 1.5rem; padding-right: 1.5rem; }
+        .px-4 { padding-left: 1rem; padding-right: 1rem; }
+        .px-3 { padding-left: 0.75rem; padding-right: 0.75rem; }
+        .px-2 { padding-left: 0.5rem; padding-right: 0.5rem; }
+        .px-1 { padding-left: 0.25rem; padding-right: 0.25rem; }
+        .py-8 { padding-top: 2rem; padding-bottom: 2rem; }
+        .py-6 { padding-top: 1.5rem; padding-bottom: 1.5rem; }
+        .py-4 { padding-top: 1rem; padding-bottom: 1rem; }
+        .py-2 { padding-top: 0.5rem; padding-bottom: 0.5rem; }
+        .py-1\.5 { padding-top: 0.375rem; padding-bottom: 0.375rem; }
+        .py-1 { padding-top: 0.25rem; padding-bottom: 0.25rem; }
+        .py-0\.5 { padding-top: 0.125rem; padding-bottom: 0.125rem; }
+        .p-4 { padding: 1rem; }
+        .pb-2 { padding-bottom: 0.5rem; }
+        .mb-3 { margin-bottom: 0.75rem; }
+        .mt-2 { margin-top: 0.5rem; }
+        .ml-2 { margin-left: 0.5rem; }
+
+        /* Typography */
+        .text-2xl { font-size: 1.5rem; line-height: 2rem; }
+        .text-xl { font-size: 1.25rem; line-height: 1.75rem; }
+        .text-lg { font-size: 1.125rem; line-height: 1.75rem; }
+        .text-sm { font-size: 0.875rem; line-height: 1.25rem; }
+        .text-xs { font-size: 0.75rem; line-height: 1rem; }
+        .text-left { text-align: left; }
+        .text-center { text-align: center; }
+        .font-bold { font-weight: 700; }
+        .font-semibold { font-weight: 600; }
+        .font-medium { font-weight: 500; }
+        .font-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+        .whitespace-nowrap { white-space: nowrap; }
+        .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        /* Text Colors */
+        .text-white { color: #ffffff; }
+        .text-gray-100 { color: #f3f4f6; }
+        .text-gray-200 { color: #e5e7eb; }
+        .text-gray-300 { color: #d1d5db; }
+        .text-gray-400 { color: #9ca3af; }
+        .text-gray-500 { color: #6b7280; }
+        .text-blue-300 { color: #93c5fd; }
+        .text-blue-400 { color: #60a5fa; }
+        .text-green-300 { color: #86efac; }
+        .text-green-400 { color: #4ade80; }
+        .text-red-300 { color: #fca5a5; }
+        .text-red-400 { color: #f87171; }
+        .text-yellow-300 { color: #fde047; }
+        .text-yellow-400 { color: #facc15; }
+
+        /* Background Colors */
+        .bg-gray-700 { background-color: #374151; }
+        .bg-gray-750 { background-color: #2b3544; }
+        .bg-gray-800 { background-color: #1f2937; }
+        .bg-gray-900 { background-color: #111827; }
+        .bg-blue-600 { background-color: #2563eb; }
+        .bg-blue-900 { background-color: #1e3a8a; }
+        .bg-green-600 { background-color: #16a34a; }
+        .bg-green-900 { background-color: #14532d; }
+        .bg-red-600 { background-color: #dc2626; }
+        .bg-red-900 { background-color: #7f1d1d; }
+        .bg-yellow-900 { background-color: #713f12; }
+        .bg-yellow-900\/30 { background-color: rgba(113, 63, 18, 0.3); }
+
+        /* Borders */
+        .border { border-width: 1px; border-style: solid; border-color: #374151; }
+        .border-b { border-bottom-width: 1px; border-bottom-style: solid; }
+        .border-b-2 { border-bottom-width: 2px; border-bottom-style: solid; }
+        .border-t { border-top-width: 1px; border-top-style: solid; }
+        .border-gray-600 { border-color: #4b5563; }
+        .border-gray-700 { border-color: #374151; }
+        .border-yellow-700 { border-color: #a16207; }
+        .border-blue-500 { border-color: #3b82f6; }
+        .border-transparent { border-color: transparent; }
+        .rounded { border-radius: 0.25rem; }
+        .rounded-lg { border-radius: 0.5rem; }
+
+        /* Hover */
+        .hover\:bg-gray-750:hover { background-color: #2b3544; }
+        .hover\:bg-blue-700:hover { background-color: #1d4ed8; }
+        .hover\:bg-green-700:hover { background-color: #15803d; }
+        .hover\:bg-red-700:hover { background-color: #b91c1c; }
+        .hover\:text-gray-200:hover { color: #e5e7eb; }
+
+        /* Focus */
+        .focus\:outline-none:focus { outline: none; }
+        .focus\:border-blue-500:focus { border-color: #3b82f6; }
+
+        /* Responsive */
+        @media (min-width: 768px) {
+            .md\:grid-cols-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+        }
+
+        /* Animations */
         .fade-in { animation: fadeIn 0.3s ease-in; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
     </style>
@@ -18,9 +142,20 @@
         </div>
     </nav>
 
+    <!-- Token Modal -->
+    <div id="tokenModal" class="hidden" style="position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);">
+        <div class="bg-gray-800 rounded-lg p-6" style="width:24rem;">
+            <h2 class="text-lg font-semibold text-white mb-3">Authentication Required</h2>
+            <p class="text-sm text-gray-400 mb-3">Enter your API token to access the dashboard.</p>
+            <input id="tokenInput" type="password" placeholder="Bearer token" class="bg-gray-900 border border-gray-600 rounded px-3 py-2 text-sm w-full focus:outline-none focus:border-blue-500 text-white">
+            <button onclick="submitToken()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded text-sm w-full mt-2">Connect</button>
+            <div id="tokenError" class="text-red-400 text-sm mt-2 hidden">Invalid token. Please try again.</div>
+        </div>
+    </div>
+
     <main class="max-w-7xl mx-auto px-6 py-6 space-y-6">
         <!-- Stats -->
-        <section class="grid grid-cols-2 md:grid-cols-5 gap-4">
+        <section class="grid grid-cols-2 gap-4" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));">
             <div class="bg-gray-800 rounded-lg p-4 text-center">
                 <div id="statTotal" class="text-2xl font-bold text-white">0</div>
                 <div class="text-sm text-gray-400">Total</div>
@@ -40,6 +175,10 @@
             <div class="bg-gray-800 rounded-lg p-4 text-center">
                 <div id="statSystemAllowed" class="text-2xl font-bold text-blue-400">0</div>
                 <div class="text-sm text-gray-400">System</div>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-4 text-center">
+                <div id="statRateLimited" class="text-2xl font-bold text-gray-400">0</div>
+                <div class="text-sm text-gray-400">Rate Limited</div>
             </div>
         </section>
 
@@ -65,6 +204,7 @@
                     <option value="deny">Deny</option>
                     <option value="ask">Ask</option>
                     <option value="system-allow">System-allow</option>
+                    <option value="rate-limited">Rate-limited</option>
                 </select>
             </div>
             <div class="bg-gray-800 rounded-lg overflow-hidden">
@@ -101,23 +241,89 @@
     let allLogs = [];
     const MAX_LOGS = 500;
 
+    // ─── Token Auth ──────────────────────────────────────────
+    let authToken = sessionStorage.getItem('agentshield_token') || '';
+
+    function showTokenModal() {
+        const modal = document.getElementById('tokenModal');
+        modal.classList.remove('hidden');
+        modal.style.display = 'flex';
+        document.getElementById('tokenError').classList.add('hidden');
+        document.getElementById('tokenInput').value = '';
+        document.getElementById('tokenInput').focus();
+    }
+
+    function hideTokenModal() {
+        const modal = document.getElementById('tokenModal');
+        modal.classList.add('hidden');
+        modal.style.display = 'none';
+    }
+
+    async function submitToken() {
+        const input = document.getElementById('tokenInput').value.trim();
+        if (!input) return;
+        authToken = input;
+        sessionStorage.setItem('agentshield_token', authToken);
+        // Verify token by calling status endpoint
+        try {
+            const res = await apiFetch(`${API_BASE}/api/status`);
+            if (res.status === 401) {
+                document.getElementById('tokenError').classList.remove('hidden');
+                sessionStorage.removeItem('agentshield_token');
+                authToken = '';
+                return;
+            }
+            hideTokenModal();
+            initDashboard();
+        } catch (e) {
+            document.getElementById('tokenError').classList.remove('hidden');
+        }
+    }
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !document.getElementById('tokenModal').classList.contains('hidden')) {
+            submitToken();
+        }
+    });
+
+    async function apiFetch(url, opts = {}) {
+        if (authToken) {
+            opts.headers = { ...opts.headers, 'Authorization': `Bearer ${authToken}` };
+        }
+        const res = await fetch(url, opts);
+        if (res.status === 401) {
+            sessionStorage.removeItem('agentshield_token');
+            authToken = '';
+            showTokenModal();
+        }
+        return res;
+    }
+
+    function sseUrl(path) {
+        const url = `${API_BASE}${path}`;
+        return authToken ? `${url}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(authToken)}` : url;
+    }
+
     // ─── Stats ──────────────────────────────────────────────
     async function loadStats() {
         try {
-            const res = await fetch(`${API_BASE}/api/status`);
+            const res = await apiFetch(`${API_BASE}/api/status`);
+            if (!res.ok) return;
             const data = await res.json();
             document.getElementById('statTotal').textContent = data.total;
             document.getElementById('statAllowed').textContent = data.allowed;
             document.getElementById('statDenied').textContent = data.denied;
             document.getElementById('statAsked').textContent = data.asked;
             document.getElementById('statSystemAllowed').textContent = data.system_allowed;
+            document.getElementById('statRateLimited').textContent = data.rate_limited;
         } catch (e) { console.error('Stats error:', e); }
     }
 
     // ─── Logs ───────────────────────────────────────────────
     async function loadLogs() {
         try {
-            const res = await fetch(`${API_BASE}/api/logs?limit=100`);
+            const res = await apiFetch(`${API_BASE}/api/logs?limit=100`);
+            if (!res.ok) return;
             const data = await res.json();
             allLogs = data.reverse();
             renderLogs();
@@ -166,6 +372,7 @@
             'deny': 'bg-red-900 text-red-300',
             'ask': 'bg-yellow-900 text-yellow-300',
             'system-allow': 'bg-blue-900 text-blue-300',
+            'rate-limited': 'bg-gray-700 text-gray-300',
         };
         const cls = colors[action] || 'bg-gray-700 text-gray-300';
         return `<span class="px-2 py-0.5 rounded text-xs font-medium ${cls}">${action}</span>`;
@@ -173,7 +380,7 @@
 
     // ─── SSE Log Stream ─────────────────────────────────────
     function connectLogStream() {
-        const es = new EventSource(`${API_BASE}/api/logs/stream`);
+        const es = new EventSource(sseUrl('/api/logs/stream'));
         es.onopen = () => {
             document.getElementById('connectionStatus').textContent = 'Connected';
             document.getElementById('connectionStatus').className = 'text-sm text-green-400';
@@ -196,7 +403,7 @@
 
     // ─── ASK ────────────────────────────────────────────────
     function connectAskStream() {
-        const es = new EventSource(`${API_BASE}/api/ask/stream`);
+        const es = new EventSource(sseUrl('/api/ask/stream'));
         es.onmessage = (e) => {
             try {
                 const event = JSON.parse(e.data);
@@ -209,7 +416,8 @@
 
     async function loadPendingAsks() {
         try {
-            const res = await fetch(`${API_BASE}/api/ask/pending`);
+            const res = await apiFetch(`${API_BASE}/api/ask/pending`);
+            if (!res.ok) return;
             const data = await res.json();
             data.forEach(addAskCard);
         } catch (e) { console.error('Pending ASK error:', e); }
@@ -250,7 +458,7 @@
 
     async function resolveAsk(reqId, action) {
         try {
-            await fetch(`${API_BASE}/api/ask/${reqId}/${action}`, { method: 'POST' });
+            await apiFetch(`${API_BASE}/api/ask/${reqId}/${action}`, { method: 'POST' });
             removeAskCard(reqId);
         } catch (e) { console.error('Resolve ASK error:', e); }
     }
@@ -258,7 +466,8 @@
     // ─── Policy ─────────────────────────────────────────────
     async function loadPolicy() {
         try {
-            const res = await fetch(`${API_BASE}/api/policy`);
+            const res = await apiFetch(`${API_BASE}/api/policy`);
+            if (!res.ok) return;
             const data = await res.json();
             document.getElementById('policyEditor').value = JSON.stringify(data, null, 2);
         } catch (e) { console.error('Policy error:', e); }
@@ -269,7 +478,7 @@
         try {
             const body = document.getElementById('policyEditor').value;
             JSON.parse(body); // validate JSON
-            const res = await fetch(`${API_BASE}/api/policy`, {
+            const res = await apiFetch(`${API_BASE}/api/policy`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: body,
@@ -305,11 +514,28 @@
     document.getElementById('filterAction').addEventListener('change', renderLogs);
 
     // ─── Init ───────────────────────────────────────────────
-    loadStats();
-    loadLogs();
-    loadPendingAsks();
-    connectLogStream();
-    connectAskStream();
+    function initDashboard() {
+        loadStats();
+        loadLogs();
+        loadPendingAsks();
+        connectLogStream();
+        connectAskStream();
+    }
+
+    // Check if auth is required by probing the status endpoint
+    (async function boot() {
+        try {
+            const res = await apiFetch(`${API_BASE}/api/status`);
+            if (res.ok) {
+                hideTokenModal();
+                initDashboard();
+            }
+            // if 401, apiFetch already showed the modal
+        } catch (e) {
+            // No auth required or server error — try loading anyway
+            initDashboard();
+        }
+    })();
     </script>
 </body>
 </html>

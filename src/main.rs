@@ -20,13 +20,14 @@ use agentshield::notification::telegram::TelegramNotifier;
 use agentshield::policy::config::AppConfig;
 use agentshield::policy::reload;
 use agentshield::proxy::ProxyServer;
+use agentshield::ratelimit::RateLimiter;
 use agentshield::web;
 use agentshield::web::ask::{AskState, PendingAsks, WebDashboardResponder};
 use clap::Parser;
 use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
 use tokio::sync::broadcast;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// Return the path to the SQLite log database (`~/.agentshield/agentshield.db`).
 fn db_path() -> std::path::PathBuf {
@@ -76,6 +77,9 @@ async fn main() -> anyhow::Result<()> {
             IntegrateTarget::Openclaw => integrate::cmd_integrate_openclaw()?,
             IntegrateTarget::Remove => integrate::cmd_integrate_remove()?,
         },
+        Commands::Dashboard => {
+            cmd_dashboard(&cli.config)?;
+        }
     }
 
     Ok(())
@@ -146,11 +150,27 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
 
     let broadcaster = Arc::new(broadcaster);
 
+    // Create rate limiter if any policy rule has rate_limit configured
+    let has_rate_limits = {
+        let p = policy.read().unwrap();
+        p.rules.iter().any(|r| r.rate_limit.is_some())
+    };
+    let rate_limiter = if has_rate_limits {
+        info!("Rate limiting enabled");
+        Some(Arc::new(RateLimiter::new()))
+    } else {
+        None
+    };
+
     let mut server = ProxyServer::new(config.proxy.listen.clone())
         .with_policy(policy.clone())
         .with_db(pool.clone())
         .with_ask_broadcaster(broadcaster)
         .with_event_channel(event_tx.clone());
+
+    if let Some(limiter) = rate_limiter {
+        server = server.with_rate_limiter(limiter);
+    }
 
     // Apply system allowlist if configured
     if let Some(ref system) = config.system {
@@ -212,6 +232,7 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
                 db: Some(pool),
                 event_tx: event_tx.clone(),
                 policy: Some(policy.clone()),
+                auth_token: web_config.auth_token.clone(),
             });
             let ask_state = AskState {
                 pending: pending_asks,
@@ -220,9 +241,17 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
             let listen = web_config.listen.clone();
             tokio::spawn(async move {
                 let app = web::full_router(web_state, ask_state);
-                let listener = tokio::net::TcpListener::bind(&listen).await.unwrap();
-                info!("Web dashboard listening on {}", listen);
-                axum::serve(listener, app).await.unwrap();
+                match tokio::net::TcpListener::bind(&listen).await {
+                    Ok(listener) => {
+                        info!("Web dashboard listening on {}", listen);
+                        if let Err(e) = axum::serve(listener, app).await {
+                            error!("Web dashboard server error: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to bind web dashboard on {}: {}", listen, e);
+                    }
+                }
             });
         }
     }
@@ -270,6 +299,7 @@ fn cmd_status() -> anyhow::Result<()> {
         println!("  Denied:         {}", stats.denied);
         println!("  Asked:          {}", stats.asked);
         println!("  System-allowed: {}", stats.system_allowed);
+        println!("  Rate-limited:   {}", stats.rate_limited);
     } else {
         println!("AgentShield Status: No log database found.");
         println!("Run 'agentshield start' to begin monitoring.");
@@ -397,5 +427,45 @@ fn cmd_init(config_path: &Path) -> anyhow::Result<()> {
     println!("  1. Apply a template: agentshield policy template openclaw-default");
     println!("  2. Start the proxy:  agentshield start");
     println!("  3. Set env variable: HTTPS_PROXY=http://127.0.0.1:18080");
+    Ok(())
+}
+
+/// Open the web dashboard in the default browser.
+///
+/// Reads the config to determine the web dashboard address, then launches
+/// the platform-appropriate browser command (`open` on macOS, `xdg-open`
+/// on Linux, `start` on Windows).
+fn cmd_dashboard(config_path: &Path) -> anyhow::Result<()> {
+    let config = AppConfig::load_from_path(config_path)?;
+    match config.web {
+        Some(ref web) if web.enabled => {
+            let url = format!("http://{}", web.listen);
+            println!("Opening dashboard: {}", url);
+            open_browser(&url)?;
+        }
+        _ => {
+            println!("Web dashboard is not enabled.");
+            println!("Add [web] section with enabled = true to your config.");
+        }
+    }
+    Ok(())
+}
+
+/// Open a URL in the platform's default browser.
+fn open_browser(url: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).spawn()?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open").arg(url).spawn()?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", url])
+            .spawn()?;
+    }
     Ok(())
 }

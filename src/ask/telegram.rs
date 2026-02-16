@@ -56,6 +56,9 @@ impl TelegramResponder {
             polling_loop(&poll_client, &poll_token, &poll_chat_id, &poll_pending).await;
         });
 
+        // Spawn periodic cleanup for stale message_ids entries
+        spawn_cleanup_task(message_ids.clone());
+
         Self {
             bot_token,
             chat_id,
@@ -381,6 +384,28 @@ async fn answer_callback_query(client: &reqwest::Client, bot_token: &str, callba
         }))
         .send()
         .await;
+}
+
+/// Maximum number of stale message_ids entries before cleanup is triggered.
+const MAX_MESSAGE_IDS: usize = 100;
+
+/// Spawn a background task that periodically cleans up stale `message_ids` entries.
+///
+/// Runs every 60 seconds. If the map exceeds [`MAX_MESSAGE_IDS`] entries,
+/// all entries are cleared to prevent unbounded memory growth.
+fn spawn_cleanup_task(message_ids: Arc<Mutex<HashMap<String, i64>>>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let mut ids = message_ids.lock().unwrap();
+            if ids.len() > MAX_MESSAGE_IDS {
+                let count = ids.len();
+                ids.clear();
+                info!("Cleared {} stale Telegram message_ids entries", count);
+            }
+        }
+    });
 }
 
 #[cfg(test)]

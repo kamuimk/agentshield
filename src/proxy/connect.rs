@@ -24,6 +24,7 @@ use crate::logging::{DbPool, LogEvent};
 use crate::notification::{NotificationEvent, Notifier};
 use crate::policy::config::{Action, PolicyConfig};
 use crate::policy::evaluator::{self, RequestInfo, domain_matches};
+use crate::ratelimit::RateLimiter;
 use std::sync::{Arc, RwLock};
 
 /// Shared context for all connection handlers, consolidating the various
@@ -47,6 +48,8 @@ pub struct ConnectionContext {
     pub notifier: Option<Arc<dyn Notifier>>,
     /// Broadcast channel for real-time log events (web dashboard SSE, etc.).
     pub event_tx: Option<broadcast::Sender<LogEvent>>,
+    /// Rate limiter for domain-based request throttling.
+    pub rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 /// Main accept loop: accept incoming connections and handle them.
@@ -278,6 +281,38 @@ async fn handle_connect(
                 }
             }
             Action::Allow => {
+                // Rate limit check
+                if let Some(ref rl_config) = result.rate_limit {
+                    if let Some(ref limiter) = ctx.rate_limiter {
+                        if !limiter.check_and_record(
+                            domain,
+                            rl_config.max_requests,
+                            rl_config.window_secs,
+                        ) {
+                            let reason = format!(
+                                "Rate limit exceeded ({}/ {}s for {})",
+                                rl_config.max_requests, rl_config.window_secs, domain
+                            );
+                            warn!("RATE-LIMITED CONNECT to {} - {}", target, reason);
+                            log_to_db(ctx, "CONNECT", domain, "/", "rate-limited", &reason);
+                            notify_event(
+                                ctx,
+                                NotificationEvent::RateLimited {
+                                    domain: domain.to_string(),
+                                    method: "CONNECT".to_string(),
+                                    limit: rl_config.max_requests,
+                                    window_secs: rl_config.window_secs,
+                                },
+                            );
+                            let response = format!(
+                                "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: {}\r\n\r\n",
+                                reason
+                            );
+                            client.write_all(response.as_bytes()).await?;
+                            return Ok(());
+                        }
+                    }
+                }
                 info!("ALLOWED CONNECT to {} - {}", target, result.reason);
                 log_to_db(ctx, "CONNECT", domain, "/", "allow", &result.reason);
             }
@@ -432,6 +467,38 @@ async fn handle_http_request(
                 }
             }
             Action::Allow => {
+                // Rate limit check
+                if let Some(ref rl_config) = result.rate_limit {
+                    if let Some(ref limiter) = ctx.rate_limiter {
+                        if !limiter.check_and_record(
+                            &host,
+                            rl_config.max_requests,
+                            rl_config.window_secs,
+                        ) {
+                            let reason = format!(
+                                "Rate limit exceeded ({}/{}s for {})",
+                                rl_config.max_requests, rl_config.window_secs, host
+                            );
+                            warn!("RATE-LIMITED {} {} - {}", method, uri, reason);
+                            log_to_db(ctx, method, &host, &path, "rate-limited", &reason);
+                            notify_event(
+                                ctx,
+                                NotificationEvent::RateLimited {
+                                    domain: host.clone(),
+                                    method: method.to_string(),
+                                    limit: rl_config.max_requests,
+                                    window_secs: rl_config.window_secs,
+                                },
+                            );
+                            let response = format!(
+                                "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: {}\r\n\r\n",
+                                reason
+                            );
+                            client.write_all(response.as_bytes()).await?;
+                            return Ok(());
+                        }
+                    }
+                }
                 info!("ALLOWED {} {} - {}", method, uri, result.reason);
                 log_to_db(ctx, method, &host, &path, "allow", &result.reason);
             }
@@ -703,6 +770,7 @@ mod tests {
             system_allowlist: None,
             notifier: None,
             event_tx: Some(tx),
+            rate_limiter: None,
         };
 
         log_to_db(&ctx, "GET", "example.com", "/api", "allow", "test rule");
@@ -726,6 +794,7 @@ mod tests {
             system_allowlist: None,
             notifier: None,
             event_tx: None,
+            rate_limiter: None,
         };
 
         // Should not panic when event_tx is None
@@ -744,6 +813,7 @@ mod tests {
             system_allowlist: None,
             notifier: None,
             event_tx: Some(tx),
+            rate_limiter: None,
         };
 
         // Should not panic even with no active receivers
@@ -762,6 +832,7 @@ mod tests {
             system_allowlist: None,
             notifier: None,
             event_tx: Some(tx),
+            rate_limiter: None,
         };
 
         log_to_db(&ctx, "PUT", "multi.com", "/data", "allow", "multi test");

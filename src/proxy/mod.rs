@@ -21,6 +21,7 @@ use crate::error::Result;
 use crate::logging::{DbPool, LogEvent};
 use crate::notification::Notifier;
 use crate::policy::config::PolicyConfig;
+use crate::ratelimit::RateLimiter;
 use connect::ConnectionContext;
 
 /// The main proxy server, configured via builder methods.
@@ -42,6 +43,7 @@ pub struct ProxyServer {
     system_allowlist: Option<Arc<Vec<String>>>,
     notifier: Option<Arc<dyn Notifier>>,
     event_tx: Option<broadcast::Sender<LogEvent>>,
+    rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 impl ProxyServer {
@@ -56,6 +58,7 @@ impl ProxyServer {
             system_allowlist: None,
             notifier: None,
             event_tx: None,
+            rate_limiter: None,
         }
     }
 
@@ -106,6 +109,12 @@ impl ProxyServer {
         self
     }
 
+    /// Attach a rate limiter for domain-based request throttling.
+    pub fn with_rate_limiter(mut self, limiter: Arc<RateLimiter>) -> Self {
+        self.rate_limiter = Some(limiter);
+        self
+    }
+
     /// Start the proxy server and return the actual bound address.
     pub async fn start(&self) -> Result<SocketAddr> {
         let listener = TcpListener::bind(&self.listen_addr).await?;
@@ -120,6 +129,7 @@ impl ProxyServer {
             system_allowlist: self.system_allowlist.clone(),
             notifier: self.notifier.clone(),
             event_tx: self.event_tx.clone(),
+            rate_limiter: self.rate_limiter.clone(),
         });
         tokio::spawn(async move {
             connect::accept_loop(listener, ctx).await;

@@ -61,6 +61,7 @@ fn allow_example_policy() -> PolicyConfig {
             methods: None,
             action: Action::Allow,
             note: None,
+            rate_limit: None,
         }],
     }
 }

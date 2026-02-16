@@ -237,12 +237,7 @@ fn resolve_ask(
             let _ = pa.tx.send(allowed);
             let action = if allowed { "allowed" } else { "denied" };
             tracing::info!("Web ASK {}: req_id={}", action, req_id);
-
-            // Broadcast resolution
-            let _ = state.ask_event_tx.send(AskSseEvent::Resolved {
-                req_id: req_id.to_string(),
-                allowed,
-            });
+            // Broadcast is handled by AskBroadcaster → notify_resolved()
 
             (
                 StatusCode::OK,

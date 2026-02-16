@@ -47,6 +47,13 @@ pub enum NotificationEvent {
         method: String,
         path: String,
     },
+    /// A request was blocked due to rate limiting.
+    RateLimited {
+        domain: String,
+        method: String,
+        limit: u64,
+        window_secs: u64,
+    },
 }
 
 impl NotificationEvent {
@@ -58,6 +65,7 @@ impl NotificationEvent {
             Self::ProxyStarted { .. } => "start",
             Self::ProxyShutdown => "shutdown",
             Self::AskPending { .. } => "ask",
+            Self::RateLimited { .. } => "rate-limited",
         }
     }
 }
@@ -161,6 +169,17 @@ pub fn format_message(event: &NotificationEvent) -> String {
             format!(
                 "⚠️ *ASK Pending*\n`{} {}{}`\nWaiting for terminal approval",
                 method, domain, path
+            )
+        }
+        NotificationEvent::RateLimited {
+            domain,
+            method,
+            limit,
+            window_secs,
+        } => {
+            format!(
+                "⏱ *Rate Limited*\n`{} {}`\nLimit: {} requests / {}s",
+                method, domain, limit, window_secs
             )
         }
     }
@@ -407,5 +426,68 @@ mod tests {
         assert!(msg.contains("api.github.com"));
         assert!(msg.contains("POST"));
         assert!(msg.contains("/repos/user/repo/pulls"));
+    }
+
+    #[test]
+    fn format_rate_limited_message() {
+        let event = NotificationEvent::RateLimited {
+            domain: "api.example.com".to_string(),
+            method: "GET".to_string(),
+            limit: 10,
+            window_secs: 60,
+        };
+        let msg = format_message(&event);
+        assert!(msg.contains("Rate Limited"));
+        assert!(msg.contains("api.example.com"));
+        assert!(msg.contains("10"));
+        assert!(msg.contains("60"));
+    }
+
+    #[test]
+    fn event_type_rate_limited() {
+        assert_eq!(
+            NotificationEvent::RateLimited {
+                domain: "x".into(),
+                method: "GET".into(),
+                limit: 5,
+                window_secs: 30,
+            }
+            .event_type(),
+            "rate-limited"
+        );
+    }
+
+    #[tokio::test]
+    async fn filtered_notifier_passes_rate_limited_events() {
+        let (mock, events) = MockNotifier::new();
+        let filtered = FilteredNotifier::new(Arc::new(mock), vec!["rate-limited".to_string()]);
+        filtered
+            .notify(&NotificationEvent::RateLimited {
+                domain: "api.example.com".into(),
+                method: "GET".into(),
+                limit: 10,
+                window_secs: 60,
+            })
+            .await
+            .unwrap();
+        assert_eq!(events.lock().unwrap().len(), 1);
+        // deny should be filtered out
+        filtered
+            .notify(&NotificationEvent::RequestDenied {
+                domain: "x".into(),
+                method: "GET".into(),
+                path: "/".into(),
+                reason: "r".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(events.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn format_shutdown_message() {
+        let event = NotificationEvent::ProxyShutdown;
+        let msg = format_message(&event);
+        assert!(msg.contains("Shutdown"));
     }
 }

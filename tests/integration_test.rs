@@ -201,6 +201,7 @@ fn evaluator_multiple_domains_in_single_rule() {
             methods: None,
             action: Action::Allow,
             note: None,
+            rate_limit: None,
         }],
     };
 
@@ -233,6 +234,7 @@ fn evaluator_case_insensitive_method_matching() {
             methods: Some(vec!["GET".to_string()]),
             action: Action::Allow,
             note: None,
+            rate_limit: None,
         }],
     };
 
@@ -256,6 +258,7 @@ fn evaluator_default_allow_policy() {
             methods: None,
             action: Action::Deny,
             note: None,
+            rate_limit: None,
         }],
     };
 
@@ -373,6 +376,7 @@ async fn ask_policy_without_channel_defaults_to_deny() {
             methods: None,
             action: Action::Ask,
             note: None,
+            rate_limit: None,
         }],
     };
 
@@ -409,6 +413,7 @@ async fn proxy_handles_concurrent_connections() {
             methods: None,
             action: Action::Allow,
             note: None,
+            rate_limit: None,
         }],
     };
 
@@ -470,6 +475,7 @@ async fn proxy_logs_requests_to_sqlite() {
             methods: None,
             action: Action::Allow,
             note: None,
+            rate_limit: None,
         }],
     };
 
@@ -539,6 +545,7 @@ async fn ask_channel_sends_request_on_ask_policy() {
             methods: None,
             action: Action::Ask,
             note: None,
+            rate_limit: None,
         }],
     };
 
@@ -575,6 +582,7 @@ async fn ask_channel_deny_returns_403() {
             methods: None,
             action: Action::Ask,
             note: None,
+            rate_limit: None,
         }],
     };
 
@@ -605,7 +613,7 @@ async fn ask_channel_deny_returns_403() {
 async fn web_dashboard_serves_html() {
     use agentshield::logging::LogEvent;
     use agentshield::web;
-    use agentshield::web::ask::{AskState, PendingAsks};
+    use agentshield::web::ask::AskState;
     use tokio::sync::broadcast;
 
     let dir = tempfile::tempdir().unwrap();
@@ -621,6 +629,7 @@ async fn web_dashboard_serves_html() {
         db: Some(pool),
         event_tx,
         policy: Some(Arc::new(RwLock::new(policy))),
+        auth_token: None,
     });
     let (ask_tx, _ask_rx) = broadcast::channel(16);
     let ask_state = AskState {
@@ -647,7 +656,7 @@ async fn web_dashboard_serves_html() {
 async fn web_api_status_endpoint() {
     use agentshield::logging::LogEvent;
     use agentshield::web;
-    use agentshield::web::ask::{AskState, PendingAsks};
+    use agentshield::web::ask::AskState;
     use tokio::sync::broadcast;
 
     let dir = tempfile::tempdir().unwrap();
@@ -681,6 +690,7 @@ async fn web_api_status_endpoint() {
         db: Some(pool),
         event_tx,
         policy: Some(Arc::new(RwLock::new(policy))),
+        auth_token: None,
     });
     let (ask_tx, _ask_rx) = broadcast::channel(16);
     let ask_state = AskState {
@@ -709,7 +719,7 @@ async fn web_api_status_endpoint() {
 async fn web_ask_pending_and_resolve() {
     use agentshield::logging::LogEvent;
     use agentshield::web;
-    use agentshield::web::ask::{AskState, PendingAsks, PendingWebAsk, WebDashboardResponder};
+    use agentshield::web::ask::{AskState, PendingAsks, PendingWebAsk};
     use tokio::sync::broadcast;
 
     let (event_tx, _rx) = broadcast::channel::<LogEvent>(16);
@@ -739,6 +749,7 @@ async fn web_ask_pending_and_resolve() {
         db: None,
         event_tx,
         policy: None,
+        auth_token: None,
     });
     let ask_state = AskState {
         pending: pending.clone(),
@@ -775,4 +786,106 @@ async fn web_ask_pending_and_resolve() {
 
     // Pending should be empty now
     assert!(pending.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn web_auth_rejects_without_token() {
+    use agentshield::logging::LogEvent;
+    use agentshield::web;
+    use agentshield::web::ask::AskState;
+    use tokio::sync::broadcast;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("auth_test.db");
+    let pool = logging::open_pool(&db_path).unwrap();
+    let (event_tx, _rx) = broadcast::channel::<LogEvent>(16);
+    let policy = PolicyConfig {
+        default: Action::Deny,
+        rules: vec![],
+    };
+
+    let state = Arc::new(web::AppState {
+        db: Some(pool),
+        event_tx,
+        policy: Some(Arc::new(RwLock::new(policy))),
+        auth_token: Some("test-secret".to_string()),
+    });
+    let (ask_tx, _ask_rx) = broadcast::channel(16);
+    let ask_state = AskState {
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        ask_event_tx: ask_tx,
+    };
+
+    let app = web::full_router(state, ask_state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // Dashboard should be accessible without token
+    let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // API without token should return 401
+    let resp = reqwest::get(format!("http://{}/api/status", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // API with valid Bearer token should return 200
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/api/status", addr))
+        .header("Authorization", "Bearer test-secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // API with query param token should return 200
+    let resp = reqwest::get(format!("http://{}/api/status?token=test-secret", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn web_dashboard_contains_token_modal() {
+    use agentshield::logging::LogEvent;
+    use agentshield::web;
+    use agentshield::web::ask::AskState;
+    use tokio::sync::broadcast;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("modal_test.db");
+    let pool = logging::open_pool(&db_path).unwrap();
+    let (event_tx, _rx) = broadcast::channel::<LogEvent>(16);
+
+    let state = Arc::new(web::AppState {
+        db: Some(pool),
+        event_tx,
+        policy: None,
+        auth_token: None,
+    });
+    let (ask_tx, _ask_rx) = broadcast::channel(16);
+    let ask_state = AskState {
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        ask_event_tx: ask_tx,
+    };
+
+    let app = web::full_router(state, ask_state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("tokenModal"));
+    assert!(body.contains("apiFetch"));
+    assert!(body.contains("sessionStorage"));
 }

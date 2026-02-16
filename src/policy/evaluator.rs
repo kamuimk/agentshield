@@ -4,7 +4,7 @@
 //! appropriate [`Action`] by matching against rules in order. The first matching
 //! rule wins; if no rule matches, the default action is applied.
 
-use super::config::{Action, PolicyConfig, Rule};
+use super::config::{Action, PolicyConfig, RateLimitConfig, Rule};
 
 /// Represents an HTTP request to be evaluated against policy rules.
 pub struct RequestInfo {
@@ -24,6 +24,8 @@ pub struct EvalResult {
     pub reason: String,
     /// Name of the matched rule, or `None` if the default was applied.
     pub matched_rule: Option<String>,
+    /// Rate limit config from the matched rule, if any.
+    pub rate_limit: Option<RateLimitConfig>,
 }
 
 /// Evaluate a request against the policy configuration.
@@ -37,6 +39,7 @@ pub fn evaluate(req: &RequestInfo, config: &PolicyConfig) -> EvalResult {
                 action: rule.action.clone(),
                 reason: format!("Matched rule: {}", rule.name),
                 matched_rule: Some(rule.name.clone()),
+                rate_limit: rule.rate_limit.clone(),
             };
         }
     }
@@ -45,6 +48,7 @@ pub fn evaluate(req: &RequestInfo, config: &PolicyConfig) -> EvalResult {
         action: config.default.clone(),
         reason: "No matching rule; default policy applied".to_string(),
         matched_rule: None,
+        rate_limit: None,
     }
 }
 
@@ -109,6 +113,7 @@ mod tests {
             methods: methods.map(|ms| ms.into_iter().map(|s| s.to_string()).collect()),
             action,
             note: None,
+            rate_limit: None,
         }
     }
 
@@ -344,5 +349,40 @@ mod tests {
         // Global wildcard
         assert!(domain_matches("*", "anything.com"));
         assert!(domain_matches("*", ""));
+    }
+
+    #[test]
+    fn eval_returns_rate_limit_from_matched_rule() {
+        use super::super::config::RateLimitConfig;
+        let mut rule = make_rule("api", vec!["api.example.com"], None, Action::Allow);
+        rule.rate_limit = Some(RateLimitConfig {
+            max_requests: 100,
+            window_secs: 60,
+        });
+        let policy = make_policy(Action::Deny, vec![rule]);
+        let req = make_req("api.example.com", "GET", "/");
+        let result = evaluate(&req, &policy);
+        assert_eq!(result.action, Action::Allow);
+        let rl = result.rate_limit.unwrap();
+        assert_eq!(rl.max_requests, 100);
+        assert_eq!(rl.window_secs, 60);
+    }
+
+    #[test]
+    fn eval_returns_none_rate_limit_when_not_set() {
+        let rule = make_rule("api", vec!["api.example.com"], None, Action::Allow);
+        let policy = make_policy(Action::Deny, vec![rule]);
+        let req = make_req("api.example.com", "GET", "/");
+        let result = evaluate(&req, &policy);
+        assert!(result.rate_limit.is_none());
+    }
+
+    #[test]
+    fn eval_default_policy_has_no_rate_limit() {
+        let policy = make_policy(Action::Deny, vec![]);
+        let req = make_req("anything.com", "GET", "/");
+        let result = evaluate(&req, &policy);
+        assert_eq!(result.action, Action::Deny);
+        assert!(result.rate_limit.is_none());
     }
 }

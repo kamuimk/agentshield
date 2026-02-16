@@ -2,159 +2,186 @@
   "master": {
     "tasks": [
       {
-        "id": "41",
-        "title": "Implement AskResponder trait and AskBroadcaster",
-        "description": "Define AskResponder trait and implement core AskBroadcaster logic for broadcasting ASK requests to multiple responders with tokio::select! first-response adoption",
-        "details": "Create src/ask/mod.rs with AskResponder trait (prompt, notify_resolved, name methods). Implement AskBroadcaster struct with Vec<Arc<dyn AskResponder>>. Add ask() method using uuid::Uuid::new_v4() for req_id, spawn futures for all responders, tokio::time::timeout(120s), first_response selection, notify_resolved to others. Add config ask_timeout_secs from TOML.",
-        "testStrategy": "Unit tests: single responder returns expected bool; multiple responders first wins; all timeout -> false; notify_resolved called on losers. Integration test: mock responders verify broadcast/selection logic.",
+        "id": "63",
+        "title": "Fix CI cargo fmt failure in proxy_test.rs (R1-1)",
+        "description": "Format tests/proxy_test.rs to pass cargo fmt in CI (B1 issue)",
+        "details": "Apply `cargo fmt` to `tests/proxy_test.rs`, specifically fix `with_policy(Arc::new(RwLock::new(...)))` chaining to match rustfmt rules. Run `cargo fmt --check` locally to verify. No functional changes required.",
+        "testStrategy": "Run `cargo fmt --check` and verify CI passes. Existing 219 tests unchanged.",
         "priority": "high",
         "dependencies": [],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-14T13:59:59.621Z"
+        "updatedAt": "2026-02-16T12:30:05.211Z"
       },
       {
-        "id": "42",
-        "title": "Migrate TerminalResponder from existing stdin logic",
-        "description": "Implement TerminalResponder implementing AskResponder trait, migrating existing stdin handler logic while maintaining 100% backward compatibility",
-        "details": "Create src/ask/terminal.rs. Implement TerminalResponder with existing stdin mpsc channel logic wrapped in prompt() async fn. Use oneshot::channel() for response synchronization. Ensure 30s timeout fallback. Register as first responder in AskBroadcaster.",
-        "testStrategy": "Test terminal-only mode identical to v0.5 behavior. Verify prompt() returns correct stdin response. Test timeout handling matches existing logic.",
+        "id": "64",
+        "title": "Remove Tailwind CDN and inline CSS (R1-2)",
+        "description": "Extract used Tailwind classes from dashboard.html and inline as <style> block (B2 issue)",
+        "details": "1. Identify all Tailwind utility classes in `assets/dashboard.html`. 2. Use `npx tailwindcss -i assets/dashboard.html -o assets/dashboard.css --minify` or manually extract ~50 classes. 3. Remove `<script src=\"https://cdn.tailwindcss.com\">`. 4. Insert minified CSS into `<style>` tag. 5. Verify file size <60KB and dark mode/responsive styles preserved.",
+        "testStrategy": "Manual browser test: dashboard renders correctly offline, no network requests to CDN, responsive grid/buttons work.",
         "priority": "high",
         "dependencies": [
-          "41"
+          "63"
         ],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-14T14:22:08.891Z"
+        "updatedAt": "2026-02-16T12:35:50.165Z"
       },
       {
-        "id": "43",
-        "title": "Update ConnectionContext to use AskBroadcaster",
-        "description": "Replace ConnectionContext.ask_tx: mpsc::Sender with ask_broadcaster: Arc<AskBroadcaster> throughout proxy codebase",
-        "details": "Refactor all ask_tx.send() calls to ask_broadcaster.ask(&info).await. Update ConnectionContext struct. Migrate from oneshot receiver pattern to direct bool return. Ensure fail-closed (false) on broadcast failure.",
-        "testStrategy": "End-to-end proxy test: existing ASK flow unchanged. Verify ask_broadcaster.ask() called instead of mpsc.send(). Test proxy receives first response correctly.",
+        "id": "65",
+        "title": "Fix web server unwrap panics (R1-5)",
+        "description": "Replace unwrap() calls in main.rs web server spawn with proper error handling (B5 issue)",
+        "details": "In `src/main.rs` lines 223-225, replace:\n```rust\ntokio::spawn(async move {\n    match tokio::net::TcpListener::bind(&listen).await {\n        Ok(listener) => {\n            info!(\"Web dashboard listening on {}\", listen);\n            if let Err(e) = axum::serve(listener, app).await {\n                error!(\"Web dashboard server error: {}\", e);\n            }\n        }\n        Err(e) => {\n            error!(\"Failed to bind web dashboard on {}: {}\", listen, e);\n        }\n    }\n});\n```",
+        "testStrategy": "cargo test all, manual test: kill port-bound process and restart to verify graceful error logging without panic.",
         "priority": "high",
         "dependencies": [
-          "41",
-          "42"
+          "63"
         ],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-14T14:28:15.751Z"
+        "updatedAt": "2026-02-16T12:36:38.348Z"
       },
       {
-        "id": "44",
-        "title": "Implement real-time LogEvent broadcast channel",
-        "description": "Add tokio::sync::broadcast channel for LogEvent to support web dashboard SSE and future extensions",
-        "details": "Define #[derive(Clone, Debug)] pub struct LogEvent { timestamp, method, domain, path, action, reason }. Add to ConnectionContext: event_tx: Option<broadcast::Sender<LogEvent>>. In connect.rs log_to_db(), clone event_tx and send(LogEvent). Buffer size 1024.",
-        "testStrategy": "Unit test: LogEvent serialization/deserialization. Integration test: log_to_db() emits to broadcast channel. Verify lagging receivers auto-skip.",
+        "id": "66",
+        "title": "Implement RateLimiter module (R3)",
+        "description": "Create new src/ratelimit/mod.rs with sliding window domain-based rate limiting",
+        "details": "```rust\n// src/ratelimit/mod.rs\nuse std::collections::HashMap;\nuse std::sync::{Arc, Mutex};\nuse std::time::Instant;\n\npub struct RateLimiter {\n    windows: Mutex<HashMap<String, Vec<Instant>>>,\n}\n\nimpl RateLimiter {\n    pub fn new() -> Self { /* impl as per PRD */ }\n    pub fn check_and_record(&self, domain: &str, max_requests: u64, window_secs: u64) -> bool { /* impl */ }\n    pub fn current_count(&self, domain: &str, window_secs: u64) -> u64 { /* impl */ }\n}\n```\nMake Arc<RateLimiter> available in ConnectionContext.",
+        "testStrategy": "10+ unit tests: basic allow/deny, window expiration, domain isolation, concurrent access, counter persistence across hot-reload.",
+        "priority": "high",
+        "dependencies": [],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-16T12:31:41.538Z"
+      },
+      {
+        "id": "67",
+        "title": "Add RateLimitConfig to Policy Rule and EvalResult (R3)",
+        "description": "Extend policy configuration and evaluation to support rate limiting per rule",
+        "details": "1. Add to `src/policy/config.rs`:\n```rust\n#[derive(Debug, Clone, Deserialize, Serialize)]\npub struct RateLimitConfig { pub max_requests: u64, pub window_secs: u64 }\n\npub struct Rule { /* ... */ #[serde(default)] pub rate_limit: Option<RateLimitConfig>, }\n```\n2. Extend EvalResult with `pub rate_limit: Option<RateLimitConfig>`\n3. Update policy deserialization and evaluation to propagate rate_limit config.",
+        "testStrategy": "Unit tests for TOML parsing with/without rate_limit, policy evaluation returns correct RateLimitConfig.",
+        "priority": "high",
+        "dependencies": [
+          "66"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-16T12:42:27.066Z"
+      },
+      {
+        "id": "68",
+        "title": "Integrate rate limiting into proxy connection flow (R3)",
+        "description": "Check rate limits after policy evaluation in connect.rs, return 403 when exceeded",
+        "details": "In connect.rs after `Action::Allow`:\n```rust\nif let Some(ref rl_config) = result.rate_limit {\n    if let Some(ref limiter) = ctx.rate_limiter {\n        if !limiter.check_and_record(domain, rl_config.max_requests, rl_config.window_secs) {\n            // Log rate-limited, send NotificationEvent::RateLimited, return 403\n            // Add X-AgentShield-Reason header\n        }\n    }\n}\n```\nAdd rate_limiter: Option<Arc<RateLimiter>> to ConnectionContext.",
+        "testStrategy": "Integration tests: 3 req pass/4th fails for same domain, different domains independent, rate-limited logs/headers/notifications correct.",
+        "priority": "high",
+        "dependencies": [
+          "66",
+          "67"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-16T12:51:47.510Z"
+      },
+      {
+        "id": "69",
+        "title": "Implement web dashboard Bearer token authentication (R2)",
+        "description": "Add axum middleware for optional Bearer token auth, exclude GET / endpoint",
+        "details": "1. Add `auth_token: Option<String>` to AppState\n2. Create `auth_middleware` as specified in PRD\n3. Register middleware in axum router for all paths except `GET /`\n4. TOML config: `[web] auth_token = \"${AGENTSHIELD_WEB_TOKEN}\"` with env var support\n5. Update config loading to populate auth_token.",
+        "testStrategy": "curl tests: no token→pass, valid token→200, invalid/missing→401, GET / always 200, SSE endpoints protected.",
+        "priority": "high",
+        "dependencies": [
+          "64",
+          "65"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-16T12:56:49.557Z"
+      },
+      {
+        "id": "70",
+        "title": "Add frontend token input modal and API wrapper (R2)",
+        "description": "Update dashboard.html with token input modal and apiFetch wrapper using sessionStorage",
+        "details": "Add JavaScript to dashboard.html:\n```javascript\n// Token modal on first load\nlet token = sessionStorage.getItem('agentshield_token');\nif (!token) showTokenModal();\n\n// Wrapper for all API calls\nasync function apiFetch(url, opts = {}) {\n    opts.headers = { ...opts.headers, 'Authorization': `Bearer ${token}` };\n    const res = await fetch(url, opts);\n    if (res.status === 401) { /* clear token, show modal */ }\n    return res;\n}\n```\nUpdate all existing fetch calls to use apiFetch.",
+        "testStrategy": "Manual browser testing: modal appears on first load, token persists in tab, 401 triggers re-prompt, all API calls include header.",
+        "priority": "medium",
+        "dependencies": [
+          "64",
+          "69"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-16T13:03:13.109Z"
+      },
+      {
+        "id": "71",
+        "title": "Extend RequestStats for rate-limited counter (R5)",
+        "description": "Add rate_limited: u64 to stats, update query_stats SQL and CLI/dashboard display",
+        "details": "1. Add `rate_limited: u64` to RequestStats struct\n2. Update `query_stats()` SQL: `COUNT(*) WHERE action = 'rate-limited' AS rate_limited`\n3. Update `agentshield status` CLI output format\n4. Add rate-limited card to web dashboard stats section via `/api/status`",
+        "testStrategy": "Verify CLI shows correct counters after rate-limited events, dashboard displays rate-limited metric.",
+        "priority": "medium",
+        "dependencies": [
+          "68"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-16T13:00:10.931Z"
+      },
+      {
+        "id": "72",
+        "title": "Implement CLI dashboard command (R4)",
+        "description": "Add `agentshield dashboard` subcommand to auto-open browser",
+        "details": "1. Add Dashboard variant to Commands enum in clap\n2. Implement `cmd_dashboard()`:\n```rust\nfn cmd_dashboard(config_path: &Path) -> anyhow::Result<()> {\n    let config = AppConfig::load_from_path(config_path)?;\n    if let Some(ref web) = config.web { if web.enabled { open_browser(&format!(\"http://{}\" , web.listen))? } }\n    else { println!(\"Web dashboard not enabled\"); }\n    Ok(())\n}\n```\n3. Platform-specific open_browser using open/xdg-open/start.",
+        "testStrategy": "cargo test, manual test across platforms: opens correct URL when enabled, shows message when disabled.",
         "priority": "medium",
         "dependencies": [],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-14T15:15:20.750Z"
+        "updatedAt": "2026-02-16T12:58:14.846Z"
       },
       {
-        "id": "45",
-        "title": "Implement policy hot-reload with Arc<RwLock<PolicyConfig>>",
-        "description": "Convert policy to thread-safe shared state with file watching, SIGHUP, and API triggers",
-        "details": "Add notify = \"7\" dependency. Change ConnectionContext.policy: Option<Arc<RwLock<PolicyConfig>>>. Implement reload_policy() with TOML parse + write lock. Add notify::Watcher for config file changes. Handle SIGHUP signal. Add [policy.hot_reload = true] TOML parsing. Fail-safe: invalid TOML keeps old policy.",
-        "testStrategy": "Test TOML file change triggers reload. Test invalid TOML preserves old policy. Test concurrent read/write lock performance. Verify SIGHUP triggers reload.",
+        "id": "73",
+        "title": "Fix remaining v0.6 review issues (R1-3, R1-4)",
+        "description": "Fix Telegram TTL cleanup and double broadcast issues (B3, B4)",
+        "details": "1. **B3**: Add `spawn_cleanup_task` to TelegramResponder with 60s interval, clear message_ids if >100 entries\n2. **B4**: Remove `AskSseEvent::Resolved` broadcast from `resolve_ask()` in src/web/ask.rs, rely only on `notify_resolved()`",
+        "testStrategy": "`cargo test`, verify no double SSE events, Telegram cleanup reduces memory over time.",
+        "priority": "high",
+        "dependencies": [
+          "63"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-16T12:44:12.449Z"
+      },
+      {
+        "id": "74",
+        "title": "Comprehensive testing and CI validation (R6)",
+        "description": "Add ≥31 new tests for web auth, rate limiting, CLI, Telegram cleanup reaching ≥250 total tests",
+        "details": "Target 250+ tests:\n- RateLimiter: 10 tests (allow/deny, window reset, concurrency)\n- Web auth: 8 tests (token scenarios, SSE)\n- CLI dashboard: 3 tests\n- Telegram cleanup + existing modules: 10+ tests\nRun full CI: fmt + clippy + test.",
+        "testStrategy": "`cargo test` passes ≥250 tests, `cargo fmt --check`, `cargo clippy -- -D warnings`, full CI green.",
         "priority": "medium",
         "dependencies": [
-          "43"
+          "63",
+          "64",
+          "65",
+          "66",
+          "67",
+          "68",
+          "69",
+          "70",
+          "71",
+          "72",
+          "73"
         ],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-14T15:44:07.374Z"
-      },
-      {
-        "id": "46",
-        "title": "Implement TelegramResponder with bidirectional approval",
-        "description": "Create Telegram bot with inline keyboard for ASK approval/denial using getUpdates long polling",
-        "details": "Create src/ask/telegram.rs. Implement TelegramResponder with bot_token, chat_id, reqwest::Client. Spawn tokio task for getUpdates polling loop. Handle callback_query with chat_id validation, parse 'allow:req_id'/'deny:req_id', oneshot response, message edit. Auto-add api.telegram.org to system_allowlist when interactive=true.",
-        "testStrategy": "Mock Telegram API test: callback -> correct oneshot response. Test wrong chat_id ignored. Test already-resolved callback. Verify message edit on notify_resolved().",
-        "priority": "high",
-        "dependencies": [
-          "41"
-        ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-14T15:34:33.554Z"
-      },
-      {
-        "id": "47",
-        "title": "Add axum web server with API endpoints",
-        "description": "Implement core web dashboard backend with axum including logs API, ASK endpoints, policy API",
-        "details": "Add axum, tower-http, uuid dependencies. Create src/web/mod.rs with WebServer struct (db, ask_pending, policy_state, sse_tx). Implement axum::Router with: GET /api/logs, GET /api/logs/stream (SSE), GET /api/ask/pending, POST /api/ask/{id}/[allow|deny], GET/ PUT /api/policy, GET /api/status. Bind to 127.0.0.1:18081.",
-        "testStrategy": "Test all API endpoints return correct JSON. Test SSE stream receives LogEvent broadcasts. Test ASK endpoints trigger AskBroadcaster. Verify 127.0.0.1 binding.",
-        "priority": "high",
-        "dependencies": [
-          "43",
-          "44"
-        ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-14T15:54:58.275Z"
-      },
-      {
-        "id": "48",
-        "title": "Implement WebDashboardResponder AskResponder",
-        "description": "Create WebDashboardResponder that implements AskResponder trait using REST API endpoints",
-        "details": "In src/web/, implement WebDashboardResponder struct with Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>> pending_asks. On prompt(): POST pending ask to /api/ask/pending SSE clients. Handle POST /api/ask/{id}/allow|deny -> oneshot.send(). notify_resolved() -> SSE broadcast to UI.",
-        "testStrategy": "Test prompt() stores oneshot in pending map. Test REST endpoints resolve correct req_id. Test notify_resolved() updates UI via SSE.",
-        "priority": "high",
-        "dependencies": [
-          "41",
-          "47"
-        ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-14T16:17:25.980Z"
-      },
-      {
-        "id": "49",
-        "title": "Embed single-file SPA dashboard with Tailwind CSS",
-        "description": "Create embedded HTML/JS dashboard with Tailwind CDN showing logs, stats, pending ASK, policy editor",
-        "details": "Create assets/dashboard.html with Tailwind CDN, vanilla JS. Implement SSE client for /api/logs/stream and /api/ask/pending. Add buttons for policy edit/save (PUT /api/policy). Include status display, log filtering, responsive layout matching PRD screenshot. Use include_str!(\"dashboard.html\") in axum handler.",
-        "testStrategy": "Manual browser test: verify SPA loads, SSE updates real-time, ASK buttons work, policy editor saves. Test responsive layout on mobile/desktop.",
-        "priority": "medium",
-        "dependencies": [
-          "47",
-          "48"
-        ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-14T16:20:05.654Z"
-      },
-      {
-        "id": "50",
-        "title": "Integrate all features and add comprehensive tests",
-        "description": "Wire up Telegram/Web responders to AskBroadcaster, add config parsing, update README, bump version",
-        "details": "In main.rs: conditionally spawn TelegramResponder, WebServer tasks based on TOML config. Register all responders to AskBroadcaster. Parse new TOML sections [ask], [notification.telegram.interactive], [web]. Update Cargo.toml version=\"0.6.0\". Add 30+ new tests. Update README with screenshots/config examples.",
-        "testStrategy": "End-to-end integration: proxy + terminal + telegram + web all working together. Test config variations (web disabled, telegram disabled). Verify 180+ total tests pass. Smoke test all new features.",
-        "priority": "high",
-        "dependencies": [
-          "41",
-          "42",
-          "43",
-          "44",
-          "45",
-          "46",
-          "47",
-          "48",
-          "49"
-        ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-14T16:24:36.650Z"
+        "updatedAt": "2026-02-16T13:05:09.564Z"
       }
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2026-02-14T16:24:36.650Z",
-      "taskCount": 10,
-      "completedCount": 10,
+      "lastModified": "2026-02-16T13:05:09.564Z",
+      "taskCount": 12,
+      "completedCount": 12,
       "tags": [
         "master"
       ]

@@ -47,6 +47,15 @@ pub struct ProxyConfig {
     pub mode: String,
 }
 
+/// Rate limit configuration for a policy rule.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RateLimitConfig {
+    /// Maximum number of requests in the window.
+    pub max_requests: u64,
+    /// Window duration in seconds.
+    pub window_secs: u64,
+}
+
 /// A single policy rule that matches requests by domain and optional HTTP method.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Rule {
@@ -62,6 +71,9 @@ pub struct Rule {
     /// Optional note for documentation purposes.
     #[serde(default)]
     pub note: Option<String>,
+    /// Optional rate limit for this rule.
+    #[serde(default)]
+    pub rate_limit: Option<RateLimitConfig>,
 }
 
 /// Policy configuration (`[policy]` section).
@@ -127,6 +139,10 @@ pub struct WebConfig {
     /// Address to bind the web server to (default: `"127.0.0.1:18081"`).
     #[serde(default = "default_web_listen")]
     pub listen: String,
+    /// Optional Bearer token for API authentication.
+    /// If set, all `/api/*` endpoints require `Authorization: Bearer <token>`.
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 fn default_web_listen() -> String {

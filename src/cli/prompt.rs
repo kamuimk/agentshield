@@ -135,6 +135,7 @@ pub fn generate_rule(req: &PromptRequest) -> Rule {
         methods: Some(vec![req.method.clone()]),
         action: Action::Allow,
         note: Some("Auto-generated from approval prompt".to_string()),
+        rate_limit: None,
     }
 }
 

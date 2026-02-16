@@ -438,3 +438,93 @@ fn config_without_web_section() {
     let config: AppConfig = toml::from_str(MINIMAL_TOML).unwrap();
     assert!(config.web.is_none());
 }
+
+#[test]
+fn parse_rule_with_rate_limit() {
+    let toml = r##"
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+[[policy.rules]]
+name = "anthropic"
+domains = ["api.anthropic.com"]
+action = "allow"
+rate_limit = { max_requests = 100, window_secs = 60 }
+"##;
+    let config: AppConfig = toml::from_str(toml).unwrap();
+    let rule = &config.policy.rules[0];
+    let rl = rule.rate_limit.as_ref().unwrap();
+    assert_eq!(rl.max_requests, 100);
+    assert_eq!(rl.window_secs, 60);
+}
+
+#[test]
+fn parse_web_config_with_auth_token() {
+    let toml_str = r#"
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+[web]
+enabled = true
+auth_token = "my-secret-token"
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("agentshield.toml");
+    std::fs::write(&config_path, toml_str).unwrap();
+
+    let config = AppConfig::load_from_path(&config_path).unwrap();
+    let web = config.web.unwrap();
+    assert!(web.enabled);
+    assert_eq!(web.auth_token, Some("my-secret-token".to_string()));
+}
+
+#[test]
+fn parse_web_config_without_auth_token() {
+    let toml_str = r#"
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+[web]
+enabled = true
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("agentshield.toml");
+    std::fs::write(&config_path, toml_str).unwrap();
+
+    let config = AppConfig::load_from_path(&config_path).unwrap();
+    let web = config.web.unwrap();
+    assert!(web.enabled);
+    assert!(web.auth_token.is_none());
+}
+
+#[test]
+fn parse_rule_without_rate_limit() {
+    let toml = r##"
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+[[policy.rules]]
+name = "anthropic"
+domains = ["api.anthropic.com"]
+action = "allow"
+"##;
+    let config: AppConfig = toml::from_str(toml).unwrap();
+    let rule = &config.policy.rules[0];
+    assert!(rule.rate_limit.is_none());
+}

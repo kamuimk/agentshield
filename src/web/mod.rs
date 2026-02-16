@@ -15,8 +15,9 @@ use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
 
 use axum::Router;
-use axum::extract::{Query, State};
+use axum::extract::{Query, Request, State};
 use axum::http::StatusCode;
+use axum::middleware::Next;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json};
 use axum::routing::get;
@@ -37,24 +38,95 @@ pub struct AppState {
     pub event_tx: broadcast::Sender<LogEvent>,
     /// Shared policy configuration (hot-reloadable).
     pub policy: Option<Arc<RwLock<PolicyConfig>>>,
+    /// Optional Bearer token for API authentication.
+    pub auth_token: Option<String>,
 }
 
 /// Build the axum router with all API endpoints and embedded dashboard.
+///
+/// When `auth_token` is set in `AppState`, all `/api/*` routes require
+/// a valid `Authorization: Bearer <token>` header. `GET /` is always public.
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let public = Router::new()
         .route("/", get(dashboard_handler))
+        .with_state(state.clone());
+
+    let api = Router::new()
         .route("/api/logs", get(get_logs))
         .route("/api/logs/stream", get(get_logs_stream))
         .route("/api/status", get(get_status))
         .route("/api/policy", get(get_policy).put(put_policy))
-        .with_state(state)
+        .with_state(state.clone());
+
+    let api = if let Some(ref token) = state.auth_token {
+        let token = token.clone();
+        api.layer(axum::middleware::from_fn(move |req, next| {
+            auth_middleware(token.clone(), req, next)
+        }))
+    } else {
+        api
+    };
+
+    public.merge(api)
 }
 
 /// Build the full router including ASK endpoints.
+///
+/// Auth middleware is applied to both API and ASK routes when configured.
 pub fn full_router(state: Arc<AppState>, ask_state: ask::AskState) -> Router {
-    let api_router = router(state);
+    let public = Router::new()
+        .route("/", get(dashboard_handler))
+        .with_state(state.clone());
+
+    let api = Router::new()
+        .route("/api/logs", get(get_logs))
+        .route("/api/logs/stream", get(get_logs_stream))
+        .route("/api/status", get(get_status))
+        .route("/api/policy", get(get_policy).put(put_policy))
+        .with_state(state.clone());
+
     let ask_router = ask::ask_router(ask_state);
-    api_router.merge(ask_router)
+    let protected = api.merge(ask_router);
+
+    let protected = if let Some(ref token) = state.auth_token {
+        let token = token.clone();
+        protected.layer(axum::middleware::from_fn(move |req, next| {
+            auth_middleware(token.clone(), req, next)
+        }))
+    } else {
+        protected
+    };
+
+    public.merge(protected)
+}
+
+/// Bearer token authentication middleware.
+///
+/// Checks for a valid token in either the `Authorization: Bearer <token>` header
+/// or a `?token=<token>` query parameter (for SSE EventSource compatibility).
+/// Returns `401 Unauthorized` if the token is missing or invalid.
+async fn auth_middleware(expected_token: String, req: Request, next: Next) -> impl IntoResponse {
+    let auth_header = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Also check query parameter for SSE EventSource (which can't set headers)
+    let query_token = req.uri().query().and_then(|q| {
+        q.split('&')
+            .find_map(|pair| pair.strip_prefix("token=").map(|v| v.to_string()))
+    });
+
+    let provided = auth_header
+        .as_deref()
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .or(query_token.as_deref());
+
+    match provided {
+        Some(token) if token == expected_token => next.run(req).await.into_response(),
+        _ => StatusCode::UNAUTHORIZED.into_response(),
+    }
 }
 
 /// Embedded dashboard HTML (compiled into the binary).
@@ -112,6 +184,7 @@ pub struct StatusResponse {
     pub denied: usize,
     pub asked: usize,
     pub system_allowed: usize,
+    pub rate_limited: usize,
 }
 
 impl From<RequestStats> for StatusResponse {
@@ -122,6 +195,7 @@ impl From<RequestStats> for StatusResponse {
             denied: s.denied,
             asked: s.asked,
             system_allowed: s.system_allowed,
+            rate_limited: s.rate_limited,
         }
     }
 }
@@ -290,6 +364,7 @@ mod tests {
                 methods: None,
                 action: Action::Allow,
                 note: None,
+                rate_limit: None,
             }],
         };
 
@@ -298,6 +373,7 @@ mod tests {
                 db: Some(pool),
                 event_tx: tx,
                 policy: Some(Arc::new(RwLock::new(policy))),
+                auth_token: None,
             }),
             dir,
         )
@@ -471,6 +547,7 @@ mod tests {
             db: None,
             event_tx: tx,
             policy: None,
+            auth_token: None,
         });
         let app = router(state);
 
@@ -492,6 +569,7 @@ mod tests {
             db: None,
             event_tx: tx,
             policy: None,
+            auth_token: None,
         });
         let app = router(state);
 
@@ -521,6 +599,155 @@ mod tests {
             .unwrap();
         let html = std::str::from_utf8(&body).unwrap();
         assert!(html.contains("AgentShield Dashboard"));
-        assert!(html.contains("tailwindcss"));
+        assert!(html.contains(".bg-gray-900"));
+    }
+
+    fn test_state_with_auth(token: &str) -> (Arc<AppState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let pool = logging::open_pool(&db_path).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let policy = PolicyConfig {
+            default: Action::Deny,
+            rules: vec![Rule {
+                name: "test".to_string(),
+                domains: vec!["example.com".to_string()],
+                methods: None,
+                action: Action::Allow,
+                note: None,
+                rate_limit: None,
+            }],
+        };
+
+        (
+            Arc::new(AppState {
+                db: Some(pool),
+                event_tx: tx,
+                policy: Some(Arc::new(RwLock::new(policy))),
+                auth_token: Some(token.to_string()),
+            }),
+            dir,
+        )
+    }
+
+    #[tokio::test]
+    async fn auth_no_token_configured_passes_all() {
+        // No auth_token → all requests pass without Authorization header
+        let (state, _dir) = test_state();
+        let app = router(state);
+        let json = response_json(app, "/api/logs").await;
+        assert!(json.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn auth_valid_token_returns_200() {
+        let (state, _dir) = test_state_with_auth("secret123");
+        let app = router(state);
+
+        use tower::ServiceExt as _;
+        let req = Request::builder()
+            .uri("/api/logs")
+            .header("authorization", "Bearer secret123")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_missing_token_returns_401() {
+        let (state, _dir) = test_state_with_auth("secret123");
+        let app = router(state);
+
+        use tower::ServiceExt as _;
+        let req = Request::builder()
+            .uri("/api/logs")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_invalid_token_returns_401() {
+        let (state, _dir) = test_state_with_auth("secret123");
+        let app = router(state);
+
+        use tower::ServiceExt as _;
+        let req = Request::builder()
+            .uri("/api/logs")
+            .header("authorization", "Bearer wrong-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_dashboard_always_accessible() {
+        // GET / should work without auth even when token is configured
+        let (state, _dir) = test_state_with_auth("secret123");
+        let app = router(state);
+
+        use tower::ServiceExt as _;
+        let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+        let resp = app.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_status_endpoint_protected() {
+        let (state, _dir) = test_state_with_auth("secret123");
+        let app = router(state);
+
+        use tower::ServiceExt as _;
+        let req = Request::builder()
+            .uri("/api/status")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_policy_endpoint_protected() {
+        let (state, _dir) = test_state_with_auth("secret123");
+        let app = router(state);
+
+        use tower::ServiceExt as _;
+        let req = Request::builder()
+            .uri("/api/policy")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_query_param_token_valid() {
+        let (state, _dir) = test_state_with_auth("secret123");
+        let app = router(state);
+
+        use tower::ServiceExt as _;
+        let req = Request::builder()
+            .uri("/api/status?token=secret123")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_query_param_token_invalid() {
+        let (state, _dir) = test_state_with_auth("secret123");
+        let app = router(state);
+
+        use tower::ServiceExt as _;
+        let req = Request::builder()
+            .uri("/api/status?token=wrong")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }
