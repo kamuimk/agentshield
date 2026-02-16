@@ -2,186 +2,142 @@
   "master": {
     "tasks": [
       {
-        "id": "63",
-        "title": "Fix CI cargo fmt failure in proxy_test.rs (R1-1)",
-        "description": "Format tests/proxy_test.rs to pass cargo fmt in CI (B1 issue)",
-        "details": "Apply `cargo fmt` to `tests/proxy_test.rs`, specifically fix `with_policy(Arc::new(RwLock::new(...)))` chaining to match rustfmt rules. Run `cargo fmt --check` locally to verify. No functional changes required.",
-        "testStrategy": "Run `cargo fmt --check` and verify CI passes. Existing 219 tests unchanged.",
+        "id": "75",
+        "title": "Add subtle dependency and implement timing-safe token comparison",
+        "description": "Fix B1 timing attack vulnerability in auth_middleware using constant-time comparison (R1-1)",
+        "details": "Add `subtle = \"2\"` to Cargo.toml. In `src/web/mod.rs` auth_middleware, replace `==` with:\n```rust\nuse subtle::ConstantTimeEq;\nfn token_matches(provided: &str, expected: &str) -> bool {\n    if provided.len() != expected.len() { return false; }\n    provided.as_bytes().ct_eq(expected.as_bytes()).into()\n}\n```\nUpdate all token comparison sites to use this function.",
+        "testStrategy": "Unit tests: identical tokens return true, different length false (timing-safe), different tokens false, empty token false. Integration test: auth with valid/invalid tokens.",
         "priority": "high",
         "dependencies": [],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-16T12:30:05.211Z"
+        "updatedAt": "2026-02-16T22:29:33.504Z"
       },
       {
-        "id": "64",
-        "title": "Remove Tailwind CDN and inline CSS (R1-2)",
-        "description": "Extract used Tailwind classes from dashboard.html and inline as <style> block (B2 issue)",
-        "details": "1. Identify all Tailwind utility classes in `assets/dashboard.html`. 2. Use `npx tailwindcss -i assets/dashboard.html -o assets/dashboard.css --minify` or manually extract ~50 classes. 3. Remove `<script src=\"https://cdn.tailwindcss.com\">`. 4. Insert minified CSS into `<style>` tag. 5. Verify file size <60KB and dark mode/responsive styles preserved.",
-        "testStrategy": "Manual browser test: dashboard renders correctly offline, no network requests to CDN, responsive grid/buttons work.",
-        "priority": "high",
-        "dependencies": [
-          "63"
-        ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-16T12:35:50.165Z"
-      },
-      {
-        "id": "65",
-        "title": "Fix web server unwrap panics (R1-5)",
-        "description": "Replace unwrap() calls in main.rs web server spawn with proper error handling (B5 issue)",
-        "details": "In `src/main.rs` lines 223-225, replace:\n```rust\ntokio::spawn(async move {\n    match tokio::net::TcpListener::bind(&listen).await {\n        Ok(listener) => {\n            info!(\"Web dashboard listening on {}\", listen);\n            if let Err(e) = axum::serve(listener, app).await {\n                error!(\"Web dashboard server error: {}\", e);\n            }\n        }\n        Err(e) => {\n            error!(\"Failed to bind web dashboard on {}: {}\", listen, e);\n        }\n    }\n});\n```",
-        "testStrategy": "cargo test all, manual test: kill port-bound process and restart to verify graceful error logging without panic.",
-        "priority": "high",
-        "dependencies": [
-          "63"
-        ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-16T12:36:38.348Z"
-      },
-      {
-        "id": "66",
-        "title": "Implement RateLimiter module (R3)",
-        "description": "Create new src/ratelimit/mod.rs with sliding window domain-based rate limiting",
-        "details": "```rust\n// src/ratelimit/mod.rs\nuse std::collections::HashMap;\nuse std::sync::{Arc, Mutex};\nuse std::time::Instant;\n\npub struct RateLimiter {\n    windows: Mutex<HashMap<String, Vec<Instant>>>,\n}\n\nimpl RateLimiter {\n    pub fn new() -> Self { /* impl as per PRD */ }\n    pub fn check_and_record(&self, domain: &str, max_requests: u64, window_secs: u64) -> bool { /* impl */ }\n    pub fn current_count(&self, domain: &str, window_secs: u64) -> u64 { /* impl */ }\n}\n```\nMake Arc<RateLimiter> available in ConnectionContext.",
-        "testStrategy": "10+ unit tests: basic allow/deny, window expiration, domain isolation, concurrent access, counter persistence across hot-reload.",
+        "id": "76",
+        "title": "Implement auth token Debug masking for WebConfig and TelegramConfig",
+        "description": "Fix B2 log exposure by masking sensitive tokens in Debug impl (R1-2)",
+        "details": "For `WebConfig`:\n```rust\nimpl std::fmt::Debug for WebConfig {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        f.debug_struct(\"WebConfig\")\n            .field(\"enabled\", &self.enabled)\n            .field(\"listen\", &self.listen)\n            .field(\"auth_token\", &self.auth_token.as_ref().map(|_| \"***\"))\n            .finish()\n    }\n}\n```\nApply identical masking to `TelegramConfig.bot_token`. Test with `{:?}` formatting.",
+        "testStrategy": "Debug print tests: verify `auth_token: ***` and `bot_token: ***` appear in output, actual values never logged.",
         "priority": "high",
         "dependencies": [],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-16T12:31:41.538Z"
+        "status": "pending",
+        "subtasks": []
       },
       {
-        "id": "67",
-        "title": "Add RateLimitConfig to Policy Rule and EvalResult (R3)",
-        "description": "Extend policy configuration and evaluation to support rate limiting per rule",
-        "details": "1. Add to `src/policy/config.rs`:\n```rust\n#[derive(Debug, Clone, Deserialize, Serialize)]\npub struct RateLimitConfig { pub max_requests: u64, pub window_secs: u64 }\n\npub struct Rule { /* ... */ #[serde(default)] pub rate_limit: Option<RateLimitConfig>, }\n```\n2. Extend EvalResult with `pub rate_limit: Option<RateLimitConfig>`\n3. Update policy deserialization and evaluation to propagate rate_limit config.",
-        "testStrategy": "Unit tests for TOML parsing with/without rate_limit, policy evaluation returns correct RateLimitConfig.",
+        "id": "77",
+        "title": "Add rcgen, time, tokio-rustls, lru dependencies and CA CLI clap subcommands",
+        "description": "Add required dependencies and extend CLI with `agentshield ca` subcommands (R2 prep)",
+        "details": "Cargo.toml:\n```toml\nsubtle = \"2\"\nrcgen = \"0.13\"\ntime = \"0.3\"\ntokio-rustls = \"0.26\"\nlru = \"0.12\"\n```\nExtend clap Commands:\n```rust\n#[derive(Subcommand)]\nenum Commands {\n    // existing...\n    Ca { #[command(subcommand)] action: CaCommands },\n}\n#[derive(Subcommand)]\nenum CaCommands { Init, Trust, Show, Export { path: PathBuf } }\n```\nCreate `src/cli/ca.rs`.",
+        "testStrategy": "cargo check passes, clap --help shows new subcommands correctly.",
         "priority": "high",
         "dependencies": [
-          "66"
+          "75",
+          "76"
         ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-16T12:42:27.066Z"
+        "status": "pending",
+        "subtasks": []
       },
       {
-        "id": "68",
-        "title": "Integrate rate limiting into proxy connection flow (R3)",
-        "description": "Check rate limits after policy evaluation in connect.rs, return 403 when exceeded",
-        "details": "In connect.rs after `Action::Allow`:\n```rust\nif let Some(ref rl_config) = result.rate_limit {\n    if let Some(ref limiter) = ctx.rate_limiter {\n        if !limiter.check_and_record(domain, rl_config.max_requests, rl_config.window_secs) {\n            // Log rate-limited, send NotificationEvent::RateLimited, return 403\n            // Add X-AgentShield-Reason header\n        }\n    }\n}\n```\nAdd rate_limiter: Option<Arc<RateLimiter>> to ConnectionContext.",
-        "testStrategy": "Integration tests: 3 req pass/4th fails for same domain, different domains independent, rate-limited logs/headers/notifications correct.",
+        "id": "78",
+        "title": "Implement agentshield ca init with confirmation and 10-year validity",
+        "description": "Create Root CA key/cert pair at ~/.agentshield/ca/ with overwrite confirmation (R2-1)",
+        "details": "```rust\npub fn cmd_ca_init() -> anyhow::Result<()> {\n    let ca_dir = dirs::home_dir().unwrap().join(\".agentshield/ca\");\n    std::fs::create_dir_all(&ca_dir)?;\n    let key_path = ca_dir.join(\"key.pem\");\n    let cert_path = ca_dir.join(\"cert.pem\");\n    if key_path.exists() {\n        println!(\"CA exists. Overwrite? [y/N]\"); // read confirmation\n    }\n    let key_pair = rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;\n    let mut params = rcgen::CertificateParams::new(vec![]);\n    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);\n    params.distinguished_name.push(rcgen::DnType::CommonName, \"AgentShield CA\");\n    params.distinguished_name.push(rcgen::DnType::OrganizationName, \"AgentShield\");\n    params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(3650);\n    let cert = params.self_signed(&key_pair)?;\n    std::fs::write(&key_path, key_pair.serialize_pem())?;\n    std::fs::write(&cert_path, cert.pem())?;\n    println!(\"CA generated: {} {}\", key_path.display(), cert_path.display());\n    Ok(())\n}\n```",
+        "testStrategy": "Create files with correct PEM content, 10-year validity, CA flag set, Subject correct. Test overwrite confirmation (y/N).",
         "priority": "high",
         "dependencies": [
-          "66",
-          "67"
+          "77"
         ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-16T12:51:47.510Z"
+        "status": "pending",
+        "subtasks": []
       },
       {
-        "id": "69",
-        "title": "Implement web dashboard Bearer token authentication (R2)",
-        "description": "Add axum middleware for optional Bearer token auth, exclude GET / endpoint",
-        "details": "1. Add `auth_token: Option<String>` to AppState\n2. Create `auth_middleware` as specified in PRD\n3. Register middleware in axum router for all paths except `GET /`\n4. TOML config: `[web] auth_token = \"${AGENTSHIELD_WEB_TOKEN}\"` with env var support\n5. Update config loading to populate auth_token.",
-        "testStrategy": "curl tests: no token→pass, valid token→200, invalid/missing→401, GET / always 200, SSE endpoints protected.",
+        "id": "79",
+        "title": "Implement agentshield ca trust, show, export commands",
+        "description": "Complete CA CLI: system trust installation, info display, export (R2-2,3,4)",
+        "details": "`ca trust`: Platform detection (macOS `security add-trusted-cert`, Linux `update-ca-certificates`), Node.js `NODE_EXTRA_CA_CERTS` guidance.\n`ca show`: Parse cert.pem, display Subject/Issuer/NotBefore/NotAfter/SHA256 fingerprint.\n`ca export <path>`: Copy cert.pem to path.\nUse `x509-parser` or `rcgen` for cert parsing.",
+        "testStrategy": "Mock platform commands, verify correct instructions printed, export creates identical file, show displays correct metadata.",
         "priority": "high",
         "dependencies": [
-          "64",
-          "65"
+          "78"
         ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-16T12:56:49.557Z"
+        "status": "pending",
+        "subtasks": []
       },
       {
-        "id": "70",
-        "title": "Add frontend token input modal and API wrapper (R2)",
-        "description": "Update dashboard.html with token input modal and apiFetch wrapper using sessionStorage",
-        "details": "Add JavaScript to dashboard.html:\n```javascript\n// Token modal on first load\nlet token = sessionStorage.getItem('agentshield_token');\nif (!token) showTokenModal();\n\n// Wrapper for all API calls\nasync function apiFetch(url, opts = {}) {\n    opts.headers = { ...opts.headers, 'Authorization': `Bearer ${token}` };\n    const res = await fetch(url, opts);\n    if (res.status === 401) { /* clear token, show modal */ }\n    return res;\n}\n```\nUpdate all existing fetch calls to use apiFetch.",
-        "testStrategy": "Manual browser testing: modal appears on first load, token persists in tab, 401 triggers re-prompt, all API calls include header.",
+        "id": "80",
+        "title": "Add proxy mode configuration and ConnectionContext mitm_enabled field",
+        "description": "TOML config parsing for `proxy.mode` (transparent/mitm) and `ca_dir`, extend ConnectionContext (R3 prep)",
+        "details": "TOML:\n```toml\n[proxy]\nlisten = \"127.0.0.1:18080\"\nmode = \"mitm\"  # or \"transparent\"\nca_dir = \"~/.agentshield/ca\"\n```\nAdd to `ConnectionContext`:\n```rust\npub mitm_enabled: bool,\npub cert_cache: Option<Arc<CertCache>>,\n```\nDefault: transparent mode. Validate CA dir exists in mitm mode.",
+        "testStrategy": "Config parsing: mitm=true/false, ca_dir expansion, error if mitm+no CA dir.",
         "priority": "medium",
         "dependencies": [
-          "64",
-          "69"
+          "79"
         ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-16T13:03:13.109Z"
+        "status": "pending",
+        "subtasks": []
       },
       {
-        "id": "71",
-        "title": "Extend RequestStats for rate-limited counter (R5)",
-        "description": "Add rate_limited: u64 to stats, update query_stats SQL and CLI/dashboard display",
-        "details": "1. Add `rate_limited: u64` to RequestStats struct\n2. Update `query_stats()` SQL: `COUNT(*) WHERE action = 'rate-limited' AS rate_limited`\n3. Update `agentshield status` CLI output format\n4. Add rate-limited card to web dashboard stats section via `/api/status`",
-        "testStrategy": "Verify CLI shows correct counters after rate-limited events, dashboard displays rate-limited metric.",
-        "priority": "medium",
+        "id": "81",
+        "title": "Implement CertCache with dynamic domain certificate generation",
+        "description": "LRU cache (max 1000) of domain ServerConfigs signed by Root CA (R3-3)",
+        "details": "```rust\npub struct CertCache {\n    ca_key: rcgen::KeyPair,\n    ca_cert: rcgen::Certificate,\n    cache: Mutex<lru::LruCache<String, Arc<rustls::ServerConfig>>>,\n}\nimpl CertCache {\n    pub fn load(ca_dir: &Path) -> anyhow::Result<Self> { /* load ca_key, ca_cert */ }\n    pub fn get_or_create(&self, domain: &str) -> Arc<rustls::ServerConfig> {\n        // LRU check -> generate with SAN=domain, CN=domain -> sign with CA -> rustls::ServerConfig\n    }\n}\n``` Capacity: 1000.",
+        "testStrategy": "Load CA, generate valid domain certs, cache hit/miss, LRU eviction at 1001 entries, certs verifiable by rustls.",
+        "priority": "high",
         "dependencies": [
-          "68"
+          "80"
         ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-16T13:00:10.931Z"
+        "status": "pending",
+        "subtasks": []
       },
       {
-        "id": "72",
-        "title": "Implement CLI dashboard command (R4)",
-        "description": "Add `agentshield dashboard` subcommand to auto-open browser",
-        "details": "1. Add Dashboard variant to Commands enum in clap\n2. Implement `cmd_dashboard()`:\n```rust\nfn cmd_dashboard(config_path: &Path) -> anyhow::Result<()> {\n    let config = AppConfig::load_from_path(config_path)?;\n    if let Some(ref web) = config.web { if web.enabled { open_browser(&format!(\"http://{}\" , web.listen))? } }\n    else { println!(\"Web dashboard not enabled\"); }\n    Ok(())\n}\n```\n3. Platform-specific open_browser using open/xdg-open/start.",
-        "testStrategy": "cargo test, manual test across platforms: opens correct URL when enabled, shows message when disabled.",
+        "id": "82",
+        "title": "Implement MITM CONNECT handler with TLS decryption and DLP integration",
+        "description": "Replace TCP tunnel with TLS->DLP->TLS proxy for mitm mode (R3-2)",
+        "details": "In `handle_connect`:\n```rust\nif ctx.mitm_enabled && !system_allowlisted {\n    handle_connect_mitm(client, domain, ctx).await\n} else {\n    handle_connect_tunnel(...) // existing\n}\n```\n`handle_connect_mitm`:\n1. Write \"200 Connection Established\"\n2. TlsAcceptor from cert_cache.get_or_create(domain)\n3. Read decrypted HTTP request\n4. DLP scan request.body (block if critical)\n5. TLS connect to real server, forward request\n6. Forward response back through client TLS\nBuffer full request/response (no streaming v0.8).",
+        "testStrategy": "End-to-end: curl through proxy detects DLP patterns (block), clean requests pass through, transparent mode unchanged, system_allowlist bypasses MITM.",
+        "priority": "high",
+        "dependencies": [
+          "81"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "83",
+        "title": "Create multi-platform Dockerfile and GitHub Actions workflow",
+        "description": "Docker image <50MB with multi-stage build, auto-publish on tag (R4)",
+        "details": "Dockerfile:\n```dockerfile\nFROM rust:1.85-slim AS builder\nWORKDIR /build\nCOPY . .\nRUN cargo build --release\nFROM debian:bookworm-slim\nRUN apt-get update && apt-get install -y ca-certificates\nCOPY --from=builder /build/target/release/agentshield /usr/local/bin/\nEXPOSE 18080 18081\nENTRYPOINT [\"agentshield\"]\n```\n`.github/workflows/docker.yml`: tag push → buildx amd64/arm64 → ghcr.io push.",
+        "testStrategy": "docker build succeeds, image <50MB, runs with config, exposes correct ports.",
         "priority": "medium",
         "dependencies": [],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-16T12:58:14.846Z"
+        "status": "pending",
+        "subtasks": []
       },
       {
-        "id": "73",
-        "title": "Fix remaining v0.6 review issues (R1-3, R1-4)",
-        "description": "Fix Telegram TTL cleanup and double broadcast issues (B3, B4)",
-        "details": "1. **B3**: Add `spawn_cleanup_task` to TelegramResponder with 60s interval, clear message_ids if >100 entries\n2. **B4**: Remove `AskSseEvent::Resolved` broadcast from `resolve_ask()` in src/web/ask.rs, rely only on `notify_resolved()`",
-        "testStrategy": "`cargo test`, verify no double SSE events, Telegram cleanup reduces memory over time.",
-        "priority": "high",
-        "dependencies": [
-          "63"
-        ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-16T12:44:12.449Z"
-      },
-      {
-        "id": "74",
-        "title": "Comprehensive testing and CI validation (R6)",
-        "description": "Add ≥31 new tests for web auth, rate limiting, CLI, Telegram cleanup reaching ≥250 total tests",
-        "details": "Target 250+ tests:\n- RateLimiter: 10 tests (allow/deny, window reset, concurrency)\n- Web auth: 8 tests (token scenarios, SSE)\n- CLI dashboard: 3 tests\n- Telegram cleanup + existing modules: 10+ tests\nRun full CI: fmt + clippy + test.",
-        "testStrategy": "`cargo test` passes ≥250 tests, `cargo fmt --check`, `cargo clippy -- -D warnings`, full CI green.",
+        "id": "84",
+        "title": "Add 28+ new tests for v0.8 features and update README",
+        "description": "Reach ≥280 tests: CA CLI (5), MITM (10), auth fixes (5), update docs (R5)",
+        "details": "Tests:\n- CA CLI full coverage\n- MITM mode switching, cert cache, DLP integration\n- Auth timing/masking\n- Transparent compatibility\nREADME: MITM setup, CA install, Docker compose example, config.toml v0.8.",
+        "testStrategy": "`cargo test` passes ≥280 tests, docs validate with curl examples.",
         "priority": "medium",
         "dependencies": [
-          "63",
-          "64",
-          "65",
-          "66",
-          "67",
-          "68",
-          "69",
-          "70",
-          "71",
-          "72",
-          "73"
+          "75",
+          "76",
+          "78",
+          "79",
+          "82",
+          "83"
         ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-16T13:05:09.564Z"
+        "status": "pending",
+        "subtasks": []
       }
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2026-02-16T13:05:09.564Z",
-      "taskCount": 12,
-      "completedCount": 12,
+      "lastModified": "2026-02-16T22:29:33.504Z",
+      "taskCount": 10,
+      "completedCount": 1,
       "tags": [
         "master"
       ]

@@ -100,11 +100,25 @@ pub fn full_router(state: Arc<AppState>, ask_state: ask::AskState) -> Router {
     public.merge(protected)
 }
 
+/// Constant-time token comparison to prevent timing attacks.
+///
+/// Returns `true` if `provided` and `expected` are identical, using
+/// [`subtle::ConstantTimeEq`] to avoid leaking information via timing.
+fn token_matches(provided: &str, expected: &str) -> bool {
+    if provided.len() != expected.len() {
+        return false;
+    }
+    use subtle::ConstantTimeEq;
+    provided.as_bytes().ct_eq(expected.as_bytes()).into()
+}
+
 /// Bearer token authentication middleware.
 ///
 /// Checks for a valid token in either the `Authorization: Bearer <token>` header
 /// or a `?token=<token>` query parameter (for SSE EventSource compatibility).
 /// Returns `401 Unauthorized` if the token is missing or invalid.
+///
+/// Uses [`token_matches`] for constant-time comparison to prevent timing attacks.
 async fn auth_middleware(expected_token: String, req: Request, next: Next) -> impl IntoResponse {
     let auth_header = req
         .headers()
@@ -124,7 +138,7 @@ async fn auth_middleware(expected_token: String, req: Request, next: Next) -> im
         .or(query_token.as_deref());
 
     match provided {
-        Some(token) if token == expected_token => next.run(req).await.into_response(),
+        Some(token) if token_matches(token, &expected_token) => next.run(req).await.into_response(),
         _ => StatusCode::UNAUTHORIZED.into_response(),
     }
 }
@@ -749,5 +763,30 @@ mod tests {
             .unwrap();
         let resp = app.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn token_matches_identical() {
+        assert!(super::token_matches("secret123", "secret123"));
+    }
+
+    #[test]
+    fn token_matches_different_length() {
+        assert!(!super::token_matches("short", "longer_token"));
+    }
+
+    #[test]
+    fn token_matches_different_same_length() {
+        assert!(!super::token_matches("abcdef", "ghijkl"));
+    }
+
+    #[test]
+    fn token_matches_empty() {
+        assert!(!super::token_matches("", "secret"));
+    }
+
+    #[test]
+    fn token_matches_both_empty() {
+        assert!(super::token_matches("", ""));
     }
 }
