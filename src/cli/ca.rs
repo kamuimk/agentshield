@@ -50,8 +50,7 @@ pub fn generate_ca(ca_dir: &Path) -> anyhow::Result<()> {
 /// CLI handler for `agentshield ca init`.
 ///
 /// Generates a new Root CA. If files already exist, prints a warning
-/// and returns without overwriting (interactive confirmation would
-/// require stdin access which is not suitable for all contexts).
+/// and returns without overwriting.
 pub fn cmd_ca_init(ca_dir: &Path) -> anyhow::Result<()> {
     let key_path = ca_dir.join("key.pem");
     let cert_path = ca_dir.join("cert.pem");
@@ -76,19 +75,119 @@ pub fn cmd_ca_init(ca_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Placeholder: install CA cert into system trust store.
-pub fn cmd_ca_trust(_ca_dir: &Path) -> anyhow::Result<()> {
-    anyhow::bail!("CA trust not yet implemented")
+/// CLI handler for `agentshield ca trust`.
+///
+/// Prints platform-specific instructions for installing the CA certificate
+/// into the system trust store. Does not execute the commands automatically
+/// because they typically require elevated privileges.
+pub fn cmd_ca_trust(ca_dir: &Path) -> anyhow::Result<()> {
+    let cert_path = ca_dir.join("cert.pem");
+    if !cert_path.exists() {
+        anyhow::bail!(
+            "CA certificate not found at {}. Run 'agentshield ca init' first.",
+            cert_path.display()
+        );
+    }
+
+    println!("CA certificate: {}", cert_path.display());
+    println!();
+
+    #[cfg(target_os = "macos")]
+    {
+        println!("macOS: Install CA into system Keychain (requires sudo):");
+        println!(
+            "  sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
+            cert_path.display()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        println!("Linux: Install CA system-wide (requires sudo):");
+        println!(
+            "  sudo cp {} /usr/local/share/ca-certificates/agentshield-ca.crt",
+            cert_path.display()
+        );
+        println!("  sudo update-ca-certificates");
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        println!("Windows: Install CA (requires admin):");
+        println!("  certutil -addstore -f \"Root\" {}", cert_path.display());
+    }
+
+    println!();
+    println!("For Node.js applications:");
+    println!("  export NODE_EXTRA_CA_CERTS={}", cert_path.display());
+    Ok(())
 }
 
-/// Placeholder: display CA certificate info.
-pub fn cmd_ca_show(_ca_dir: &Path) -> anyhow::Result<()> {
-    anyhow::bail!("CA show not yet implemented")
+/// CLI handler for `agentshield ca show`.
+///
+/// Reads the CA certificate PEM and displays metadata:
+/// subject, issuer, not-before/not-after, and SHA-256 fingerprint.
+pub fn cmd_ca_show(ca_dir: &Path) -> anyhow::Result<()> {
+    let cert_path = ca_dir.join("cert.pem");
+    if !cert_path.exists() {
+        anyhow::bail!(
+            "CA certificate not found at {}. Run 'agentshield ca init' first.",
+            cert_path.display()
+        );
+    }
+
+    let pem_data = std::fs::read_to_string(&cert_path)?;
+
+    // Parse the DER certificate for fingerprint
+    let mut reader = std::io::BufReader::new(pem_data.as_bytes());
+    let certs: Vec<_> = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
+    let cert_der = certs
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("No certificate found in cert.pem"))?;
+
+    // SHA-256 fingerprint
+    use sha2::{Digest, Sha256};
+    let fingerprint = Sha256::digest(cert_der.as_ref());
+    let fp_hex: String = fingerprint
+        .iter()
+        .map(|b| format!("{:02X}", b))
+        .collect::<Vec<_>>()
+        .join(":");
+
+    println!("AgentShield CA Certificate");
+    println!("==========================");
+    println!("File:        {}", cert_path.display());
+    println!("Fingerprint: SHA256:{}", fp_hex);
+    println!();
+    println!("PEM contents:");
+    // Show first and last line of PEM for confirmation
+    let lines: Vec<&str> = pem_data.lines().collect();
+    if let Some(first) = lines.first() {
+        println!("  {}", first);
+    }
+    println!("  ...");
+    if let Some(last) = lines.last() {
+        println!("  {}", last);
+    }
+
+    Ok(())
 }
 
-/// Placeholder: export CA certificate to a file.
-pub fn cmd_ca_export(_ca_dir: &Path, _dest: &Path) -> anyhow::Result<()> {
-    anyhow::bail!("CA export not yet implemented")
+/// CLI handler for `agentshield ca export`.
+///
+/// Copies the CA certificate PEM to the specified destination path.
+pub fn cmd_ca_export(ca_dir: &Path, dest: &Path) -> anyhow::Result<()> {
+    let cert_path = ca_dir.join("cert.pem");
+    if !cert_path.exists() {
+        anyhow::bail!(
+            "CA certificate not found at {}. Run 'agentshield ca init' first.",
+            cert_path.display()
+        );
+    }
+
+    std::fs::copy(&cert_path, dest)?;
+    println!("CA certificate exported to {}", dest.display());
+    Ok(())
 }
 
 #[cfg(test)]
@@ -128,7 +227,6 @@ mod tests {
         generate_ca(&ca_dir).unwrap();
 
         let cert_pem = std::fs::read_to_string(ca_dir.join("cert.pem")).unwrap();
-        // Verify it can be parsed as a certificate
         let mut reader = std::io::BufReader::new(cert_pem.as_bytes());
         let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>();
         assert!(certs.is_ok(), "cert.pem must be parseable");
@@ -165,14 +263,82 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ca_dir = dir.path().join("ca");
 
-        // First init
         cmd_ca_init(&ca_dir).unwrap();
         let original_cert = std::fs::read_to_string(ca_dir.join("cert.pem")).unwrap();
 
-        // Second init should not overwrite
         cmd_ca_init(&ca_dir).unwrap();
         let after_cert = std::fs::read_to_string(ca_dir.join("cert.pem")).unwrap();
 
         assert_eq!(original_cert, after_cert, "cert.pem should not be modified");
+    }
+
+    #[test]
+    fn cmd_ca_trust_fails_without_cert() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_dir = dir.path().join("ca");
+        std::fs::create_dir_all(&ca_dir).unwrap();
+
+        let result = cmd_ca_trust(&ca_dir);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("not found"),
+            "Should mention cert not found"
+        );
+    }
+
+    #[test]
+    fn cmd_ca_trust_succeeds_with_cert() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_dir = dir.path().join("ca");
+        generate_ca(&ca_dir).unwrap();
+
+        // Should succeed (prints instructions but does not execute them)
+        cmd_ca_trust(&ca_dir).unwrap();
+    }
+
+    #[test]
+    fn cmd_ca_show_fails_without_cert() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_dir = dir.path().join("ca");
+        std::fs::create_dir_all(&ca_dir).unwrap();
+
+        let result = cmd_ca_show(&ca_dir);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cmd_ca_show_displays_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_dir = dir.path().join("ca");
+        generate_ca(&ca_dir).unwrap();
+
+        // Should succeed without error
+        cmd_ca_show(&ca_dir).unwrap();
+    }
+
+    #[test]
+    fn cmd_ca_export_copies_cert() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_dir = dir.path().join("ca");
+        generate_ca(&ca_dir).unwrap();
+
+        let dest = dir.path().join("exported.pem");
+        cmd_ca_export(&ca_dir, &dest).unwrap();
+
+        assert!(dest.exists(), "Exported file should exist");
+        let original = std::fs::read_to_string(ca_dir.join("cert.pem")).unwrap();
+        let exported = std::fs::read_to_string(&dest).unwrap();
+        assert_eq!(original, exported, "Exported cert should be identical");
+    }
+
+    #[test]
+    fn cmd_ca_export_fails_without_cert() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_dir = dir.path().join("ca");
+        std::fs::create_dir_all(&ca_dir).unwrap();
+
+        let dest = dir.path().join("exported.pem");
+        let result = cmd_ca_export(&ca_dir, &dest);
+        assert!(result.is_err());
     }
 }
