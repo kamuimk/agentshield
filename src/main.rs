@@ -10,7 +10,7 @@ use agentshield::ask::AskBroadcaster;
 use agentshield::ask::telegram::TelegramResponder;
 use agentshield::ask::terminal::TerminalResponder;
 use agentshield::cli::integrate;
-use agentshield::cli::{Cli, Commands, IntegrateTarget, PolicyAction};
+use agentshield::cli::{CaAction, Cli, Commands, IntegrateTarget, PolicyAction};
 use agentshield::dlp::DlpScanner;
 use agentshield::dlp::patterns::RegexScanner;
 use agentshield::logging::{self, LogEvent};
@@ -79,6 +79,16 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::Dashboard => {
             cmd_dashboard(&cli.config)?;
+        }
+        Commands::Ca { action } => {
+            use agentshield::cli::ca;
+            let ca_dir = ca::ca_dir();
+            match action {
+                CaAction::Init => ca::cmd_ca_init(&ca_dir)?,
+                CaAction::Trust => ca::cmd_ca_trust(&ca_dir)?,
+                CaAction::Show => ca::cmd_ca_show(&ca_dir)?,
+                CaAction::Export { path } => ca::cmd_ca_export(&ca_dir, &path)?,
+            }
         }
     }
 

@@ -7,6 +7,7 @@
 //! - [`prompt`] — Interactive approval prompt for ASK actions
 //! - [`integrate`] — OpenClaw integration (set/remove Telegram proxy)
 
+pub mod ca;
 pub mod integrate;
 pub mod prompt;
 
@@ -67,6 +68,27 @@ pub enum Commands {
     },
     /// Open the web dashboard in a browser
     Dashboard,
+    /// Certificate Authority management for MITM mode
+    Ca {
+        #[command(subcommand)]
+        action: CaAction,
+    },
+}
+
+/// CA subcommands for certificate management.
+#[derive(Subcommand)]
+pub enum CaAction {
+    /// Generate a new Root CA key pair and self-signed certificate
+    Init,
+    /// Install the CA certificate into the system trust store
+    Trust,
+    /// Display CA certificate information
+    Show,
+    /// Export the CA certificate to a file
+    Export {
+        /// Destination path for the exported certificate
+        path: std::path::PathBuf,
+    },
 }
 
 /// Targets for the `integrate` subcommand.
