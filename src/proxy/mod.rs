@@ -21,6 +21,7 @@ use crate::error::Result;
 use crate::logging::{DbPool, LogEvent};
 use crate::notification::Notifier;
 use crate::policy::config::PolicyConfig;
+use crate::proxy::tls::CertCache;
 use crate::ratelimit::RateLimiter;
 use connect::ConnectionContext;
 
@@ -44,6 +45,8 @@ pub struct ProxyServer {
     notifier: Option<Arc<dyn Notifier>>,
     event_tx: Option<broadcast::Sender<LogEvent>>,
     rate_limiter: Option<Arc<RateLimiter>>,
+    cert_cache: Option<Arc<CertCache>>,
+    mitm_enabled: bool,
 }
 
 impl ProxyServer {
@@ -59,6 +62,8 @@ impl ProxyServer {
             notifier: None,
             event_tx: None,
             rate_limiter: None,
+            cert_cache: None,
+            mitm_enabled: false,
         }
     }
 
@@ -115,6 +120,13 @@ impl ProxyServer {
         self
     }
 
+    /// Enable MITM TLS interception with the given certificate cache.
+    pub fn with_cert_cache(mut self, cache: Arc<CertCache>) -> Self {
+        self.cert_cache = Some(cache);
+        self.mitm_enabled = true;
+        self
+    }
+
     /// Start the proxy server and return the actual bound address.
     pub async fn start(&self) -> Result<SocketAddr> {
         let listener = TcpListener::bind(&self.listen_addr).await?;
@@ -130,7 +142,8 @@ impl ProxyServer {
             notifier: self.notifier.clone(),
             event_tx: self.event_tx.clone(),
             rate_limiter: self.rate_limiter.clone(),
-            mitm_enabled: false,
+            mitm_enabled: self.mitm_enabled,
+            cert_cache: self.cert_cache.clone(),
         });
         tokio::spawn(async move {
             connect::accept_loop(listener, ctx).await;

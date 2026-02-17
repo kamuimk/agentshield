@@ -24,6 +24,7 @@ use crate::logging::{DbPool, LogEvent};
 use crate::notification::{NotificationEvent, Notifier};
 use crate::policy::config::{Action, PolicyConfig};
 use crate::policy::evaluator::{self, RequestInfo, domain_matches};
+use crate::proxy::tls::CertCache;
 use crate::ratelimit::RateLimiter;
 use std::sync::{Arc, RwLock};
 
@@ -52,6 +53,8 @@ pub struct ConnectionContext {
     pub rate_limiter: Option<Arc<RateLimiter>>,
     /// Whether MITM TLS interception is enabled.
     pub mitm_enabled: bool,
+    /// Certificate cache for MITM TLS interception.
+    pub cert_cache: Option<Arc<CertCache>>,
 }
 
 /// Main accept loop: accept incoming connections and handle them.
@@ -318,6 +321,17 @@ async fn handle_connect(
                 info!("ALLOWED CONNECT to {} - {}", target, result.reason);
                 log_to_db(ctx, "CONNECT", domain, "/", "allow", &result.reason);
             }
+        }
+    }
+
+    // MITM mode: decrypt TLS, inspect, re-encrypt
+    // System-allowlisted domains bypass MITM (use plain tunnel)
+    let allowlist_slice_for_mitm = ctx.system_allowlist.as_ref().map(|v| v.as_slice());
+    let system_allowed = is_system_allowed(domain, allowlist_slice_for_mitm);
+    if ctx.mitm_enabled && !system_allowed {
+        if let Some(ref cert_cache) = ctx.cert_cache {
+            info!("MITM CONNECT to {}", target);
+            return handle_connect_mitm(client, domain, target, ctx, cert_cache).await;
         }
     }
 
@@ -605,6 +619,197 @@ fn extract_body(raw_request: &[u8]) -> Option<&[u8]> {
         })
 }
 
+/// Handle CONNECT in MITM mode: decrypt TLS, inspect payload with DLP, re-encrypt.
+///
+/// Flow:
+/// 1. Send "200 Connection Established" to client
+/// 2. TLS-accept client connection using a cert signed by our CA for `domain`
+/// 3. Read decrypted HTTP request from client
+/// 4. DLP scan request body (block if critical)
+/// 5. TLS-connect to real upstream server
+/// 6. Forward request and relay response back through the client TLS connection
+async fn handle_connect_mitm(
+    client: &mut TcpStream,
+    domain: &str,
+    target: &str,
+    ctx: &ConnectionContext,
+    cert_cache: &CertCache,
+) -> crate::error::Result<()> {
+    // Step 1: Tell the client the tunnel is established
+    client
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .await?;
+
+    // Step 2: TLS-accept the client using our CA-signed cert for this domain
+    let server_config = match cert_cache.get_or_create(domain) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            error!("Failed to generate cert for {}: {}", domain, e);
+            return Ok(());
+        }
+    };
+    let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
+    let mut client_tls = match acceptor.accept(client).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            warn!("TLS handshake with client failed for {}: {}", domain, e);
+            return Ok(());
+        }
+    };
+
+    // Step 3: Read decrypted HTTP request from client (buffered, max 64KB)
+    let mut request_buf = vec![0u8; 65536];
+    let n = match client_tls.read(&mut request_buf).await {
+        Ok(0) => return Ok(()),
+        Ok(n) => n,
+        Err(e) => {
+            warn!("Failed to read decrypted request for {}: {}", domain, e);
+            return Ok(());
+        }
+    };
+    let raw_request = &request_buf[..n];
+
+    // Parse method and path from decrypted request
+    let request_str = String::from_utf8_lossy(raw_request);
+    let first_line = request_str.lines().next().unwrap_or("");
+    let parts: Vec<&str> = first_line.split_whitespace().collect();
+    let method = parts.first().copied().unwrap_or("UNKNOWN");
+    let path = parts.get(1).copied().unwrap_or("/");
+
+    // Step 4: DLP scan
+    if let Some(ref scanner) = ctx.dlp_scanner {
+        if let Some(body) = extract_body(raw_request) {
+            let findings = scanner.scan(body);
+            let has_critical = findings.iter().any(|f| f.severity == Severity::Critical);
+            if has_critical {
+                for f in &findings {
+                    warn!(
+                        "MITM DLP {:?} finding in {} https://{}{}: pattern={}, match={}",
+                        f.severity, method, domain, path, f.pattern_name, f.matched_text
+                    );
+                }
+                log_to_db(
+                    ctx,
+                    method,
+                    domain,
+                    path,
+                    "deny",
+                    "DLP: critical finding (MITM)",
+                );
+                if let Some(f) = findings.iter().find(|f| f.severity == Severity::Critical) {
+                    notify_event(
+                        ctx,
+                        NotificationEvent::DlpFinding {
+                            domain: domain.to_string(),
+                            method: method.to_string(),
+                            pattern_name: f.pattern_name.clone(),
+                            severity: format!("{:?}", f.severity),
+                        },
+                    );
+                }
+                let response = "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: DLP: sensitive data detected (MITM)\r\n\r\n";
+                let _ = client_tls.write_all(response.as_bytes()).await;
+                let _ = client_tls.shutdown().await;
+                return Ok(());
+            }
+            // Non-critical findings: log but allow
+            for f in &findings {
+                warn!(
+                    "MITM DLP {:?} finding in {} https://{}{}: pattern={}, match={}",
+                    f.severity, method, domain, path, f.pattern_name, f.matched_text
+                );
+            }
+        }
+    }
+
+    // Step 5: TLS-connect to the real upstream server
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let client_config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| crate::error::AgentShieldError::Proxy(e.to_string()))?
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
+
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+
+    let remote_tcp = match TcpStream::connect(target).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Failed to connect to upstream {}: {}", target, e);
+            let response = "HTTP/1.1 502 Bad Gateway\r\n\r\n";
+            let _ = client_tls.write_all(response.as_bytes()).await;
+            let _ = client_tls.shutdown().await;
+            return Ok(());
+        }
+    };
+
+    let server_name = rustls::pki_types::ServerName::try_from(domain.to_string()).map_err(|e| {
+        crate::error::AgentShieldError::Proxy(format!("Invalid server name: {}", e))
+    })?;
+
+    let mut remote_tls = match connector.connect(server_name, remote_tcp).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("TLS handshake with upstream {} failed: {}", target, e);
+            let response = "HTTP/1.1 502 Bad Gateway\r\n\r\n";
+            let _ = client_tls.write_all(response.as_bytes()).await;
+            let _ = client_tls.shutdown().await;
+            return Ok(());
+        }
+    };
+
+    // Step 6: Forward decrypted request to upstream
+    if let Err(e) = remote_tls.write_all(raw_request).await {
+        warn!("Failed to forward request to {}: {}", target, e);
+        let _ = client_tls.shutdown().await;
+        return Ok(());
+    }
+
+    // Step 7: Read upstream response and forward back to client
+    // Buffered mode: read up to 1MB response
+    let mut response_buf = vec![0u8; 1_048_576];
+    let mut total = 0;
+    loop {
+        match remote_tls.read(&mut response_buf[total..]).await {
+            Ok(0) => break,
+            Ok(n) => {
+                total += n;
+                if total >= response_buf.len() {
+                    break;
+                }
+            }
+            Err(e) => {
+                warn!("Error reading upstream response from {}: {}", target, e);
+                break;
+            }
+        }
+    }
+
+    if total > 0 {
+        let _ = client_tls.write_all(&response_buf[..total]).await;
+    }
+
+    info!(
+        "MITM {} https://{}{} - {}B response",
+        method, domain, path, total
+    );
+    log_to_db(
+        ctx,
+        method,
+        domain,
+        path,
+        "allow",
+        "MITM inspected (DLP clean)",
+    );
+
+    let _ = client_tls.shutdown().await;
+
+    Ok(())
+}
+
 /// Check if a domain is in the system allowlist (bypass policy evaluation).
 fn is_system_allowed(domain: &str, allowlist: Option<&[String]>) -> bool {
     allowlist.is_some_and(|list| list.iter().any(|d| domain_matches(d, domain)))
@@ -774,6 +979,7 @@ mod tests {
             event_tx: Some(tx),
             rate_limiter: None,
             mitm_enabled: false,
+            cert_cache: None,
         };
 
         log_to_db(&ctx, "GET", "example.com", "/api", "allow", "test rule");
@@ -799,6 +1005,7 @@ mod tests {
             event_tx: None,
             rate_limiter: None,
             mitm_enabled: false,
+            cert_cache: None,
         };
 
         // Should not panic when event_tx is None
@@ -819,6 +1026,7 @@ mod tests {
             event_tx: Some(tx),
             rate_limiter: None,
             mitm_enabled: false,
+            cert_cache: None,
         };
 
         // Should not panic even with no active receivers
@@ -839,6 +1047,7 @@ mod tests {
             event_tx: Some(tx),
             rate_limiter: None,
             mitm_enabled: false,
+            cert_cache: None,
         };
 
         log_to_db(&ctx, "PUT", "multi.com", "/data", "allow", "multi test");

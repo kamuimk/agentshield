@@ -8,6 +8,7 @@ use agentshield::dlp::patterns::RegexScanner;
 use agentshield::notification::{NotificationEvent, Notifier};
 use agentshield::policy::config::{Action, AppConfig, PolicyConfig, Rule};
 use agentshield::proxy::ProxyServer;
+use agentshield::proxy::tls::CertCache;
 
 /// Test-only mock notifier that collects events.
 struct TestNotifier {
@@ -488,6 +489,118 @@ async fn notification_failure_does_not_crash_proxy() {
     assert!(
         response.contains("403"),
         "Proxy should still respond despite notification failure, got: {}",
+        response
+    );
+}
+
+// --- MITM integration tests ---
+
+/// Helper: create a CertCache in a temp dir.
+fn setup_cert_cache() -> (tempfile::TempDir, Arc<CertCache>) {
+    let dir = tempfile::tempdir().unwrap();
+    let ca_dir = dir.path().join("ca");
+    agentshield::cli::ca::generate_ca(&ca_dir).unwrap();
+    let cache = CertCache::load(&ca_dir).unwrap();
+    (dir, Arc::new(cache))
+}
+
+#[tokio::test]
+async fn mitm_mode_responds_200_then_tls() {
+    // MITM proxy should respond with 200, then start TLS negotiation
+    let (_dir, cert_cache) = setup_cert_cache();
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_policy(Arc::new(RwLock::new(allow_example_policy())))
+        .with_cert_cache(cert_cache);
+    let addr = server.start().await.unwrap();
+
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf).await.unwrap();
+    let response = String::from_utf8_lossy(&buf[..n]);
+    // Should get 200 Connection Established (MITM mode still sends this)
+    assert!(
+        response.contains("200"),
+        "MITM proxy should respond 200, got: {}",
+        response
+    );
+}
+
+#[tokio::test]
+async fn mitm_system_allowlist_bypasses_to_tunnel() {
+    // System-allowlisted domains should use plain tunnel (no MITM)
+    let (_dir, cert_cache) = setup_cert_cache();
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_policy(Arc::new(RwLock::new(deny_all_policy())))
+        .with_system_allowlist(vec!["example.com".to_string()])
+        .with_cert_cache(cert_cache);
+    let addr = server.start().await.unwrap();
+
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf).await.unwrap();
+    let response = String::from_utf8_lossy(&buf[..n]);
+    // System-allowlisted → plain tunnel → 200
+    assert!(
+        response.contains("200"),
+        "System-allowlisted domain should bypass MITM (tunnel), got: {}",
+        response
+    );
+}
+
+#[tokio::test]
+async fn mitm_denied_domain_still_blocked() {
+    // Policy-denied domains should still be blocked (before MITM is attempted)
+    let (_dir, cert_cache) = setup_cert_cache();
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_policy(Arc::new(RwLock::new(deny_all_policy())))
+        .with_cert_cache(cert_cache);
+    let addr = server.start().await.unwrap();
+
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(b"CONNECT evil.com:443 HTTP/1.1\r\nHost: evil.com:443\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf).await.unwrap();
+    let response = String::from_utf8_lossy(&buf[..n]);
+    assert!(
+        response.contains("403"),
+        "Denied domain should still be blocked in MITM mode, got: {}",
+        response
+    );
+}
+
+#[tokio::test]
+async fn mitm_transparent_mode_unchanged() {
+    // Without cert_cache, MITM should not activate (plain tunnel)
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_policy(Arc::new(RwLock::new(allow_example_policy())));
+    let addr = server.start().await.unwrap();
+
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf).await.unwrap();
+    let response = String::from_utf8_lossy(&buf[..n]);
+    assert!(
+        response.contains("200"),
+        "Transparent mode should still work, got: {}",
         response
     );
 }
