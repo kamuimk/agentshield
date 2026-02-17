@@ -106,9 +106,9 @@
         "dependencies": [
           "81"
         ],
-        "status": "in-progress",
+        "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-17T09:04:12.305Z"
+        "updatedAt": "2026-02-17T09:07:59.838Z"
       },
       {
         "id": "83",
@@ -118,8 +118,9 @@
         "testStrategy": "docker build succeeds, image <50MB, runs with config, exposes correct ports.",
         "priority": "medium",
         "dependencies": [],
-        "status": "pending",
-        "subtasks": []
+        "status": "in-progress",
+        "subtasks": [],
+        "updatedAt": "2026-02-17T09:08:06.690Z"
       },
       {
         "id": "84",
@@ -142,9 +143,9 @@
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2026-02-17T09:04:12.305Z",
+      "lastModified": "2026-02-17T09:08:06.690Z",
       "taskCount": 10,
-      "completedCount": 7,
+      "completedCount": 8,
       "tags": [
         "master"
       ]
