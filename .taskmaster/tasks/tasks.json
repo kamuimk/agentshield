@@ -118,9 +118,9 @@
         "testStrategy": "docker build succeeds, image <50MB, runs with config, exposes correct ports.",
         "priority": "medium",
         "dependencies": [],
-        "status": "in-progress",
+        "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-17T09:08:06.690Z"
+        "updatedAt": "2026-02-17T09:09:05.859Z"
       },
       {
         "id": "84",
@@ -137,15 +137,16 @@
           "82",
           "83"
         ],
-        "status": "pending",
-        "subtasks": []
+        "status": "in-progress",
+        "subtasks": [],
+        "updatedAt": "2026-02-17T09:09:13.135Z"
       }
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2026-02-17T09:08:06.690Z",
+      "lastModified": "2026-02-17T09:09:13.135Z",
       "taskCount": 10,
-      "completedCount": 8,
+      "completedCount": 9,
       "tags": [
         "master"
       ]

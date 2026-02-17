@@ -6,7 +6,7 @@
 [![CI](https://github.com/kamuimk/agentshield/actions/workflows/ci.yml/badge.svg)](https://github.com/kamuimk/agentshield/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/kamuimk/agentshield/graph/badge.svg)](https://codecov.io/gh/kamuimk/agentshield)
 
-AgentShield is a transparent egress firewall for AI agents (OpenClaw, Claude Code, etc.). It intercepts all outbound HTTP/HTTPS traffic and enforces TOML-based policy rules — blocking unauthorized requests before they leave your machine.
+AgentShield is a transparent egress firewall for AI agents (OpenClaw, Claude Code, etc.). It intercepts all outbound HTTP/HTTPS traffic and enforces TOML-based policy rules — blocking unauthorized requests before they leave your machine. In MITM mode, it can decrypt HTTPS connections to perform DLP scanning on encrypted payloads.
 
 ## Architecture
 
@@ -274,6 +274,45 @@ The web frontend shows a token input modal on first visit. The token is stored i
 | `POST` | `/api/ask/:id/allow` | Approve a pending ASK |
 | `POST` | `/api/ask/:id/deny` | Deny a pending ASK |
 
+### MITM Mode (TLS Interception)
+
+MITM mode decrypts HTTPS traffic for DLP scanning. It requires a local Root CA:
+
+```bash
+# Generate Root CA
+agentshield ca init
+
+# Install CA into system trust store (prints instructions)
+agentshield ca trust
+
+# Show certificate fingerprint
+agentshield ca show
+
+# Export certificate for other machines
+agentshield ca export /path/to/exported.pem
+```
+
+Enable MITM in your config:
+
+```toml
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "mitm"
+ca_dir = "~/.agentshield/ca"
+```
+
+In MITM mode:
+- HTTPS CONNECT requests are decrypted, inspected by DLP, then re-encrypted
+- System-allowlisted domains bypass MITM (plain tunnel, no decryption)
+- Policy-denied domains are blocked before TLS handshake
+- Per-domain certificates are dynamically generated and cached (LRU, max 1000)
+
+For Node.js applications, set `NODE_EXTRA_CA_CERTS` to trust the AgentShield CA:
+
+```bash
+export NODE_EXTRA_CA_CERTS=~/.agentshield/ca/cert.pem
+```
+
 ### Policy Hot-Reload
 
 Policy rules reload automatically without restarting the proxy:
@@ -309,7 +348,7 @@ When `[dlp] enabled = true`, AgentShield scans HTTP request bodies for sensitive
 | High | Generic API key | Log warning, allow |
 | Medium | Email address | Log warning, allow |
 
-> **Note:** CONNECT tunnels (HTTPS) are encrypted and cannot be scanned by DLP.
+> **Note:** In transparent mode, CONNECT tunnels (HTTPS) are encrypted and cannot be scanned by DLP. Use MITM mode to enable DLP on HTTPS traffic.
 
 ### Built-in Templates
 
@@ -337,23 +376,50 @@ agentshield policy template <name>    # Apply a template
 agentshield integrate openclaw        # Configure OpenClaw to use proxy
 agentshield integrate remove          # Remove proxy configuration
 agentshield dashboard                 # Open web dashboard in browser
+agentshield ca init                   # Generate Root CA for MITM mode
+agentshield ca trust                  # Show system trust store instructions
+agentshield ca show                   # Display CA certificate info
+agentshield ca export <path>          # Export CA certificate
 ```
 
-## Using with Docker (OpenClaw)
+## Docker
 
-If your AI agent runs in Docker, set proxy environment variables:
+AgentShield provides a multi-platform Docker image (amd64/arm64):
+
+```bash
+# Build locally
+docker build -t agentshield .
+
+# Run with config
+docker run -v ./agentshield.toml:/etc/agentshield/agentshield.toml \
+  -p 18080:18080 -p 18081:18081 \
+  agentshield start --config /etc/agentshield/agentshield.toml
+```
+
+Pre-built images are published to `ghcr.io` on each tagged release.
+
+### Using with Docker Compose (OpenClaw)
 
 ```yaml
 # docker-compose.yml
 services:
+  agentshield:
+    image: ghcr.io/kamuimk/agentshield:latest
+    ports:
+      - "18080:18080"
+      - "18081:18081"
+    volumes:
+      - ./agentshield.toml:/etc/agentshield/agentshield.toml
+    command: ["start", "--config", "/etc/agentshield/agentshield.toml"]
+
   openclaw-gateway:
     environment:
-      HTTP_PROXY: http://host.docker.internal:18080
-      HTTPS_PROXY: http://host.docker.internal:18080
+      HTTP_PROXY: http://agentshield:18080
+      HTTPS_PROXY: http://agentshield:18080
       NO_PROXY: localhost,127.0.0.1
 ```
 
-Make sure AgentShield listens on `0.0.0.0:18080` (not `127.0.0.1`) for Docker access.
+If running AgentShield on the host (not in Docker), use `host.docker.internal:18080` and listen on `0.0.0.0:18080`.
 
 > **Note:** Node.js 23 does not natively support `HTTP_PROXY` / `HTTPS_PROXY` environment variables. You may need to use a proxy agent library (e.g., `undici`) or wait for Node.js 24+ with `NODE_USE_ENV_PROXY=1` support.
 
@@ -370,7 +436,7 @@ AgentShield complements tools like [PipeLock](https://github.com/nichochar/pipel
 - **MSRV:** Rust 1.85 (edition 2024)
 
 ```bash
-cargo test --all     # Run all tests (252 tests)
+cargo test --all     # Run all tests (284 tests)
 cargo clippy         # Lint
 cargo fmt            # Format
 ```
