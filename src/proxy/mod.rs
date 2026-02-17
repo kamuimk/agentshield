@@ -130,6 +130,7 @@ impl ProxyServer {
             notifier: self.notifier.clone(),
             event_tx: self.event_tx.clone(),
             rate_limiter: self.rate_limiter.clone(),
+            mitm_enabled: false,
         });
         tokio::spawn(async move {
             connect::accept_loop(listener, ctx).await;

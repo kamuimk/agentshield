@@ -43,8 +43,12 @@ pub enum Action {
 pub struct ProxyConfig {
     /// Address to listen on (e.g., `"127.0.0.1:18080"`).
     pub listen: String,
-    /// Proxy mode (currently only `"transparent"` is supported).
+    /// Proxy mode: `"transparent"` (default) or `"mitm"` (TLS interception).
     pub mode: String,
+    /// Path to the CA directory for MITM mode (default: `~/.agentshield/ca`).
+    /// Only used when `mode = "mitm"`.
+    #[serde(default)]
+    pub ca_dir: Option<String>,
 }
 
 /// Rate limit configuration for a policy rule.

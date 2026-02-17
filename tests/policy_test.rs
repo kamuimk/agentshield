@@ -530,6 +530,29 @@ action = "allow"
 }
 
 #[test]
+fn parse_proxy_mode_transparent() {
+    let config: AppConfig = toml::from_str(MINIMAL_TOML).unwrap();
+    assert_eq!(config.proxy.mode, "transparent");
+    assert!(config.proxy.ca_dir.is_none());
+}
+
+#[test]
+fn parse_proxy_mode_mitm_with_ca_dir() {
+    let toml_str = r#"
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "mitm"
+ca_dir = "/custom/ca/path"
+
+[policy]
+default = "deny"
+"#;
+    let config: AppConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.proxy.mode, "mitm");
+    assert_eq!(config.proxy.ca_dir, Some("/custom/ca/path".to_string()));
+}
+
+#[test]
 fn web_config_debug_masks_auth_token() {
     let web = WebConfig {
         enabled: true,

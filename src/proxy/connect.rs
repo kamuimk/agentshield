@@ -50,6 +50,8 @@ pub struct ConnectionContext {
     pub event_tx: Option<broadcast::Sender<LogEvent>>,
     /// Rate limiter for domain-based request throttling.
     pub rate_limiter: Option<Arc<RateLimiter>>,
+    /// Whether MITM TLS interception is enabled.
+    pub mitm_enabled: bool,
 }
 
 /// Main accept loop: accept incoming connections and handle them.
@@ -771,6 +773,7 @@ mod tests {
             notifier: None,
             event_tx: Some(tx),
             rate_limiter: None,
+            mitm_enabled: false,
         };
 
         log_to_db(&ctx, "GET", "example.com", "/api", "allow", "test rule");
@@ -795,6 +798,7 @@ mod tests {
             notifier: None,
             event_tx: None,
             rate_limiter: None,
+            mitm_enabled: false,
         };
 
         // Should not panic when event_tx is None
@@ -814,6 +818,7 @@ mod tests {
             notifier: None,
             event_tx: Some(tx),
             rate_limiter: None,
+            mitm_enabled: false,
         };
 
         // Should not panic even with no active receivers
@@ -833,6 +838,7 @@ mod tests {
             notifier: None,
             event_tx: Some(tx),
             rate_limiter: None,
+            mitm_enabled: false,
         };
 
         log_to_db(&ctx, "PUT", "multi.com", "/data", "allow", "multi test");
