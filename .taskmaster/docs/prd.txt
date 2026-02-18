@@ -1,4 +1,4 @@
-# AgentShield v0.7 PRD
+# AgentShield v0.9 PRD
 
 ## 프로젝트 개요
 
@@ -7,526 +7,749 @@ AgentShield는 AI 에이전트의 아웃바운드 네트워크 트래픽을 제�
 - GitHub: https://github.com/kamuimk/agentshield
 - Language: Rust (edition 2024, MSRV 1.85)
 - License: Apache-2.0
-- Current: v0.6.0 (219 tests, ~8,500 LOC)
+- Current: v0.8.0 (292 tests, ~9,200 LOC)
 
-## v0.6 현황
+## v0.8 현황
 
-- AskResponder trait + AskBroadcaster (다중 응답 채널 추상화)
-- TerminalResponder, TelegramResponder (inline keyboard 양방향 승인), WebDashboardResponder
-- axum 기반 웹 대시보드 (로그 조회, ASK 승인, 정책 편집, SSE 실시간 스트림)
-- 정책 hot-reload (파일 감시 + SIGHUP + API)
-- LogEvent broadcast 채널
+- MITM HTTPS inspection (CONNECT 터널 DLP 스캔)
+- CA 관리 CLI (`ca init`, `ca trust`, `ca show`, `ca export`)
+- CertCache LRU (per-domain 인증서 동적 생성, max 1000)
+- Docker 멀티 플랫폼 이미지 (amd64/arm64) + GitHub Actions workflow
+- ProxyMode enum (type-safe transparent/mitm)
+- MITM 버퍼 개선: Content-Length 기반 full body 읽기 (10MB cap), streaming relay (`tokio::io::copy`)
+- CertCache mutex 최적화 (single lock scope)
+- Upstream ClientConfig 캐싱 (per-request → startup 1회 생성)
+- Rate limit HTTP 상태코드 429 (이전 403)
+- 웹 대시보드 인증 (Bearer token)
+- Rate limiting (도메인별 sliding window)
+- Policy hot-reload (file watcher + SIGHUP)
+- AskBroadcaster (Terminal + Telegram + Web Dashboard)
 
-## v0.6 리뷰 잔존 이슈
+## v0.8 리뷰 잔존 이슈
 
 | ID | 우선순위 | 이슈 | 비고 |
 |----|---------|------|------|
-| B1 | P1 | CI `cargo fmt` 실패 | `tests/proxy_test.rs` 포맷팅 |
-| B2 | P2 | Tailwind CDN 의존성 | 이그레스 방화벽이 외부 CDN 의존 — 원칙 위배 |
-| B3 | P2 | Telegram `pending`/`message_ids` TTL 없음 | timeout 후 cleanup은 되지만 방어적 TTL 부재 |
-| B4 | P3 | `resolve_ask()` 이중 broadcast | SSE 구독자에 동일 이벤트 2회 전달 |
-| B5 | P3 | 웹 서버 `unwrap()` 2개 | bind 실패 시 에러 로그 없이 panic |
+| B1 | P2 | `system_allowlist_bypasses_dlp_for_http` 테스트 간헐 실패 | example.com 외부 의존, flaky |
+| B2 | P3 | MITM 모드에서 chunked transfer-encoding 미지원 | Content-Length 없는 요청 body 읽기 실패 가능 |
+| B3 | P3 | `expand_tilde()` 불완전 | `dirs` crate 미사용, 부모 디렉토리 탐색 방식 |
 
-## v0.7 목표
+## v0.9 목표
 
-v0.6의 잔존 이슈를 정리하고, 웹 대시보드에 인증을 추가하며, 도메인별 Rate Limiting으로 보안 레이어를 강화한다.
+v0.8의 안정성을 강화하고, Claude Code 네이티브 연동과 감사 로깅(Audit Log)을 추가하며, 대시보드 UX를 개선한다.
 
-1. **v0.6 리뷰 이슈 수정** — CI 수정, CDN 제거, 코드 안정성
-2. **웹 대시보드 인증** — Bearer token 기반 API 보호
-3. **Rate Limiting** — 도메인/메서드별 요청 속도 제한
-4. **CLI 개선** — `agentshield dashboard` 명령으로 브라우저 자동 열기
-5. **테스트 보강 및 품질 개선**
+1. **v0.8 잔존 이슈 수정** — flaky 테스트, chunked encoding, tilde expansion
+2. **Claude Code 네이티브 연동** — `agentshield integrate claude-code` 명령
+3. **감사 로깅 (Audit Log)** — Request/Response body 저장 (opt-in)
+4. **로그 검색/필터링** — CLI + 웹 대시보드에서 도메인/액션별 필터
+5. **대시보드 UX 개선** — 다크/라이트 테마 토글, 시간대별 통계 차트
+6. **설정 검증 CLI** — `agentshield config validate` 명령
 
 ## 요구사항
 
-### R1: v0.6 리뷰 이슈 일괄 수정 [P0]
+### R1: v0.8 잔존 이슈 수정 [P0]
 
-v0.6 코드 리뷰에서 발견된 5개 이슈를 모두 수정한다.
+**R1-1: Flaky 테스트 수정 (B1)**
 
-**R1-1: CI `cargo fmt` 수정 (B1)**
-
-`tests/proxy_test.rs`에서 `with_policy(Arc::new(RwLock::new(...)))` 체이닝의 포맷팅을 `cargo fmt`에 맞춘다.
-
-**R1-2: Tailwind CDN 제거 → 인라인 CSS (B2)**
-
-`assets/dashboard.html`에서 `<script src="https://cdn.tailwindcss.com">` 제거. 대시보드에서 실제 사용 중인 Tailwind 유틸리티 클래스를 추출하여 `<style>` 블록에 인라인화한다.
-
-기준:
-- 외부 네트워크 접근 없이 대시보드가 정상 렌더링되어야 한다
-- 파일 크기 증가는 50KB 이내로 제한 (현재 HTML ~10KB)
-- 다크모드 + responsive grid + 버튼/뱃지 스타일 유지
-
-구현 방법:
-1. Tailwind standalone CLI로 사용 중인 클래스만 추출 (`npx tailwindcss -o styles.css --minify`)
-2. 추출된 CSS를 `<style>` 태그에 삽입
-3. 또는 수동으로 사용 중인 ~50개 유틸리티 클래스의 CSS를 작성
-
-**R1-3: Telegram pending TTL cleanup (B3)**
-
-`TelegramResponder`에 주기적 cleanup task 추가. 5분 이상 된 `pending`/`message_ids` entry를 자동 제거한다.
+`system_allowlist_bypasses_dlp_for_http` 테스트가 `example.com`에 실제 HTTP 요청을 보내므로 CI에서 간헐 실패한다. 외부 의존을 제거하고 mock 서버를 사용한다.
 
 ```rust
-// telegram.rs에 추가
-fn spawn_cleanup_task(
-    pending: Arc<Mutex<HashMap<String, PendingAsk>>>,
-    message_ids: Arc<Mutex<HashMap<String, i64>>>,
-) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            // pending은 oneshot sender가 drop되면 자동 정리되지만
-            // message_ids는 수동 정리 필요
-            let mut ids = message_ids.lock().unwrap();
-            // 단순 시간 기반 정리를 위해 timestamp 필드 추가 필요
-            // 또는 entry 수가 100개를 초과하면 가장 오래된 것부터 제거
-            if ids.len() > 100 {
-                ids.clear();
-                tracing::info!("Cleared stale Telegram message_ids ({} entries)", ids.len());
-            }
-        }
-    });
+// 로컬 mock 서버로 교체
+let mock_server = MockServer::start().await;
+mock_server.mock(|when, then| {
+    when.any_request();
+    then.status(200);
+});
+// proxy 설정에서 mock_server.uri() 사용
+```
+
+구현 방법:
+1. `tests/proxy_test.rs`에서 `example.com` 대신 로컬 TCP 서버 사용
+2. 테스트 내에서 `tokio::net::TcpListener`로 간단한 HTTP 응답 서버 구동
+3. 또는 `wiremock` crate 도입 (dev-dependency)
+
+**R1-2: Chunked Transfer-Encoding 지원 (B2)**
+
+MITM 모드에서 `Content-Length` 헤더가 없는 요청(chunked encoding)을 처리한다.
+
+현재 로직: `Content-Length` 파싱 → 해당 바이트만큼 읽기
+개선: `Content-Length` 없으면 `Transfer-Encoding: chunked` 확인 → chunk 디코딩 또는 connection close까지 읽기 (안전 상한: 10MB)
+
+```rust
+fn read_request_body(headers: &str, stream: &mut TlsStream) -> Result<Vec<u8>> {
+    if let Some(len) = parse_content_length(headers) {
+        // 기존 로직: 정확히 len 바이트 읽기
+    } else if is_chunked(headers) {
+        // 새 로직: chunked 디코딩
+        decode_chunked(stream, MAX_BODY_SIZE)
+    } else {
+        // Content-Length도 chunked도 없으면 body 없음으로 처리
+        Ok(Vec::new())
+    }
 }
 ```
 
-더 정교한 방법: `PendingAsk`와 `message_ids` entry에 `Instant` 타임스탬프를 추가하고, 5분 초과 시 개별 제거.
+**R1-3: `expand_tilde()` 개선 (B3)**
 
-**R1-4: 이중 broadcast 제거 (B4)**
-
-`src/web/ask.rs`의 `resolve_ask()` 함수에서 `AskSseEvent::Resolved` broadcast를 제거한다. `notify_resolved()`에서만 broadcast하도록 일원화.
-
-변경 전 (`resolve_ask`):
-```rust
-let _ = pa.tx.send(allowed);
-let _ = state.ask_event_tx.send(AskSseEvent::Resolved { ... }); // 제거
-```
-
-변경 후:
-```rust
-let _ = pa.tx.send(allowed);
-// broadcast는 AskBroadcaster → notify_resolved()에서 처리
-```
-
-**R1-5: 웹 서버 unwrap 제거 (B5)**
-
-`src/main.rs:223-225`의 두 `unwrap()`을 에러 로깅으로 교체.
+`dirs` crate를 도입하여 `expand_tilde()`를 안정적으로 구현한다.
 
 ```rust
-tokio::spawn(async move {
-    match tokio::net::TcpListener::bind(&listen).await {
-        Ok(listener) => {
-            info!("Web dashboard listening on {}", listen);
-            if let Err(e) = axum::serve(listener, app).await {
-                error!("Web dashboard server error: {}", e);
-            }
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
         }
-        Err(e) => {
-            error!("Failed to bind web dashboard on {}: {}", listen, e);
+    } else if path == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home;
         }
     }
-});
+    PathBuf::from(path)
+}
 ```
 
-**테스트**: 기존 219개 테스트 전체 통과 + CI Green 확인
+**테스트**: flaky 테스트 안정화, chunked encoding 단위 테스트 3개, expand_tilde 단위 테스트 3개 추가
 
 **예상 소요**: 2시간
 
 ---
 
-### R2: 웹 대시보드 인증 [P1]
+### R2: Claude Code 네이티브 연동 [P1]
 
-**배경**: v0.6의 웹 대시보드는 `127.0.0.1` 바인딩으로 로컬 전용이지만, 포트 포워딩이나 원격 접속 환경에서는 무방비 상태다. SSH 터널로 접근하는 시나리오도 현실적이므로 인증이 필요하다.
+**배경**: AgentShield의 주요 타겟 중 하나인 Claude Code는 `~/.claude/settings.json`에서 프록시 설정을 관리한다. 수동으로 환경변수를 설정하는 것보다 CLI 명령 하나로 연동할 수 있어야 한다.
 
 **기능 요구사항**:
 
-1. Bearer token 인증:
-   ```toml
-   [web]
-   enabled = true
-   listen = "127.0.0.1:18081"
-   auth_token = "${AGENTSHIELD_WEB_TOKEN}"   # 설정 시 인증 활성화
-   ```
-2. `auth_token`이 미설정이면 인증 없이 동작 (v0.6 하위호환)
-3. API 요청에 `Authorization: Bearer <token>` 헤더 필수
-4. 대시보드 HTML 접근 (`GET /`)에는 인증 불필요 (HTML 자체에 토큰 입력 UI)
-5. 토큰 불일치 시 `401 Unauthorized` + JSON 에러 응답
-6. 대시보드 프론트엔드에 토큰 입력 모달:
-   - 최초 접근 시 토큰 입력 프롬프트
-   - 입력된 토큰을 `sessionStorage`에 저장 (브라우저 탭 닫으면 삭제)
-   - 모든 API 요청에 `Authorization` 헤더 자동 추가
+1. `agentshield integrate claude-code` — Claude Code가 AgentShield를 통해 트래픽을 라우팅하도록 설정
+2. `agentshield integrate remove` — 기존 제거 명령이 Claude Code 설정도 정리
+3. Claude Code의 설정 파일 경로: `~/.claude/settings.json`
+4. 설정 항목:
+   - `env.HTTPS_PROXY` → `http://127.0.0.1:18080`
+   - `env.HTTP_PROXY` → `http://127.0.0.1:18080`
+   - MITM 모드 시: `env.NODE_EXTRA_CA_CERTS` → CA cert 경로
+5. Claude Code 미설치 시 안내 메시지 출력
 
 **기술 설계**:
 
 ```rust
-// src/web/mod.rs — axum middleware
-async fn auth_middleware(
-    State(state): State<Arc<AppState>>,
-    req: axum::http::Request<Body>,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    // auth_token이 None이면 인증 skip
-    let Some(ref expected_token) = state.auth_token else {
-        return next.run(req).await;
-    };
+// src/cli/integrate.rs
 
-    // GET / (dashboard HTML)은 인증 제외
-    if req.uri().path() == "/" {
-        return next.run(req).await;
+fn integrate_claude_code(config: &AppConfig) -> anyhow::Result<()> {
+    let settings_path = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?
+        .join(".claude")
+        .join("settings.json");
+
+    if !settings_path.exists() {
+        println!("Claude Code settings not found at {:?}", settings_path);
+        println!("Is Claude Code installed?");
+        return Ok(());
     }
 
-    // Bearer token 검증
-    let auth_header = req.headers().get("authorization").and_then(|v| v.to_str().ok());
-    match auth_header {
-        Some(header) if header.starts_with("Bearer ") => {
-            let token = &header[7..];
-            if token == expected_token {
-                return next.run(req).await;
+    let content = std::fs::read_to_string(&settings_path)?;
+    let mut settings: serde_json::Value = serde_json::from_str(&content)?;
+
+    let proxy_url = format!("http://{}", config.proxy.listen);
+    let env = settings
+        .as_object_mut()
+        .and_then(|o| o.entry("env").or_insert(json!({})).as_object_mut());
+
+    if let Some(env) = env {
+        env.insert("HTTPS_PROXY".to_string(), json!(proxy_url));
+        env.insert("HTTP_PROXY".to_string(), json!(proxy_url));
+
+        // MITM 모드 시 CA cert 경로 추가
+        if config.proxy.mode == ProxyMode::Mitm {
+            if let Some(ref ca_dir) = config.proxy.ca_dir {
+                let cert_path = expand_tilde(ca_dir).join("cert.pem");
+                env.insert("NODE_EXTRA_CA_CERTS".to_string(),
+                    json!(cert_path.to_string_lossy()));
             }
         }
-        _ => {}
     }
 
-    (StatusCode::UNAUTHORIZED, Json(json!({"error": "invalid or missing token"}))).into_response()
+    std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+    println!("✓ Claude Code configured to use AgentShield proxy at {}", proxy_url);
+    Ok(())
+}
+
+fn remove_claude_code() -> anyhow::Result<()> {
+    let settings_path = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?
+        .join(".claude")
+        .join("settings.json");
+
+    if !settings_path.exists() {
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(&settings_path)?;
+    let mut settings: serde_json::Value = serde_json::from_str(&content)?;
+
+    if let Some(env) = settings.as_object_mut().and_then(|o| o.get_mut("env").and_then(|v| v.as_object_mut())) {
+        env.remove("HTTPS_PROXY");
+        env.remove("HTTP_PROXY");
+        env.remove("NODE_EXTRA_CA_CERTS");
+    }
+
+    std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+    println!("✓ Claude Code proxy configuration removed");
+    Ok(())
 }
 ```
 
-**TOML 설정**:
+**clap 수정**:
+```rust
+#[derive(Subcommand)]
+enum IntegrateTarget {
+    Openclaw,
+    ClaudeCode,  // NEW
+    Remove,
+}
+```
+
+**Claude Code 전용 정책 템플릿** (`templates/claude-code-default.toml` 개선):
 ```toml
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+# Claude Code API
+[[policy.rules]]
+name = "anthropic-api"
+domains = ["*.anthropic.com"]
+action = "allow"
+
+# Tool use: web search
+[[policy.rules]]
+name = "web-search"
+domains = ["*.google.com", "*.googleapis.com", "*.bing.com"]
+methods = ["GET"]
+action = "allow"
+
+# Tool use: GitHub
+[[policy.rules]]
+name = "github-read"
+domains = ["*.github.com", "*.githubusercontent.com"]
+methods = ["GET"]
+action = "allow"
+
+[[policy.rules]]
+name = "github-write"
+domains = ["*.github.com"]
+methods = ["POST", "PUT", "PATCH", "DELETE"]
+action = "ask"
+
+# npm/crates registry (read-only)
+[[policy.rules]]
+name = "package-registries"
+domains = ["registry.npmjs.org", "crates.io", "*.crates.io"]
+methods = ["GET"]
+action = "allow"
+
+# Everything else
+[[policy.rules]]
+name = "catch-all"
+domains = ["*"]
+action = "ask"
+rate_limit = { max_requests = 30, window_secs = 60 }
+
+[dlp]
+enabled = true
+
 [web]
 enabled = true
-listen = "127.0.0.1:18081"
-auth_token = "${AGENTSHIELD_WEB_TOKEN}"  # 환경변수 치환 지원
-```
-
-**AppState 변경**:
-```rust
-pub struct AppState {
-    pub db: Option<DbPool>,
-    pub event_tx: broadcast::Sender<LogEvent>,
-    pub policy: Option<Arc<RwLock<PolicyConfig>>>,
-    pub auth_token: Option<String>,  // NEW
-}
-```
-
-**프론트엔드 토큰 입력**:
-```javascript
-// 페이지 로드 시 토큰 확인
-let token = sessionStorage.getItem('agentshield_token');
-if (!token) {
-    showTokenModal();
-}
-
-// 모든 fetch에 헤더 추가
-async function apiFetch(url, opts = {}) {
-    opts.headers = { ...opts.headers, 'Authorization': `Bearer ${token}` };
-    const res = await fetch(url, opts);
-    if (res.status === 401) {
-        sessionStorage.removeItem('agentshield_token');
-        showTokenModal();
-        throw new Error('Unauthorized');
-    }
-    return res;
-}
 ```
 
 **테스트**:
-- `auth_token` 미설정 → 모든 API 접근 가능
-- `auth_token` 설정 + 올바른 Bearer → 200
-- `auth_token` 설정 + 잘못된 Bearer → 401
-- `auth_token` 설정 + 헤더 없음 → 401
-- `GET /` → 인증 없이 200 (HTML 반환)
-- SSE 엔드포인트에도 인증 적용
+- Claude Code settings.json 생성 → integrate → env 설정 확인
+- MITM 모드 → NODE_EXTRA_CA_CERTS 추가 확인
+- remove → env 키 제거 확인
+- 설정 파일 미존재 → 안내 메시지 확인
+- 기존 env 필드 보존 확인
 
 **예상 소요**: 2시간
 
 ---
 
-### R3: Rate Limiting [P1]
+### R3: 감사 로깅 (Audit Log) [P1]
 
-**배경**: AI 에이전트가 반복적으로 같은 도메인에 요청을 보내는 경우 (예: 무한 루프, 잘못된 재시도 로직) 를 탐지하고 차단해야 한다.
+**배경**: 보안 감사(audit) 목적으로 프록시를 통과한 HTTP 요청/응답의 body를 선택적으로 기록해야 한다. 기본값은 비활성화(opt-in)이며, 활성화 시 SQLite에 body를 저장한다.
 
 **기능 요구사항**:
 
-1. 도메인별 sliding window rate limit
-2. 설정은 정책 룰 단위로 지정:
+1. 설정:
    ```toml
-   [[policy.rules]]
-   name = "anthropic"
-   domains = ["api.anthropic.com"]
-   action = "allow"
-   rate_limit = { max_requests = 100, window_secs = 60 }
+   [logging]
+   audit = true                    # body 저장 활성화 (default: false)
+   audit_max_body_size = 65536     # body 최대 저장 크기 (default: 64KB)
+   audit_actions = ["deny", "ask", "dlp"]  # 기록할 액션 (default: all)
    ```
-3. rate limit 초과 시:
-   - 요청 거부 (403 Forbidden)
-   - `X-AgentShield-Reason: Rate limit exceeded (100/60s for api.anthropic.com)` 헤더
-   - 알림: `NotificationEvent::RateLimited { domain, method, limit, window }`
-   - 로그: `action = "rate-limited"`
-4. rate limit 미설정 룰은 무제한 (기존 동작 유지)
-5. `agentshield status`에서 rate limit 상태 표시
-6. 웹 대시보드 `/api/status`에 rate limit 카운터 포함
+2. `audit = true` 시 요청 body를 `request_logs` 테이블의 새 `body` 컬럼에 저장
+3. body 크기가 `audit_max_body_size` 초과 시 truncation + `[truncated]` 표시
+4. MITM 모드에서는 복호화된 요청 body 저장
+5. Transparent 모드에서는 HTTP 요청만 body 저장 (HTTPS CONNECT는 불가)
+6. `agentshield logs --show-body` 옵션으로 body 포함 출력
+7. 웹 대시보드에서 로그 상세 보기 시 body 표시 (접이식 패널)
+8. 민감 데이터 body 저장 시 DLP 스캔 결과도 함께 기록
 
 **기술 설계**:
 
 ```rust
 // src/policy/config.rs
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct RateLimitConfig {
-    /// Maximum number of requests in the window.
-    pub max_requests: u64,
-    /// Window duration in seconds.
-    pub window_secs: u64,
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct LoggingConfig {
+    /// Enable audit logging (request body storage).
+    #[serde(default)]
+    pub audit: bool,
+    /// Maximum body size to store in bytes (default: 65536).
+    #[serde(default = "default_audit_max_body_size")]
+    pub audit_max_body_size: usize,
+    /// Action types to audit. Empty = all actions.
+    #[serde(default)]
+    pub audit_actions: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Rule {
-    pub name: String,
-    pub domains: Vec<String>,
-    #[serde(default)]
-    pub methods: Option<Vec<String>>,
-    pub action: Action,
-    #[serde(default)]
-    pub note: Option<String>,
-    #[serde(default)]
-    pub rate_limit: Option<RateLimitConfig>,  // NEW
+fn default_audit_max_body_size() -> usize {
+    65536 // 64KB
 }
 ```
 
+**DB 스키마 변경**:
+```sql
+ALTER TABLE request_logs ADD COLUMN request_body TEXT;
+ALTER TABLE request_logs ADD COLUMN dlp_findings TEXT;  -- JSON array of DLP finding names
+```
+
+마이그레이션: `logging/mod.rs`의 `init_db()`에서 컬럼 존재 여부 확인 후 ALTER TABLE 실행.
+
 ```rust
-// src/ratelimit/mod.rs — 새 모듈
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::Instant;
+// 마이그레이션
+fn migrate_db(conn: &Connection) -> Result<()> {
+    // request_body 컬럼 존재 여부 확인
+    let has_body_column = conn
+        .prepare("PRAGMA table_info(request_logs)")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .map(|rows| rows.flatten().any(|name| name == "request_body"))
+        })
+        .unwrap_or(false);
 
-/// Sliding window rate limiter.
-pub struct RateLimiter {
-    /// domain → list of request timestamps
-    windows: Mutex<HashMap<String, Vec<Instant>>>,
-}
-
-impl RateLimiter {
-    pub fn new() -> Self {
-        Self { windows: Mutex::new(HashMap::new()) }
+    if !has_body_column {
+        conn.execute_batch(
+            "ALTER TABLE request_logs ADD COLUMN request_body TEXT;
+             ALTER TABLE request_logs ADD COLUMN dlp_findings TEXT;"
+        )?;
     }
-
-    /// Check if a request is allowed under the rate limit.
-    /// Returns `true` if allowed, `false` if rate limited.
-    pub fn check_and_record(
-        &self,
-        domain: &str,
-        max_requests: u64,
-        window_secs: u64,
-    ) -> bool {
-        let now = Instant::now();
-        let window = std::time::Duration::from_secs(window_secs);
-        let mut map = self.windows.lock().unwrap();
-        let timestamps = map.entry(domain.to_string()).or_default();
-
-        // Remove expired timestamps
-        timestamps.retain(|t| now.duration_since(*t) < window);
-
-        if timestamps.len() as u64 >= max_requests {
-            return false; // rate limited
-        }
-
-        timestamps.push(now);
-        true
-    }
-
-    /// Get current request count for a domain within its window.
-    pub fn current_count(&self, domain: &str, window_secs: u64) -> u64 {
-        let now = Instant::now();
-        let window = std::time::Duration::from_secs(window_secs);
-        let map = self.windows.lock().unwrap();
-        map.get(domain)
-            .map(|ts| ts.iter().filter(|t| now.duration_since(**t) < window).count() as u64)
-            .unwrap_or(0)
-    }
+    Ok(())
 }
 ```
 
 **ConnectionContext에 추가**:
 ```rust
-pub rate_limiter: Option<Arc<RateLimiter>>,
+pub audit_config: Option<LoggingConfig>,
 ```
 
-**evaluate 후 rate limit 체크 (connect.rs)**:
+**프록시 핸들러 수정** (connect.rs):
 ```rust
-Action::Allow => {
-    // Rate limit check (after policy match)
-    if let Some(ref rl_config) = result.matched_rule_rate_limit {
-        if let Some(ref limiter) = ctx.rate_limiter {
-            if !limiter.check_and_record(domain, rl_config.max_requests, rl_config.window_secs) {
-                // Rate limited
-                log_to_db(ctx, method, domain, path, "rate-limited", &reason);
-                notify_event(ctx, NotificationEvent::RateLimited { ... });
-                // Return 403
-            }
-        }
-    }
-    // Allow request
-}
+// audit 로깅: body 캡처
+let audit_body = if should_audit(&ctx, &action) {
+    Some(truncate_body(&request_body, max_body_size))
+} else {
+    None
+};
+
+// log_to_db 호출 시 body 전달
+log_to_db_with_body(ctx, method, domain, path, &action, &reason, audit_body.as_deref(), dlp_findings.as_deref());
 ```
 
-**EvalResult에 rate_limit 정보 추가**:
-```rust
-pub struct EvalResult {
-    pub action: Action,
-    pub reason: String,
-    pub matched_rule: Option<String>,
-    pub rate_limit: Option<RateLimitConfig>,  // NEW
-}
+**CLI 출력**:
+```
+agentshield logs --show-body
+
+[2026-02-18 10:30:45] POST api.anthropic.com /v1/messages → ALLOW
+  Body: {"model":"claude-sonnet-4-5-20250929","max_tokens":1024,"messages":[...]}
+
+[2026-02-18 10:30:46] POST evil.com /exfiltrate → DENY (policy: deny-all)
+  Body: {"stolen_data":"..."}
+  DLP: [openai-api-key, aws-access-key]
 ```
 
-**알림**:
-```rust
-NotificationEvent::RateLimited {
-    domain: String,
-    method: String,
-    limit: u64,
-    window_secs: u64,
-}
-```
-
-format:
-```
-⏱ *Rate Limited*
-`POST api.anthropic.com`
-Limit: 100 requests / 60s
-```
-
-**hot-reload 호환**: rate limiter의 window 데이터는 policy reload 시 초기화하지 않는다. `RateLimiter`는 `ConnectionContext`에 독립적으로 존재하며, 정책 변경 시 config만 갱신된다.
+**웹 대시보드 변경**:
+- 로그 테이블 각 행에 "상세" 버튼 추가
+- 클릭 시 body + DLP findings를 접이식 패널에 표시
+- `/api/logs` 응답에 `request_body`, `dlp_findings` 필드 추가
 
 **테스트**:
-- rate limit 미설정 → 무제한 통과
-- max_requests=3, window=1 → 3개 통과, 4번째 거부
-- window 만료 후 → 다시 통과
-- 서로 다른 도메인 → 독립 카운터
-- hot-reload 후 → 기존 카운터 유지
-- `rate-limited` 로그 기록 확인
-- 알림 발송 확인
+- audit 비활성화 → body 미저장 확인
+- audit 활성화 → body 저장 확인
+- audit_max_body_size 초과 → truncation 확인
+- audit_actions 필터 → 해당 액션만 body 저장
+- DB 마이그레이션 → 기존 DB에서 정상 동작
+- 웹 API → body 필드 포함 응답 확인
 
 **예상 소요**: 3시간
 
 ---
 
-### R4: CLI `dashboard` 명령 [P2]
+### R4: 로그 검색/필터링 [P1]
 
-**배경**: 웹 대시보드 URL을 기억하기 어렵고, 설정 파일에서 포트를 확인해야 한다.
+**배경**: 로그가 축적되면 특정 도메인이나 액션의 로그만 빠르게 찾아야 한다.
 
 **기능 요구사항**:
 
-1. `agentshield dashboard` — 기본 브라우저에서 대시보드 열기
-2. 설정 파일에서 `[web].listen` 주소를 읽어 `http://{listen}` URL 생성
-3. `[web].enabled = false`이면 안내 메시지 출력
-4. 플랫폼별 브라우저 열기: `open` (macOS), `xdg-open` (Linux), `start` (Windows)
+1. CLI 필터링:
+   ```bash
+   agentshield logs --domain api.anthropic.com
+   agentshield logs --action deny
+   agentshield logs --action ask --domain "*.github.com"
+   agentshield logs --since "2026-02-18" --until "2026-02-19"
+   agentshield logs --search "exfiltrate"   # body 검색 (audit 활성화 시)
+   ```
+2. 웹 대시보드 필터링:
+   - 도메인 필터 입력창
+   - 액션별 토글 버튼 (allow/deny/ask/rate-limited/system-allow)
+   - 시간 범위 선택기
+3. `/api/logs` 쿼리 파라미터:
+   ```
+   GET /api/logs?domain=api.anthropic.com&action=deny&limit=50&since=2026-02-18T00:00:00
+   ```
+4. SQLite 인덱스 추가 (domain, action, timestamp)
 
 **기술 설계**:
 
 ```rust
-fn cmd_dashboard(config_path: &Path) -> anyhow::Result<()> {
-    let config = AppConfig::load_from_path(config_path)?;
-    match config.web {
-        Some(ref web) if web.enabled => {
-            let url = format!("http://{}", web.listen);
-            println!("Opening dashboard: {}", url);
-            open_browser(&url)?;
-        }
-        _ => {
-            println!("Web dashboard is not enabled.");
-            println!("Add [web] enabled = true to your config file.");
-        }
+// src/logging/mod.rs
+pub struct LogFilter {
+    pub domain: Option<String>,
+    pub action: Option<String>,
+    pub since: Option<chrono::NaiveDateTime>,
+    pub until: Option<chrono::NaiveDateTime>,
+    pub search: Option<String>,
+    pub limit: u32,
+}
+
+pub fn query_logs_filtered(pool: &DbPool, filter: &LogFilter) -> Result<Vec<RequestLog>> {
+    let conn = pool.get()?;
+    let mut sql = String::from("SELECT * FROM request_logs WHERE 1=1");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(ref domain) = filter.domain {
+        sql.push_str(" AND domain LIKE ?");
+        params.push(Box::new(format!("%{}%", domain)));
     }
-    Ok(())
-}
+    if let Some(ref action) = filter.action {
+        sql.push_str(" AND action = ?");
+        params.push(Box::new(action.clone()));
+    }
+    if let Some(ref since) = filter.since {
+        sql.push_str(" AND timestamp >= ?");
+        params.push(Box::new(since.to_string()));
+    }
+    if let Some(ref until) = filter.until {
+        sql.push_str(" AND timestamp <= ?");
+        params.push(Box::new(until.to_string()));
+    }
+    if let Some(ref search) = filter.search {
+        sql.push_str(" AND (request_body LIKE ? OR domain LIKE ? OR path LIKE ?)");
+        let pattern = format!("%{}%", search);
+        params.push(Box::new(pattern.clone()));
+        params.push(Box::new(pattern.clone()));
+        params.push(Box::new(pattern));
+    }
 
-fn open_browser(url: &str) -> anyhow::Result<()> {
-    #[cfg(target_os = "macos")]
-    std::process::Command::new("open").arg(url).spawn()?;
-    #[cfg(target_os = "linux")]
-    std::process::Command::new("xdg-open").arg(url).spawn()?;
-    #[cfg(target_os = "windows")]
-    std::process::Command::new("cmd").args(["/C", "start", url]).spawn()?;
-    Ok(())
+    sql.push_str(" ORDER BY id DESC LIMIT ?");
+    params.push(Box::new(filter.limit));
+
+    // execute query...
 }
 ```
 
-**clap 추가**:
+**DB 인덱스**:
+```sql
+CREATE INDEX IF NOT EXISTS idx_request_logs_domain ON request_logs(domain);
+CREATE INDEX IF NOT EXISTS idx_request_logs_action ON request_logs(action);
+CREATE INDEX IF NOT EXISTS idx_request_logs_timestamp ON request_logs(timestamp);
+```
+
+**CLI (clap)**:
 ```rust
-#[derive(Subcommand)]
-enum Commands {
-    Start { ... },
-    Stop,
-    Status,
-    Logs { ... },
-    Integrate { ... },
-    Dashboard,  // NEW
+#[derive(Args)]
+struct LogsArgs {
+    #[arg(long, default_value_t = 20)]
+    tail: u32,
+    #[arg(long)]
+    domain: Option<String>,
+    #[arg(long)]
+    action: Option<String>,
+    #[arg(long)]
+    since: Option<String>,
+    #[arg(long)]
+    until: Option<String>,
+    #[arg(long)]
+    search: Option<String>,
+    #[arg(long)]
+    show_body: bool,
+    #[arg(long)]
+    export: bool,
+    #[arg(long, default_value = "table")]
+    format: String,
 }
 ```
 
-**예상 소요**: 30분
+**웹 대시보드 프론트엔드**:
+- 도메인 검색 입력란 (debounced, 300ms)
+- 액션 필터 체크박스 (allow ✓, deny ✓, ask ✓, rate-limited ✓, system-allow ✓)
+- 날짜 범위 필터 (HTML date input)
+- 필터 변경 시 `/api/logs` 재요청
+
+**테스트**:
+- domain 필터 → 해당 도메인만 반환
+- action 필터 → 해당 액션만 반환
+- since/until 필터 → 시간 범위 내 로그만 반환
+- search 필터 → body/domain/path 검색 결과
+- 복합 필터 → AND 조건 적용
+- 빈 결과 → 빈 배열 반환
+- SQL injection 방지 → parameterized query 확인
+
+**예상 소요**: 2시간
 
 ---
 
-### R5: RequestStats 확장 [P2]
+### R5: 대시보드 UX 개선 [P2]
 
-**배경**: rate limiting 추가에 따라 `agentshield status`와 웹 대시보드의 통계에 rate-limited 카운터가 필요하다.
+**배경**: 현재 대시보드는 Tailwind 인라인 CSS로 밝은 테마만 지원한다. 다크 테마와 기본적인 시각화를 추가하여 사용성을 높인다.
 
 **기능 요구사항**:
 
-1. `RequestStats`에 `rate_limited: u64` 필드 추가
-2. `query_stats()` SQL에 `action = 'rate-limited'` 카운트 추가
-3. 웹 대시보드 stats 섹션에 rate-limited 카드 추가
-4. `agentshield status` CLI 출력에 추가:
-   ```
-   AgentShield Status
-   ──────────────────
-   Total requests: 1,234
-     Allowed:        890
-     Denied:         300
-     Asked:          34
-     Rate-limited:   5
-     System-allowed: 10
-   ```
+1. 다크/라이트 테마 토글:
+   - 우측 상단 토글 버튼
+   - `localStorage`에 선호도 저장
+   - 시스템 설정 자동 감지 (`prefers-color-scheme: dark`)
+2. 시간대별 요청 통계 차트:
+   - 최근 1시간의 분당 요청 수 막대그래프
+   - 액션별 색상 구분 (allow=green, deny=red, ask=yellow, rate-limited=orange)
+   - Canvas 기반 순수 JS 구현 (외부 라이브러리 없음)
+3. 실시간 로그 자동 스크롤 토글:
+   - SSE 로그 수신 시 자동 최하단 스크롤 (기본 활성)
+   - 사용자가 위로 스크롤하면 자동 스크롤 일시 중지
+   - "↓ New logs" 버튼으로 재활성화
+4. 로그 행 색상 코딩:
+   - deny: 빨간 배경
+   - ask: 노란 배경
+   - rate-limited: 주황 배경
+   - dlp: 보라 배경
 
-**예상 소요**: 30분
+**기술 설계**:
+
+다크 테마 CSS 변수:
+```css
+:root {
+    --bg-primary: #ffffff;
+    --bg-secondary: #f3f4f6;
+    --text-primary: #111827;
+    --text-secondary: #6b7280;
+    --border: #e5e7eb;
+    --accent: #3b82f6;
+}
+
+[data-theme="dark"] {
+    --bg-primary: #1f2937;
+    --bg-secondary: #111827;
+    --text-primary: #f9fafb;
+    --text-secondary: #9ca3af;
+    --border: #374151;
+    --accent: #60a5fa;
+}
+```
+
+통계 차트 (`<canvas>`):
+```javascript
+// /api/logs?limit=60 로 최근 60건 가져와서
+// 분당 카운트 계산 후 bar chart 렌더링
+function renderChart(logs) {
+    const ctx = document.getElementById('chart').getContext('2d');
+    const buckets = groupByMinute(logs);
+    // ... canvas draw bars
+}
+```
+
+**새 API 엔드포인트**:
+```
+GET /api/stats/timeline?minutes=60
+```
+
+응답:
+```json
+{
+    "buckets": [
+        { "time": "2026-02-18T10:30", "allow": 12, "deny": 3, "ask": 1, "rate_limited": 0 },
+        { "time": "2026-02-18T10:31", "allow": 8, "deny": 1, "ask": 0, "rate_limited": 2 }
+    ]
+}
+```
+
+**테스트**:
+- `/api/stats/timeline` → 정상 JSON 응답
+- `minutes` 파라미터 범위 검증 (1-1440)
+- 빈 DB → 빈 buckets 배열
+
+**예상 소요**: 3시간
 
 ---
 
-### R6: 테스트 보강 [P2]
+### R6: 설정 검증 CLI [P2]
 
-**배경**: v0.6에서 219개로 크게 증가했으나, 신규 모듈(web, ask)의 edge case 커버리지가 부족하다.
+**배경**: `agentshield.toml` 수정 후 서버 시작 전에 설정 유효성을 확인할 수 있어야 한다. 현재는 `start` 실행 시에만 파싱 에러를 확인할 수 있다.
 
-**추가 테스트 목표**: ≥ 250개 (31개 이상 추가)
+**기능 요구사항**:
+
+1. `agentshield config validate [--config path]` — 설정 파일 검증
+2. 검증 항목:
+   - TOML 파싱 성공
+   - 환경변수 치환 (`${VAR}`) 유효성
+   - 정책 룰 도메인 형식 검증
+   - listen 주소 형식 검증
+   - CA 디렉토리 존재 여부 (MITM 모드)
+   - DLP 패턴 이름 유효성
+   - 룰 이름 중복 검사
+3. 검증 결과 출력:
+   ```
+   ✓ TOML syntax valid
+   ✓ Environment variables resolved
+   ✓ Policy rules: 5 rules defined
+   ✓ Listen address: 127.0.0.1:18080
+   ✗ CA directory not found: ~/.agentshield/ca (required for MITM mode)
+   ⚠ Rule "catch-all" matches all domains — consider restricting
+
+   Result: 1 error, 1 warning
+   ```
+4. 종료 코드: 에러 있으면 1, 없으면 0
+
+**기술 설계**:
+
+```rust
+// src/cli/mod.rs
+#[derive(Subcommand)]
+enum ConfigCommand {
+    Validate,
+}
+
+fn cmd_config_validate(config_path: &Path) -> anyhow::Result<()> {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    // 1. TOML 파싱
+    match AppConfig::load_from_path(config_path) {
+        Ok(config) => {
+            println!("✓ TOML syntax valid");
+            println!("✓ Environment variables resolved");
+
+            // 2. 정책 룰 검증
+            validate_rules(&config.policy, &mut errors, &mut warnings);
+
+            // 3. listen 주소 검증
+            validate_listen_address(&config.proxy.listen, &mut errors);
+
+            // 4. MITM CA 디렉토리 검증
+            if config.proxy.mode == ProxyMode::Mitm {
+                validate_ca_dir(&config.proxy.ca_dir, &mut errors);
+            }
+
+            // 5. DLP 패턴 검증
+            if let Some(ref dlp) = config.dlp {
+                validate_dlp_patterns(dlp, &mut warnings);
+            }
+
+            // 6. 룰 이름 중복 검사
+            check_duplicate_rule_names(&config.policy.rules, &mut warnings);
+        }
+        Err(e) => {
+            errors.push(format!("Config load failed: {}", e));
+        }
+    }
+
+    // 결과 출력
+    for w in &warnings {
+        println!("⚠ {}", w);
+    }
+    for e in &errors {
+        println!("✗ {}", e);
+    }
+
+    if errors.is_empty() && warnings.is_empty() {
+        println!("\nResult: All checks passed ✓");
+    } else {
+        println!("\nResult: {} error(s), {} warning(s)", errors.len(), warnings.len());
+    }
+
+    if errors.is_empty() { Ok(()) } else { std::process::exit(1) }
+}
+```
+
+**테스트**:
+- 유효한 설정 → 에러 0, 종료 코드 0
+- 잘못된 TOML → 에러 1
+- 없는 환경변수 → 에러 1
+- 중복 룰 이름 → 경고 1
+- MITM + CA 디렉토리 없음 → 에러 1
+- 와일드카드 catch-all 룰 → 경고 1
+
+**예상 소요**: 1.5시간
+
+---
+
+### R7: 테스트 보강 [P2]
+
+**배경**: v0.8에서 292개이며, 신규 기능 추가와 기존 모듈 보강으로 350개 이상을 목표로 한다.
+
+**추가 테스트 목표**: ≥ 350개 (58개 이상 추가)
 
 **필요 테스트**:
 
-- **Rate limiter** (R3): ~10개
-  - 기본 allow/deny 흐름
-  - window 만료 후 리셋
-  - 도메인별 독립 카운터
-  - concurrent access safety
-  - hot-reload 후 카운터 유지
+- **R1 이슈 수정**: ~6개
+  - flaky 테스트 mock 교체
+  - chunked encoding 디코딩
+  - expand_tilde 유닛 테스트
 
-- **Web auth** (R2): ~8개
-  - token 미설정 → pass-through
-  - 올바른 token → 200
-  - 잘못된 token → 401
-  - 헤더 없음 → 401
-  - `GET /` → 인증 없이 200
-  - SSE 엔드포인트 인증
+- **R2 Claude Code 연동**: ~8개
+  - settings.json 읽기/쓰기
+  - MITM 모드 NODE_EXTRA_CA_CERTS
+  - 파일 미존재 처리
+  - 기존 설정 보존
 
-- **CLI dashboard** (R4): ~3개
-  - web enabled → URL 생성 확인
-  - web disabled → 안내 메시지
-  - web 섹션 미존재 → 안내 메시지
+- **R3 감사 로깅**: ~10개
+  - audit on/off
+  - body truncation
+  - action 필터
+  - DB 마이그레이션
+  - DLP findings 기록
 
-- **기존 모듈 보강**: ~10개
-  - TelegramResponder cleanup task
-  - AskBroadcaster notify_resolved 순서
-  - hot-reload + rate limit 상호작용
-  - LogEvent broadcast 채널 lagging receiver
+- **R4 로그 검색**: ~10개
+  - 각 필터 조건
+  - 복합 필터
+  - SQL injection 방지
+  - 빈 결과
 
-**예상 소요**: 2시간
+- **R5 대시보드**: ~4개
+  - timeline API
+  - 범위 검증
+  - 빈 데이터
+
+- **R6 설정 검증**: ~8개
+  - 유효/무효 설정
+  - 각 검증 항목
+  - 종료 코드
+
+- **기존 모듈 보강**: ~12개
+  - MITM 핸들러 edge case
+  - CertCache LRU eviction
+  - Rate limiter concurrent access
+  - AskBroadcaster timeout
+
+**예상 소요**: 3시간
 
 ---
 
@@ -534,40 +757,39 @@ enum Commands {
 
 | 요구사항 | 우선순위 | 예상 소요 | 의존성 |
 |---------|---------|----------|--------|
-| R1: v0.6 리뷰 이슈 수정 | P0 | 2시간 | 없음 |
-| R2: 웹 대시보드 인증 | P1 | 2시간 | R1 (CDN 제거 후 HTML 수정) |
-| R3: Rate Limiting | P1 | 3시간 | 없음 |
-| R4: CLI `dashboard` 명령 | P2 | 30분 | 없음 |
-| R5: RequestStats 확장 | P2 | 30분 | R3 |
-| R6: 테스트 보강 | P2 | 2시간 | R1-R5 완료 후 |
-| **합계** | | **~10시간** | |
+| R1: v0.8 잔존 이슈 수정 | P0 | 2시간 | 없음 |
+| R2: Claude Code 연동 | P1 | 2시간 | R1 (expand_tilde) |
+| R3: 감사 로깅 | P1 | 3시간 | 없음 |
+| R4: 로그 검색/필터링 | P1 | 2시간 | R3 (body 검색) |
+| R5: 대시보드 UX 개선 | P2 | 3시간 | R4 (필터 UI) |
+| R6: 설정 검증 CLI | P2 | 1.5시간 | 없음 |
+| R7: 테스트 보강 | P2 | 3시간 | R1-R6 완료 후 |
+| **합계** | | **~16.5시간** | |
 
-**구현 순서**: R1 → R3 → R2 → R5 → R4 → R6
+**구현 순서**: R1 → R3 → R2 → R4 → R6 → R5 → R7
 
-- R1이 CI 수정 + CDN 제거이므로 반드시 먼저
-- R3는 독립적이며 가장 큰 기능
-- R2는 R1에서 HTML을 수정하므로 R1 이후
-- R5는 R3의 rate-limited 카운터 포함이므로 R3 이후
-- R4는 독립적이지만 작으므로 후반에
-- R6는 모든 기능 완료 후 통합 테스트
+- R1이 안정성 수정이므로 반드시 먼저
+- R3는 DB 스키마 변경을 포함하므로 일찍 처리
+- R2는 R1의 expand_tilde 개선에 의존
+- R4는 R3의 body 필드에 의존
+- R6는 독립적이지만 중간에 배치
+- R5는 프론트엔드 작업이므로 백엔드 완료 후
+- R7은 모든 기능 완료 후 통합 테스트
 
-## TOML 설정 예시 (v0.7)
+## TOML 설정 예시 (v0.9)
 
 ```toml
 [proxy]
 listen = "127.0.0.1:18080"
-mode = "transparent"
-
-[ask]
-timeout = 120
+mode = "mitm"
+ca_dir = "~/.agentshield/ca"
 
 [policy]
 default = "deny"
-hot_reload = true
 
 [[policy.rules]]
 name = "anthropic"
-domains = ["api.anthropic.com"]
+domains = ["*.anthropic.com"]
 action = "allow"
 rate_limit = { max_requests = 100, window_secs = 60 }
 
@@ -584,13 +806,25 @@ methods = ["POST", "PUT", "DELETE"]
 action = "ask"
 
 [[policy.rules]]
-name = "web-browsing"
+name = "package-registries"
+domains = ["registry.npmjs.org", "crates.io", "*.crates.io"]
+methods = ["GET"]
+action = "allow"
+
+[[policy.rules]]
+name = "catch-all"
 domains = ["*"]
 action = "ask"
 rate_limit = { max_requests = 30, window_secs = 60 }
 
 [dlp]
 enabled = true
+
+# Audit logging (NEW in v0.9)
+[logging]
+audit = true
+audit_max_body_size = 65536
+audit_actions = ["deny", "ask", "dlp"]
 
 [system]
 allowlist = ["api.telegram.org"]
@@ -613,21 +847,23 @@ auth_token = "${AGENTSHIELD_WEB_TOKEN}"
 ## 비기능 요구사항
 
 - CI Green 유지 (cargo fmt + clippy + test)
-- 테스트 ≥ 250개
-- 외부 CDN 의존성 완전 제거 (오프라인 환경에서 대시보드 정상 동작)
-- `auth_token` 미설정 시 v0.6과 100% 하위호환
-- `rate_limit` 미설정 시 기존 동작과 100% 동일
-- README.md 업데이트: 인증 설정, rate limiting 예시
-- `version = "0.7.0"` Cargo.toml 업데이트
-- v0.7.0 GitHub Release + 릴리즈 노트
+- 테스트 ≥ 350개
+- 외부 의존성 없는 대시보드 유지 (CDN/외부 JS 라이브러리 불가)
+- flaky 테스트 완전 제거 (외부 네트워크 의존 테스트 mock 교체)
+- 기존 설정 파일과 100% 하위호환 (`[logging]` 섹션 미존재 시 audit 비활성화)
+- SQLite DB 마이그레이션 자동 처리 (ALTER TABLE)
+- README.md 업데이트: Claude Code 연동, 감사 로깅, 로그 필터링
+- `docs/README.ko.md` 동기화 업데이트
+- `version = "0.9.0"` Cargo.toml 업데이트
+- v0.9.0 GitHub Release + 릴리즈 노트
 
-## 향후 v0.8+ 고려사항 (본 PRD 범위 밖)
+## 향후 v1.0+ 고려사항 (본 PRD 범위 밖)
 
-- **MITM HTTPS inspection**: CONNECT 터널 DLP 스캔 (CA 인증서 생성/설치)
-- **Claude Code 네이티브 연동**: `agentshield integrate claude-code` 개선
-- **커뮤니티 패턴 레지스트리**: DLP 패턴 + 정책 템플릿 공유/구독
-- **Slack/Discord 연동**: 추가 AskResponder 구현
-- **멀티 사용자**: 에이전트별 정책 분리
-- **대시보드 다크/라이트 테마 토글**
-- **Docker 이미지 배포**: `ghcr.io/kamuimk/agentshield`
-- **Request body 로깅 옵션**: 감사 목적으로 body를 DB에 저장 (opt-in)
+- **커뮤니티 패턴 레지스트리**: DLP 패턴 + 정책 템플릿 공유/구독 (e.g., `agentshield registry pull openai-patterns`)
+- **Slack/Discord 연동**: 추가 AskResponder/Notifier 구현
+- **멀티 사용자/멀티 에이전트**: 에이전트별 정책 분리 (X-AgentShield-Agent 헤더 기반)
+- **정책 스케줄링**: 시간대별 정책 적용 (업무 시간 내 strict, 외 relaxed)
+- **GeoIP 기반 정책**: 목적지 IP의 국가 기반 allow/deny
+- **Prometheus/Grafana 메트릭**: /metrics 엔드포인트 노출
+- **플러그인 시스템**: 사용자 정의 DLP 패턴 + 정책 평가 로직
+- **mTLS**: 클라이언트 인증서 기반 에이전트 식별

@@ -88,6 +88,20 @@ fn log_to_db(
     action: &str,
     reason: &str,
 ) {
+    log_to_db_with_audit(ctx, method, domain, path, action, reason, None, None);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_to_db_with_audit(
+    ctx: &ConnectionContext,
+    method: &str,
+    domain: &str,
+    path: &str,
+    action: &str,
+    reason: &str,
+    request_body: Option<&str>,
+    dlp_findings: Option<&str>,
+) {
     let timestamp = chrono::Utc::now().to_rfc3339();
 
     if let Some(ref pool) = ctx.db {
@@ -101,6 +115,8 @@ fn log_to_db(
                     path: path.to_string(),
                     action: action.to_string(),
                     reason: reason.to_string(),
+                    request_body: request_body.map(|s| s.to_string()),
+                    dlp_findings: dlp_findings.map(|s| s.to_string()),
                 };
                 if let Err(e) = logging::log_request(&conn, &log) {
                     warn!("Failed to log request to DB: {}", e);

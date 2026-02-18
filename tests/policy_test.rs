@@ -1,4 +1,6 @@
-use agentshield::policy::config::{Action, AppConfig, ProxyMode, TelegramConfig, WebConfig};
+use agentshield::policy::config::{
+    Action, AppConfig, LoggingConfig, ProxyMode, TelegramConfig, WebConfig,
+};
 
 const MINIMAL_TOML: &str = r#"
 [proxy]
@@ -606,4 +608,50 @@ default = "deny"
     let config: AppConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(config.proxy.mode, ProxyMode::Transparent);
     assert!(config.proxy.ca_dir.is_none());
+}
+
+#[test]
+fn parse_logging_config() {
+    let toml_str = r#"
+[proxy]
+listen = "127.0.0.1:18080"
+
+[policy]
+default = "deny"
+
+[logging]
+audit = true
+audit_max_body_size = 32768
+audit_actions = ["deny", "dlp"]
+"#;
+    let config: AppConfig = toml::from_str(toml_str).unwrap();
+    let logging = config.logging.unwrap();
+    assert!(logging.audit);
+    assert_eq!(logging.audit_max_body_size, 32768);
+    assert_eq!(logging.audit_actions, vec!["deny", "dlp"]);
+}
+
+#[test]
+fn logging_config_defaults() {
+    let config: AppConfig = toml::from_str(MINIMAL_TOML).unwrap();
+    assert!(config.logging.is_none());
+}
+
+#[test]
+fn logging_config_default_values() {
+    let toml_str = r#"
+[proxy]
+listen = "127.0.0.1:18080"
+
+[policy]
+default = "deny"
+
+[logging]
+audit = true
+"#;
+    let config: AppConfig = toml::from_str(toml_str).unwrap();
+    let logging = config.logging.unwrap();
+    assert!(logging.audit);
+    assert_eq!(logging.audit_max_body_size, 65536); // default 64KB
+    assert!(logging.audit_actions.is_empty()); // default empty = all
 }

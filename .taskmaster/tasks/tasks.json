@@ -2,151 +2,149 @@
   "master": {
     "tasks": [
       {
-        "id": "75",
-        "title": "Add subtle dependency and implement timing-safe token comparison",
-        "description": "Fix B1 timing attack vulnerability in auth_middleware using constant-time comparison (R1-1)",
-        "details": "Add `subtle = \"2\"` to Cargo.toml. In `src/web/mod.rs` auth_middleware, replace `==` with:\n```rust\nuse subtle::ConstantTimeEq;\nfn token_matches(provided: &str, expected: &str) -> bool {\n    if provided.len() != expected.len() { return false; }\n    provided.as_bytes().ct_eq(expected.as_bytes()).into()\n}\n```\nUpdate all token comparison sites to use this function.",
-        "testStrategy": "Unit tests: identical tokens return true, different length false (timing-safe), different tokens false, empty token false. Integration test: auth with valid/invalid tokens.",
+        "id": "85",
+        "title": "Fix flaky test system_allowlist_bypasses_dlp_for_http using mock server",
+        "description": "Replace external example.com dependency in tests/proxy_test.rs with local TCP mock server or wiremock crate to eliminate CI flakiness (R1-1)",
+        "details": "Add wiremock as dev-dependency to Cargo.toml. In tests/proxy_test.rs, replace example.com with MockServer::start().await; mock_server.mock(|when, then| { when.any_request(); then.status(200); }); Use mock_server.uri() in proxy config. Ensure test binds to localhost only.",
+        "testStrategy": "Run cargo test --lib proxy_test::system_allowlist_bypasses_dlp_for_http --exact 100회 반복 실행하여 100% pass 확인. CI에서 외부 네트워크 의존성 완전 제거 검증.",
         "priority": "high",
         "dependencies": [],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-16T22:29:33.504Z"
+        "updatedAt": "2026-02-18T23:22:17.042Z"
       },
       {
-        "id": "76",
-        "title": "Implement auth token Debug masking for WebConfig and TelegramConfig",
-        "description": "Fix B2 log exposure by masking sensitive tokens in Debug impl (R1-2)",
-        "details": "For `WebConfig`:\n```rust\nimpl std::fmt::Debug for WebConfig {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        f.debug_struct(\"WebConfig\")\n            .field(\"enabled\", &self.enabled)\n            .field(\"listen\", &self.listen)\n            .field(\"auth_token\", &self.auth_token.as_ref().map(|_| \"***\"))\n            .finish()\n    }\n}\n```\nApply identical masking to `TelegramConfig.bot_token`. Test with `{:?}` formatting.",
-        "testStrategy": "Debug print tests: verify `auth_token: ***` and `bot_token: ***` appear in output, actual values never logged.",
+        "id": "86",
+        "title": "Implement chunked transfer-encoding support in MITM mode",
+        "description": "Add chunked decoding logic for requests without Content-Length header in MITM proxy handler (R1-2)",
+        "details": "In src/proxy/mitm.rs read_request_body function: if Content-Length missing and Transfer-Encoding: chunked, implement decode_chunked(stream, MAX_BODY_SIZE=10MB) using h2::recv::RecvStream or manual chunk parsing. Fallback to connection close with 10MB cap. Use tokio::io::AsyncReadExt for streaming.",
+        "testStrategy": "3개 단위 테스트 추가: 1) chunked body 정상 디코딩, 2) oversized chunked truncation, 3) mixed Content-Length+chunked 에러 처리. Integration test with curl --http1.1 --header 'Transfer-Encoding: chunked'",
         "priority": "high",
         "dependencies": [],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-16T22:31:24.751Z"
+        "updatedAt": "2026-02-18T23:28:35.776Z"
       },
       {
-        "id": "77",
-        "title": "Add rcgen, time, tokio-rustls, lru dependencies and CA CLI clap subcommands",
-        "description": "Add required dependencies and extend CLI with `agentshield ca` subcommands (R2 prep)",
-        "details": "Cargo.toml:\n```toml\nsubtle = \"2\"\nrcgen = \"0.13\"\ntime = \"0.3\"\ntokio-rustls = \"0.26\"\nlru = \"0.12\"\n```\nExtend clap Commands:\n```rust\n#[derive(Subcommand)]\nenum Commands {\n    // existing...\n    Ca { #[command(subcommand)] action: CaCommands },\n}\n#[derive(Subcommand)]\nenum CaCommands { Init, Trust, Show, Export { path: PathBuf } }\n```\nCreate `src/cli/ca.rs`.",
-        "testStrategy": "cargo check passes, clap --help shows new subcommands correctly.",
+        "id": "87",
+        "title": "Improve expand_tilde() using dirs crate",
+        "description": "Replace custom tilde expansion with dirs::home_dir() for robust path handling (R1-3)",
+        "details": "Add dirs = '5.0' to Cargo.toml. Implement:\n```rust\nfn expand_tilde(path: &str) -> PathBuf {\n    if let Some(rest) = path.strip_prefix(\"~\") {\n        dirs::home_dir().map(|home| home.join(rest)).unwrap_or_else(|| PathBuf::from(path))\n    } else if path == \"~\" {\n        dirs::home_dir().unwrap_or_default()\n    } else {\n        PathBuf::from(path)\n    }\n}\n``` Update all path handling callsites.",
+        "testStrategy": "3개 단위 테스트: 1) ~/test → /home/user/test, 2) ~ → /home/user, 3) invalid ~nonexistent → 원본 반환. Cross-platform Windows/Linux/macOS 테스트.",
         "priority": "high",
-        "dependencies": [
-          "75",
-          "76"
-        ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-16T22:33:15.571Z"
-      },
-      {
-        "id": "78",
-        "title": "Implement agentshield ca init with confirmation and 10-year validity",
-        "description": "Create Root CA key/cert pair at ~/.agentshield/ca/ with overwrite confirmation (R2-1)",
-        "details": "```rust\npub fn cmd_ca_init() -> anyhow::Result<()> {\n    let ca_dir = dirs::home_dir().unwrap().join(\".agentshield/ca\");\n    std::fs::create_dir_all(&ca_dir)?;\n    let key_path = ca_dir.join(\"key.pem\");\n    let cert_path = ca_dir.join(\"cert.pem\");\n    if key_path.exists() {\n        println!(\"CA exists. Overwrite? [y/N]\"); // read confirmation\n    }\n    let key_pair = rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;\n    let mut params = rcgen::CertificateParams::new(vec![]);\n    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);\n    params.distinguished_name.push(rcgen::DnType::CommonName, \"AgentShield CA\");\n    params.distinguished_name.push(rcgen::DnType::OrganizationName, \"AgentShield\");\n    params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(3650);\n    let cert = params.self_signed(&key_pair)?;\n    std::fs::write(&key_path, key_pair.serialize_pem())?;\n    std::fs::write(&cert_path, cert.pem())?;\n    println!(\"CA generated: {} {}\", key_path.display(), cert_path.display());\n    Ok(())\n}\n```",
-        "testStrategy": "Create files with correct PEM content, 10-year validity, CA flag set, Subject correct. Test overwrite confirmation (y/N).",
-        "priority": "high",
-        "dependencies": [
-          "77"
-        ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-16T22:34:53.950Z"
-      },
-      {
-        "id": "79",
-        "title": "Implement agentshield ca trust, show, export commands",
-        "description": "Complete CA CLI: system trust installation, info display, export (R2-2,3,4)",
-        "details": "`ca trust`: Platform detection (macOS `security add-trusted-cert`, Linux `update-ca-certificates`), Node.js `NODE_EXTRA_CA_CERTS` guidance.\n`ca show`: Parse cert.pem, display Subject/Issuer/NotBefore/NotAfter/SHA256 fingerprint.\n`ca export <path>`: Copy cert.pem to path.\nUse `x509-parser` or `rcgen` for cert parsing.",
-        "testStrategy": "Mock platform commands, verify correct instructions printed, export creates identical file, show displays correct metadata.",
-        "priority": "high",
-        "dependencies": [
-          "78"
-        ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-16T22:36:42.163Z"
-      },
-      {
-        "id": "80",
-        "title": "Add proxy mode configuration and ConnectionContext mitm_enabled field",
-        "description": "TOML config parsing for `proxy.mode` (transparent/mitm) and `ca_dir`, extend ConnectionContext (R3 prep)",
-        "details": "TOML:\n```toml\n[proxy]\nlisten = \"127.0.0.1:18080\"\nmode = \"mitm\"  # or \"transparent\"\nca_dir = \"~/.agentshield/ca\"\n```\nAdd to `ConnectionContext`:\n```rust\npub mitm_enabled: bool,\npub cert_cache: Option<Arc<CertCache>>,\n```\nDefault: transparent mode. Validate CA dir exists in mitm mode.",
-        "testStrategy": "Config parsing: mitm=true/false, ca_dir expansion, error if mitm+no CA dir.",
-        "priority": "medium",
-        "dependencies": [
-          "79"
-        ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-17T08:49:26.629Z"
-      },
-      {
-        "id": "81",
-        "title": "Implement CertCache with dynamic domain certificate generation",
-        "description": "LRU cache (max 1000) of domain ServerConfigs signed by Root CA (R3-3)",
-        "details": "```rust\npub struct CertCache {\n    ca_key: rcgen::KeyPair,\n    ca_cert: rcgen::Certificate,\n    cache: Mutex<lru::LruCache<String, Arc<rustls::ServerConfig>>>,\n}\nimpl CertCache {\n    pub fn load(ca_dir: &Path) -> anyhow::Result<Self> { /* load ca_key, ca_cert */ }\n    pub fn get_or_create(&self, domain: &str) -> Arc<rustls::ServerConfig> {\n        // LRU check -> generate with SAN=domain, CN=domain -> sign with CA -> rustls::ServerConfig\n    }\n}\n``` Capacity: 1000.",
-        "testStrategy": "Load CA, generate valid domain certs, cache hit/miss, LRU eviction at 1001 entries, certs verifiable by rustls.",
-        "priority": "high",
-        "dependencies": [
-          "80"
-        ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-17T09:04:06.367Z"
-      },
-      {
-        "id": "82",
-        "title": "Implement MITM CONNECT handler with TLS decryption and DLP integration",
-        "description": "Replace TCP tunnel with TLS->DLP->TLS proxy for mitm mode (R3-2)",
-        "details": "In `handle_connect`:\n```rust\nif ctx.mitm_enabled && !system_allowlisted {\n    handle_connect_mitm(client, domain, ctx).await\n} else {\n    handle_connect_tunnel(...) // existing\n}\n```\n`handle_connect_mitm`:\n1. Write \"200 Connection Established\"\n2. TlsAcceptor from cert_cache.get_or_create(domain)\n3. Read decrypted HTTP request\n4. DLP scan request.body (block if critical)\n5. TLS connect to real server, forward request\n6. Forward response back through client TLS\nBuffer full request/response (no streaming v0.8).",
-        "testStrategy": "End-to-end: curl through proxy detects DLP patterns (block), clean requests pass through, transparent mode unchanged, system_allowlist bypasses MITM.",
-        "priority": "high",
-        "dependencies": [
-          "81"
-        ],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-17T09:07:59.838Z"
-      },
-      {
-        "id": "83",
-        "title": "Create multi-platform Dockerfile and GitHub Actions workflow",
-        "description": "Docker image <50MB with multi-stage build, auto-publish on tag (R4)",
-        "details": "Dockerfile:\n```dockerfile\nFROM rust:1.85-slim AS builder\nWORKDIR /build\nCOPY . .\nRUN cargo build --release\nFROM debian:bookworm-slim\nRUN apt-get update && apt-get install -y ca-certificates\nCOPY --from=builder /build/target/release/agentshield /usr/local/bin/\nEXPOSE 18080 18081\nENTRYPOINT [\"agentshield\"]\n```\n`.github/workflows/docker.yml`: tag push → buildx amd64/arm64 → ghcr.io push.",
-        "testStrategy": "docker build succeeds, image <50MB, runs with config, exposes correct ports.",
-        "priority": "medium",
         "dependencies": [],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-17T09:09:05.859Z"
+        "updatedAt": "2026-02-18T23:31:41.570Z"
       },
       {
-        "id": "84",
-        "title": "Add 28+ new tests for v0.8 features and update README",
-        "description": "Reach ≥280 tests: CA CLI (5), MITM (10), auth fixes (5), update docs (R5)",
-        "details": "Tests:\n- CA CLI full coverage\n- MITM mode switching, cert cache, DLP integration\n- Auth timing/masking\n- Transparent compatibility\nREADME: MITM setup, CA install, Docker compose example, config.toml v0.8.",
-        "testStrategy": "`cargo test` passes ≥280 tests, docs validate with curl examples.",
-        "priority": "medium",
+        "id": "88",
+        "title": "Add audit logging configuration and DB schema migration",
+        "description": "Implement opt-in audit logging with request_body and dlp_findings columns in SQLite (R3)",
+        "details": "1. Add LoggingConfig struct to src/config.rs with audit:bool, audit_max_body_size:usize=65536, audit_actions:Vec<String>. 2. In logging/mod.rs init_db(): check PRAGMA table_info(request_logs) for request_body column, if missing execute ALTER TABLE ADD COLUMN request_body TEXT; ADD COLUMN dlp_findings TEXT;. 3. Add audit_config:Option<LoggingConfig> to ConnectionContext.",
+        "testStrategy": "Test DB migration on fresh/legacy DBs. Verify audit=false → no columns used, audit=true → body 저장. Test truncation at 64KB.",
+        "priority": "high",
         "dependencies": [
-          "75",
-          "76",
-          "78",
-          "79",
-          "82",
-          "83"
+          "85",
+          "86",
+          "87"
         ],
         "status": "in-progress",
         "subtasks": [],
-        "updatedAt": "2026-02-17T09:09:13.135Z"
+        "updatedAt": "2026-02-18T23:31:45.882Z"
+      },
+      {
+        "id": "89",
+        "title": "Implement Claude Code integration CLI command",
+        "description": "Add agentshield integrate claude-code command to configure ~/.claude/settings.json (R2)",
+        "details": "In src/cli/integrate.rs: implement integrate_claude_code() as per PRD pseudocode. Update clap IntegrateTarget enum to include ClaudeCode. Create templates/claude-code-default.toml. Handle MITM mode NODE_EXTRA_CA_CERTS. Add integrate remove cleanup. Use dirs::home_dir() and expand_tilde().",
+        "testStrategy": "8개 테스트: 1) settings.json 생성→integrate→HTTPS_PROXY 확인, 2) MITM→NODE_EXTRA_CA_CERTS 추가, 3) remove→env 키 삭제, 4) 파일 미존재→안내 메시지, 5) 기존 env 보존, 6) 권한 에러 처리, 7) JSON 파싱 실패 graceful, 8) cross-platform path.",
+        "priority": "high",
+        "dependencies": [
+          "87"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "90",
+        "title": "Implement audit body capture in proxy handlers",
+        "description": "Capture and store request bodies in DB when audit enabled, with truncation and DLP findings (R3)",
+        "details": "In src/proxy/connect.rs: before log_to_db(), if should_audit(ctx, action): audit_body = truncate_body(&request_body, max_body_size). Update log_to_db_with_body(method, domain, path, action, reason, body, dlp_findings). CLI agentshield logs --show-body body 출력. Web /api/logs에 request_body, dlp_findings 추가.",
+        "testStrategy": "10개 테스트: audit on/off, truncation, action filter, MITM decrypted body, transparent HTTP only, DLP findings 저장, CLI --show-body, web API body 포함.",
+        "priority": "high",
+        "dependencies": [
+          "88"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "91",
+        "title": "Implement log filtering for CLI and SQLite indexes",
+        "description": "Add domain/action/since/until/search filters to agentshield logs and create DB indexes (R4)",
+        "details": "1. Add DB indexes: CREATE INDEX idx_request_logs_domain, idx_action, idx_timestamp. 2. Implement LogFilter struct and query_logs_filtered() with dynamic SQL + parameterized queries. 3. Update clap LogsArgs with --domain, --action, --since, --until, --search, --show-body. 4. Support body 검색 when audit enabled.",
+        "testStrategy": "10개 테스트: 각 필터 단독/복합, search body/domain/path, SQL injection 방지(? params), 빈 결과, limit 적용.",
+        "priority": "medium",
+        "dependencies": [
+          "90"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "92",
+        "title": "Implement config validate CLI command",
+        "description": "Add agentshield config validate with TOML parsing, env vars, policy rules, CA dir validation (R6)",
+        "details": "Implement cmd_config_validate(): 1) AppConfig::load_from_path(), 2) validate_rules() 도메인/이름 중복, 3) validate_listen_address(), 4) MITM→validate_ca_dir(), 5) DLP 패턴 검증. Exit 1 on errors, print ✓/✗/⚠ summary.",
+        "testStrategy": "8개 테스트: valid config exit 0, invalid TOML exit 1, missing env exit 1, duplicate rules warning, MITM no CA error, catch-all warning.",
+        "priority": "medium",
+        "dependencies": [
+          "87"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "93",
+        "title": "Implement dashboard UX improvements: themes and stats timeline",
+        "description": "Add dark/light theme toggle, /api/stats/timeline, canvas charts, log row coloring (R5)",
+        "details": "1. CSS variables for :root and [data-theme=dark]. 2. JS theme toggle with localStorage + prefers-color-scheme. 3. /api/stats/timeline?minutes=60 → bucketed JSON. 4. Canvas bar chart by minute with action colors. 5. Log row CSS: deny=red, ask=yellow 등. 6. Auto-scroll toggle.",
+        "testStrategy": "4개 테스트: /api/stats/timeline JSON, minutes param validation(1-1440), 빈 DB 빈 배열, theme toggle localStorage.",
+        "priority": "medium",
+        "dependencies": [
+          "91"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "94",
+        "title": "Comprehensive testing and documentation for v0.9",
+        "description": "Add ≥58 tests to reach 350+, update README, Cargo.toml version, create GitHub release (R7)",
+        "details": "1. Add remaining tests for all R1-R6 features. 2. Update README.md: Claude Code integration, audit logging, log filtering sections. 3. docs/README.ko.md 동기화. 4. Cargo.toml version = \"0.9.0\". 5. Ensure CI green (fmt+clippy+test). 6. GitHub Release v0.9.0 + release notes.",
+        "testStrategy": "cargo test 전체 350개 이상 확인. cargo fmt, clippy zero warnings. README 내용 정확성 검증.",
+        "priority": "medium",
+        "dependencies": [
+          "85",
+          "86",
+          "87",
+          "88",
+          "89",
+          "90",
+          "91",
+          "92",
+          "93"
+        ],
+        "status": "pending",
+        "subtasks": []
       }
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2026-02-17T09:09:13.135Z",
+      "lastModified": "2026-02-18T23:31:45.882Z",
       "taskCount": 10,
-      "completedCount": 9,
+      "completedCount": 3,
       "tags": [
         "master"
       ]

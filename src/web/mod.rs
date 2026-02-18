@@ -188,6 +188,10 @@ pub struct LogEntryResponse {
     pub path: String,
     pub action: String,
     pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dlp_findings: Option<String>,
 }
 
 /// Aggregated status response.
@@ -252,6 +256,8 @@ async fn get_logs(
                     path: l.path,
                     action: l.action,
                     reason: l.reason,
+                    request_body: l.request_body,
+                    dlp_findings: l.dlp_findings,
                 })
                 .collect();
             Json(entries).into_response()
@@ -427,6 +433,8 @@ mod tests {
                 path: "/api".to_string(),
                 action: "allow".to_string(),
                 reason: "test".to_string(),
+                request_body: None,
+                dlp_findings: None,
             },
         )
         .unwrap();
@@ -454,6 +462,8 @@ mod tests {
                     path: "/".to_string(),
                     action: "allow".to_string(),
                     reason: "test".to_string(),
+                    request_body: None,
+                    dlp_findings: None,
                 },
             )
             .unwrap();
@@ -478,6 +488,8 @@ mod tests {
                 path: "/".to_string(),
                 action: "allow".to_string(),
                 reason: "test".to_string(),
+                request_body: None,
+                dlp_findings: None,
             },
         )
         .unwrap();
@@ -491,6 +503,8 @@ mod tests {
                 path: "/".to_string(),
                 action: "deny".to_string(),
                 reason: "blocked".to_string(),
+                request_body: None,
+                dlp_findings: None,
             },
         )
         .unwrap();

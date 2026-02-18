@@ -77,6 +77,8 @@ mod tests {
             path: "/test".to_string(),
             action: "allow".to_string(),
             reason: "test".to_string(),
+            request_body: None,
+            dlp_findings: None,
         }
     }
 

@@ -186,6 +186,24 @@ fn default_web_listen() -> String {
     "127.0.0.1:18081".to_string()
 }
 
+/// Audit logging configuration (`[logging]` section).
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct LoggingConfig {
+    /// Enable audit logging (request body storage).
+    #[serde(default)]
+    pub audit: bool,
+    /// Maximum body size to store in bytes (default: 65536).
+    #[serde(default = "default_audit_max_body_size")]
+    pub audit_max_body_size: usize,
+    /// Action types to audit. Empty = all actions.
+    #[serde(default)]
+    pub audit_actions: Vec<String>,
+}
+
+fn default_audit_max_body_size() -> usize {
+    65536 // 64KB
+}
+
 /// Top-level application configuration deserialized from `agentshield.toml`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
@@ -205,6 +223,9 @@ pub struct AppConfig {
     /// Optional web dashboard configuration.
     #[serde(default)]
     pub web: Option<WebConfig>,
+    /// Optional audit logging configuration.
+    #[serde(default)]
+    pub logging: Option<LoggingConfig>,
 }
 
 impl AppConfig {

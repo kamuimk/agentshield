@@ -85,9 +85,14 @@ pub struct RequestLog {
     pub action: String,
     /// Human-readable reason for the decision.
     pub reason: String,
+    /// Optional request body (stored when audit logging is enabled).
+    pub request_body: Option<String>,
+    /// Optional DLP findings as JSON array (e.g., `["openai-api-key"]`).
+    pub dlp_findings: Option<String>,
 }
 
 /// Initialize the SQLite database and create the requests table if it doesn't exist.
+/// Also runs migrations to add audit columns if they are missing.
 pub fn init_db(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS requests (
@@ -100,16 +105,34 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             reason    TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests(timestamp);
-        CREATE INDEX IF NOT EXISTS idx_requests_domain ON requests(domain);",
+        CREATE INDEX IF NOT EXISTS idx_requests_domain ON requests(domain);
+        CREATE INDEX IF NOT EXISTS idx_requests_action ON requests(action);",
     )?;
+
+    // Migration: add audit columns if missing
+    let has_body_column = conn
+        .prepare("PRAGMA table_info(requests)")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .map(|rows| rows.flatten().any(|name| name == "request_body"))
+        })
+        .unwrap_or(false);
+
+    if !has_body_column {
+        conn.execute_batch(
+            "ALTER TABLE requests ADD COLUMN request_body TEXT;
+             ALTER TABLE requests ADD COLUMN dlp_findings TEXT;",
+        )?;
+    }
+
     Ok(())
 }
 
 /// Log a request to the database.
 pub fn log_request(conn: &Connection, log: &RequestLog) -> Result<i64> {
     conn.execute(
-        "INSERT INTO requests (timestamp, method, domain, path, action, reason)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO requests (timestamp, method, domain, path, action, reason, request_body, dlp_findings)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![
             log.timestamp,
             log.method,
@@ -117,6 +140,8 @@ pub fn log_request(conn: &Connection, log: &RequestLog) -> Result<i64> {
             log.path,
             log.action,
             log.reason,
+            log.request_body,
+            log.dlp_findings,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -125,7 +150,7 @@ pub fn log_request(conn: &Connection, log: &RequestLog) -> Result<i64> {
 /// Query the most recent N log entries.
 pub fn query_recent(conn: &Connection, limit: usize) -> Result<Vec<RequestLog>> {
     let mut stmt = conn.prepare(
-        "SELECT id, timestamp, method, domain, path, action, reason
+        "SELECT id, timestamp, method, domain, path, action, reason, request_body, dlp_findings
          FROM requests ORDER BY id DESC LIMIT ?1",
     )?;
 
@@ -138,6 +163,8 @@ pub fn query_recent(conn: &Connection, limit: usize) -> Result<Vec<RequestLog>> 
             path: row.get(4)?,
             action: row.get(5)?,
             reason: row.get(6)?,
+            request_body: row.get(7)?,
+            dlp_findings: row.get(8)?,
         })
     })?;
 
@@ -220,6 +247,8 @@ mod tests {
             path: "/test".to_string(),
             action: action.to_string(),
             reason: "test reason".to_string(),
+            request_body: None,
+            dlp_findings: None,
         }
     }
 
@@ -353,5 +382,66 @@ mod tests {
         let logs = query_recent(&conn2, 10).unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].domain, "test.com");
+    }
+
+    #[test]
+    fn audit_body_stored_when_provided() {
+        let conn = open_memory_db().unwrap();
+        let log = RequestLog {
+            id: None,
+            timestamp: "2026-02-19T00:00:00Z".to_string(),
+            method: "POST".to_string(),
+            domain: "api.test.com".to_string(),
+            path: "/v1".to_string(),
+            action: "deny".to_string(),
+            reason: "blocked".to_string(),
+            request_body: Some("{\"data\":\"secret\"}".to_string()),
+            dlp_findings: Some("[\"openai-api-key\"]".to_string()),
+        };
+        log_request(&conn, &log).unwrap();
+
+        let logs = query_recent(&conn, 1).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(
+            logs[0].request_body.as_deref(),
+            Some("{\"data\":\"secret\"}")
+        );
+        assert_eq!(
+            logs[0].dlp_findings.as_deref(),
+            Some("[\"openai-api-key\"]")
+        );
+    }
+
+    #[test]
+    fn audit_body_none_when_not_provided() {
+        let conn = open_memory_db().unwrap();
+        log_request(&conn, &sample_log("test.com", "GET", "allow")).unwrap();
+
+        let logs = query_recent(&conn, 1).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].request_body.is_none());
+        assert!(logs[0].dlp_findings.is_none());
+    }
+
+    #[test]
+    fn db_migration_adds_audit_columns() {
+        // Create a DB, verify audit columns work after init_db migration
+        let conn = open_memory_db().unwrap();
+        // Columns should exist after init_db
+        let log = RequestLog {
+            id: None,
+            timestamp: "2026-02-19T00:00:00Z".to_string(),
+            method: "POST".to_string(),
+            domain: "migration.test".to_string(),
+            path: "/".to_string(),
+            action: "allow".to_string(),
+            reason: "test".to_string(),
+            request_body: Some("body data".to_string()),
+            dlp_findings: None,
+        };
+        // Should not error — columns exist
+        log_request(&conn, &log).unwrap();
+        let logs = query_recent(&conn, 1).unwrap();
+        assert_eq!(logs[0].request_body.as_deref(), Some("body data"));
     }
 }

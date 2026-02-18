@@ -297,6 +297,8 @@ fn logging_full_lifecycle() {
                 path: "/test".to_string(),
                 action: if i % 3 == 0 { "deny" } else { "allow" }.to_string(),
                 reason: "test".to_string(),
+                request_body: None,
+                dlp_findings: None,
             },
         )
         .unwrap();
@@ -675,6 +677,8 @@ async fn web_api_status_endpoint() {
             path: "/".to_string(),
             action: "allow".to_string(),
             reason: "test".to_string(),
+            request_body: None,
+            dlp_findings: None,
         },
     )
     .unwrap();
