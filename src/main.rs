@@ -9,6 +9,7 @@ use std::sync::Arc;
 use agentshield::ask::AskBroadcaster;
 use agentshield::ask::telegram::TelegramResponder;
 use agentshield::ask::terminal::TerminalResponder;
+use agentshield::cli::ca;
 use agentshield::cli::integrate;
 use agentshield::cli::{CaAction, Cli, Commands, IntegrateTarget, PolicyAction};
 use agentshield::dlp::DlpScanner;
@@ -20,6 +21,7 @@ use agentshield::notification::telegram::TelegramNotifier;
 use agentshield::policy::config::AppConfig;
 use agentshield::policy::reload;
 use agentshield::proxy::ProxyServer;
+use agentshield::proxy::tls::CertCache;
 use agentshield::ratelimit::RateLimiter;
 use agentshield::web;
 use agentshield::web::ask::{AskState, PendingAsks, WebDashboardResponder};
@@ -187,6 +189,28 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
         if !system.allowlist.is_empty() {
             info!("System allowlist: {:?}", system.allowlist);
             server = server.with_system_allowlist(system.allowlist.clone());
+        }
+    }
+
+    // Initialize MITM mode if configured
+    if config.proxy.mode == "mitm" {
+        let ca_path = config
+            .proxy
+            .ca_dir
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(ca::ca_dir);
+        match CertCache::load(&ca_path) {
+            Ok(cache) => {
+                info!("MITM mode enabled (CA: {})", ca_path.display());
+                server = server.with_cert_cache(Arc::new(cache));
+            }
+            Err(e) => {
+                error!(
+                    "Failed to load CA for MITM: {}. Falling back to transparent mode.",
+                    e
+                );
+            }
         }
     }
 
