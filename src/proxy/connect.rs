@@ -690,26 +690,66 @@ async fn handle_connect_mitm(
         return Ok(());
     }
 
-    // If we found headers, read remaining body based on Content-Length
+    // If we found headers, read remaining body based on Content-Length or chunked encoding
     if let Some(hdr_end) = header_end {
         let body_start = hdr_end + 4; // after \r\n\r\n
         let header_str = String::from_utf8_lossy(&request_buf[..hdr_end]);
-        if let Some(content_length) = parse_content_length(&header_str) {
-            let body_so_far = request_buf.len() - body_start;
-            let remaining = content_length.saturating_sub(body_so_far);
-            // Cap at 10MB to prevent unbounded allocation
-            let remaining = remaining.min(10 * 1024 * 1024);
-            let mut left = remaining;
-            while left > 0 {
-                let to_read = left.min(tmp.len());
-                let n = match client_tls.read(&mut tmp[..to_read]).await {
-                    Ok(0) => break,
-                    Ok(n) => n,
-                    Err(_) => break,
-                };
-                request_buf.extend_from_slice(&tmp[..n]);
-                left -= n;
+        let expected_body = if let Some(cl) = parse_content_length(&header_str) {
+            Some(cl)
+        } else if is_chunked(&header_str) {
+            // For chunked encoding, read until we see "0\r\n\r\n" terminator
+            None
+        } else {
+            // No body expected
+            Some(0)
+        };
+
+        match expected_body {
+            Some(content_length) if content_length > 0 => {
+                let body_so_far = request_buf.len() - body_start;
+                let remaining = content_length.saturating_sub(body_so_far);
+                // Cap at 10MB to prevent unbounded allocation
+                let remaining = remaining.min(10 * 1024 * 1024);
+                let mut left = remaining;
+                while left > 0 {
+                    let to_read = left.min(tmp.len());
+                    let n = match client_tls.read(&mut tmp[..to_read]).await {
+                        Ok(0) => break,
+                        Ok(n) => n,
+                        Err(_) => break,
+                    };
+                    request_buf.extend_from_slice(&tmp[..n]);
+                    left -= n;
+                }
             }
+            None => {
+                // Chunked transfer encoding: read until "0\r\n\r\n" terminator or 10MB cap
+                let max_body = 10 * 1024 * 1024;
+                loop {
+                    if request_buf.len() > max_body + body_start {
+                        break;
+                    }
+                    // Check for chunked terminator "0\r\n\r\n" in body portion
+                    let body_portion = &request_buf[body_start..];
+                    if body_portion.windows(5).any(|w| w == b"0\r\n\r\n") {
+                        break;
+                    }
+                    let n = match client_tls.read(&mut tmp).await {
+                        Ok(0) => break,
+                        Ok(n) => n,
+                        Err(_) => break,
+                    };
+                    request_buf.extend_from_slice(&tmp[..n]);
+                }
+                // Decode chunked body and reconstruct request with Content-Length
+                let chunked_data = &request_buf[body_start..];
+                if let Ok(decoded) = decode_chunked_body(chunked_data, max_body) {
+                    // Replace chunked body with decoded body for DLP scanning
+                    request_buf.truncate(body_start);
+                    request_buf.extend_from_slice(&decoded);
+                }
+            }
+            _ => {} // No body
         }
     }
 
@@ -907,6 +947,62 @@ fn parse_path(uri: &str) -> String {
     } else {
         "/".to_string()
     }
+}
+
+/// Check if the request uses chunked transfer encoding.
+fn is_chunked(headers: &str) -> bool {
+    for line in headers.lines() {
+        if line.len() > 19 && line[..18].eq_ignore_ascii_case("transfer-encoding:") {
+            return line[18..].trim().eq_ignore_ascii_case("chunked");
+        }
+    }
+    false
+}
+
+/// Decode a chunked-encoded body from a byte slice.
+/// Returns an error if the decoded body exceeds `max_size`.
+fn decode_chunked_body(data: &[u8], max_size: usize) -> crate::error::Result<Vec<u8>> {
+    let mut result = Vec::new();
+    let mut pos = 0;
+
+    loop {
+        // Find end of chunk size line
+        let size_end = data[pos..]
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .map(|p| pos + p);
+
+        let size_end = match size_end {
+            Some(e) => e,
+            None => break,
+        };
+
+        // Parse chunk size (hex)
+        let size_str = std::str::from_utf8(&data[pos..size_end]).unwrap_or("0");
+        let chunk_size = usize::from_str_radix(size_str.trim(), 16).unwrap_or(0);
+
+        if chunk_size == 0 {
+            break;
+        }
+
+        if result.len() + chunk_size > max_size {
+            return Err(crate::error::AgentShieldError::Proxy(format!(
+                "Chunked body exceeds max size ({} bytes)",
+                max_size
+            )));
+        }
+
+        let chunk_start = size_end + 2; // skip \r\n after size
+        let chunk_end = chunk_start + chunk_size;
+        if chunk_end > data.len() {
+            break;
+        }
+
+        result.extend_from_slice(&data[chunk_start..chunk_end]);
+        pos = chunk_end + 2; // skip \r\n after chunk data
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -1153,5 +1249,45 @@ mod tests {
     fn parse_content_length_missing() {
         let headers = "GET / HTTP/1.1\r\nHost: example.com";
         assert_eq!(parse_content_length(headers), None);
+    }
+
+    #[test]
+    fn is_chunked_true() {
+        let headers = "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nHost: x";
+        assert!(is_chunked(headers));
+    }
+
+    #[test]
+    fn is_chunked_false() {
+        let headers = "POST / HTTP/1.1\r\nContent-Length: 42\r\nHost: x";
+        assert!(!is_chunked(headers));
+    }
+
+    #[test]
+    fn is_chunked_case_insensitive() {
+        let headers = "POST / HTTP/1.1\r\ntransfer-encoding: Chunked\r\nHost: x";
+        assert!(is_chunked(headers));
+    }
+
+    #[test]
+    fn decode_chunked_body_simple() {
+        // "5\r\nhello\r\n0\r\n\r\n"
+        let input = b"5\r\nhello\r\n0\r\n\r\n";
+        let result = decode_chunked_body(input, 1024).unwrap();
+        assert_eq!(result, b"hello");
+    }
+
+    #[test]
+    fn decode_chunked_body_multiple_chunks() {
+        let input = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let result = decode_chunked_body(input, 1024).unwrap();
+        assert_eq!(result, b"hello world");
+    }
+
+    #[test]
+    fn decode_chunked_body_exceeds_limit() {
+        let input = b"5\r\nhello\r\n0\r\n\r\n";
+        let result = decode_chunked_body(input, 3);
+        assert!(result.is_err());
     }
 }
