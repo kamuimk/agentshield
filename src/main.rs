@@ -65,8 +65,21 @@ async fn main() -> anyhow::Result<()> {
             export,
             format,
             show_body,
+            domain,
+            action,
+            since,
+            until,
+            search,
         } => {
-            cmd_logs(tail, export, &format, show_body)?;
+            let filter = logging::LogFilter {
+                domain,
+                action,
+                since,
+                until,
+                search,
+                limit: tail,
+            };
+            cmd_logs(&filter, export, &format, show_body)?;
         }
         Commands::Policy { action } => match action {
             PolicyAction::Show => cmd_policy_show(&cli.config)?,
@@ -358,7 +371,12 @@ fn cmd_status() -> anyhow::Result<()> {
 }
 
 /// View recent request logs or export all logs as JSON/CSV.
-fn cmd_logs(tail: usize, export: bool, format: &str, show_body: bool) -> anyhow::Result<()> {
+fn cmd_logs(
+    filter: &logging::LogFilter,
+    export: bool,
+    format: &str,
+    show_body: bool,
+) -> anyhow::Result<()> {
     let db = db_path();
     if !db.exists() {
         println!("No log database found. Run 'agentshield start' first.");
@@ -379,7 +397,18 @@ fn cmd_logs(tail: usize, export: bool, format: &str, show_body: bool) -> anyhow:
             }
         }
     } else {
-        let logs = logging::query_recent(&conn, tail)?;
+        let has_filter = filter.domain.is_some()
+            || filter.action.is_some()
+            || filter.since.is_some()
+            || filter.until.is_some()
+            || filter.search.is_some();
+
+        let logs = if has_filter {
+            logging::query_filtered(&conn, filter)?
+        } else {
+            logging::query_recent(&conn, filter.limit)?
+        };
+
         if logs.is_empty() {
             println!("No log entries found.");
         } else {

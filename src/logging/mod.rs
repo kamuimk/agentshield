@@ -175,6 +175,82 @@ pub fn query_recent(conn: &Connection, limit: usize) -> Result<Vec<RequestLog>> 
     Ok(logs)
 }
 
+/// Filter criteria for log queries.
+#[derive(Debug, Default)]
+pub struct LogFilter {
+    /// Filter by domain (exact match).
+    pub domain: Option<String>,
+    /// Filter by action (exact match).
+    pub action: Option<String>,
+    /// Filter by timestamp >= since (ISO 8601).
+    pub since: Option<String>,
+    /// Filter by timestamp <= until (ISO 8601).
+    pub until: Option<String>,
+    /// Full-text search across domain, path, reason, and request_body.
+    pub search: Option<String>,
+    /// Maximum number of results.
+    pub limit: usize,
+}
+
+/// Query logs with flexible filters. All filters are combined with AND.
+pub fn query_filtered(conn: &Connection, filter: &LogFilter) -> Result<Vec<RequestLog>> {
+    let mut sql = String::from(
+        "SELECT id, timestamp, method, domain, path, action, reason, request_body, dlp_findings FROM requests WHERE 1=1",
+    );
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if let Some(ref domain) = filter.domain {
+        sql.push_str(" AND domain = ?");
+        params.push(Box::new(domain.clone()));
+    }
+    if let Some(ref action) = filter.action {
+        sql.push_str(" AND action = ?");
+        params.push(Box::new(action.clone()));
+    }
+    if let Some(ref since) = filter.since {
+        sql.push_str(" AND timestamp >= ?");
+        params.push(Box::new(since.clone()));
+    }
+    if let Some(ref until) = filter.until {
+        sql.push_str(" AND timestamp <= ?");
+        params.push(Box::new(until.clone()));
+    }
+    if let Some(ref search) = filter.search {
+        sql.push_str(" AND (domain LIKE ? OR path LIKE ? OR reason LIKE ? OR request_body LIKE ?)");
+        let pattern = format!("%{}%", search);
+        params.push(Box::new(pattern.clone()));
+        params.push(Box::new(pattern.clone()));
+        params.push(Box::new(pattern.clone()));
+        params.push(Box::new(pattern));
+    }
+
+    sql.push_str(" ORDER BY id DESC LIMIT ?");
+    params.push(Box::new(filter.limit as i64));
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
+        Ok(RequestLog {
+            id: Some(row.get(0)?),
+            timestamp: row.get(1)?,
+            method: row.get(2)?,
+            domain: row.get(3)?,
+            path: row.get(4)?,
+            action: row.get(5)?,
+            reason: row.get(6)?,
+            request_body: row.get(7)?,
+            dlp_findings: row.get(8)?,
+        })
+    })?;
+
+    let mut logs = Vec::new();
+    for row in rows {
+        logs.push(row?);
+    }
+    Ok(logs)
+}
+
 /// Aggregated request statistics from the `requests` table.
 #[derive(Debug, Clone, Default)]
 pub struct RequestStats {
@@ -443,5 +519,224 @@ mod tests {
         log_request(&conn, &log).unwrap();
         let logs = query_recent(&conn, 1).unwrap();
         assert_eq!(logs[0].request_body.as_deref(), Some("body data"));
+    }
+
+    fn insert_test_logs(conn: &Connection) {
+        let logs = vec![
+            (
+                "2026-02-19T01:00:00Z",
+                "GET",
+                "api.openai.com",
+                "/v1/chat",
+                "allow",
+                "matched rule",
+            ),
+            (
+                "2026-02-19T02:00:00Z",
+                "POST",
+                "api.anthropic.com",
+                "/v1/messages",
+                "deny",
+                "blocked",
+            ),
+            (
+                "2026-02-19T03:00:00Z",
+                "GET",
+                "api.openai.com",
+                "/v1/models",
+                "allow",
+                "matched rule",
+            ),
+            (
+                "2026-02-19T04:00:00Z",
+                "POST",
+                "evil.com",
+                "/steal",
+                "deny",
+                "DLP: critical finding",
+            ),
+            (
+                "2026-02-19T05:00:00Z",
+                "GET",
+                "api.openai.com",
+                "/v1/files",
+                "rate-limited",
+                "limit exceeded",
+            ),
+        ];
+        for (ts, method, domain, path, action, reason) in logs {
+            let log = RequestLog {
+                id: None,
+                timestamp: ts.to_string(),
+                method: method.to_string(),
+                domain: domain.to_string(),
+                path: path.to_string(),
+                action: action.to_string(),
+                reason: reason.to_string(),
+                request_body: None,
+                dlp_findings: None,
+            };
+            log_request(conn, &log).unwrap();
+        }
+    }
+
+    #[test]
+    fn query_filtered_by_domain() {
+        let conn = open_memory_db().unwrap();
+        insert_test_logs(&conn);
+
+        let filter = LogFilter {
+            domain: Some("api.openai.com".to_string()),
+            limit: 50,
+            ..Default::default()
+        };
+        let logs = query_filtered(&conn, &filter).unwrap();
+        assert_eq!(logs.len(), 3);
+        for log in &logs {
+            assert_eq!(log.domain, "api.openai.com");
+        }
+    }
+
+    #[test]
+    fn query_filtered_by_action() {
+        let conn = open_memory_db().unwrap();
+        insert_test_logs(&conn);
+
+        let filter = LogFilter {
+            action: Some("deny".to_string()),
+            limit: 50,
+            ..Default::default()
+        };
+        let logs = query_filtered(&conn, &filter).unwrap();
+        assert_eq!(logs.len(), 2);
+        for log in &logs {
+            assert_eq!(log.action, "deny");
+        }
+    }
+
+    #[test]
+    fn query_filtered_by_since() {
+        let conn = open_memory_db().unwrap();
+        insert_test_logs(&conn);
+
+        let filter = LogFilter {
+            since: Some("2026-02-19T03:00:00Z".to_string()),
+            limit: 50,
+            ..Default::default()
+        };
+        let logs = query_filtered(&conn, &filter).unwrap();
+        assert_eq!(logs.len(), 3); // 03:00, 04:00, 05:00
+    }
+
+    #[test]
+    fn query_filtered_by_until() {
+        let conn = open_memory_db().unwrap();
+        insert_test_logs(&conn);
+
+        let filter = LogFilter {
+            until: Some("2026-02-19T02:00:00Z".to_string()),
+            limit: 50,
+            ..Default::default()
+        };
+        let logs = query_filtered(&conn, &filter).unwrap();
+        assert_eq!(logs.len(), 2); // 01:00, 02:00
+    }
+
+    #[test]
+    fn query_filtered_combined_domain_and_action() {
+        let conn = open_memory_db().unwrap();
+        insert_test_logs(&conn);
+
+        let filter = LogFilter {
+            domain: Some("api.openai.com".to_string()),
+            action: Some("allow".to_string()),
+            limit: 50,
+            ..Default::default()
+        };
+        let logs = query_filtered(&conn, &filter).unwrap();
+        assert_eq!(logs.len(), 2); // only allows from openai
+    }
+
+    #[test]
+    fn query_filtered_search_domain() {
+        let conn = open_memory_db().unwrap();
+        insert_test_logs(&conn);
+
+        let filter = LogFilter {
+            search: Some("anthropic".to_string()),
+            limit: 50,
+            ..Default::default()
+        };
+        let logs = query_filtered(&conn, &filter).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].domain, "api.anthropic.com");
+    }
+
+    #[test]
+    fn query_filtered_search_reason() {
+        let conn = open_memory_db().unwrap();
+        insert_test_logs(&conn);
+
+        let filter = LogFilter {
+            search: Some("DLP".to_string()),
+            limit: 50,
+            ..Default::default()
+        };
+        let logs = query_filtered(&conn, &filter).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].domain, "evil.com");
+    }
+
+    #[test]
+    fn query_filtered_empty_result() {
+        let conn = open_memory_db().unwrap();
+        insert_test_logs(&conn);
+
+        let filter = LogFilter {
+            domain: Some("nonexistent.com".to_string()),
+            limit: 50,
+            ..Default::default()
+        };
+        let logs = query_filtered(&conn, &filter).unwrap();
+        assert!(logs.is_empty());
+    }
+
+    #[test]
+    fn query_filtered_respects_limit() {
+        let conn = open_memory_db().unwrap();
+        insert_test_logs(&conn);
+
+        let filter = LogFilter {
+            limit: 2,
+            ..Default::default()
+        };
+        let logs = query_filtered(&conn, &filter).unwrap();
+        assert_eq!(logs.len(), 2);
+    }
+
+    #[test]
+    fn query_filtered_search_body() {
+        let conn = open_memory_db().unwrap();
+        let log = RequestLog {
+            id: None,
+            timestamp: "2026-02-19T06:00:00Z".to_string(),
+            method: "POST".to_string(),
+            domain: "api.test.com".to_string(),
+            path: "/v1".to_string(),
+            action: "allow".to_string(),
+            reason: "ok".to_string(),
+            request_body: Some("secret payload data".to_string()),
+            dlp_findings: None,
+        };
+        log_request(&conn, &log).unwrap();
+
+        let filter = LogFilter {
+            search: Some("secret payload".to_string()),
+            limit: 50,
+            ..Default::default()
+        };
+        let logs = query_filtered(&conn, &filter).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].domain, "api.test.com");
     }
 }

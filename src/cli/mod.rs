@@ -56,6 +56,21 @@ pub enum Commands {
         /// Show request body (audit data)
         #[arg(long)]
         show_body: bool,
+        /// Filter by domain
+        #[arg(long)]
+        domain: Option<String>,
+        /// Filter by action (allow, deny, system-allow, rate-limited)
+        #[arg(long)]
+        action: Option<String>,
+        /// Filter by start time (ISO 8601, e.g. 2026-02-19T00:00:00Z)
+        #[arg(long)]
+        since: Option<String>,
+        /// Filter by end time (ISO 8601)
+        #[arg(long)]
+        until: Option<String>,
+        /// Search across domain, path, reason, and body
+        #[arg(long)]
+        search: Option<String>,
     },
     /// Policy management
     Policy {
