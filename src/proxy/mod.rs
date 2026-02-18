@@ -133,6 +133,22 @@ impl ProxyServer {
         let local_addr = listener.local_addr()?;
         info!("AgentShield proxy listening on {}", local_addr);
 
+        // Build upstream TLS config once for MITM mode (reused across all connections)
+        let upstream_tls_config = if self.mitm_enabled {
+            let mut root_store = rustls::RootCertStore::empty();
+            root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| crate::error::AgentShieldError::Proxy(e.to_string()))?
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+            Some(Arc::new(config))
+        } else {
+            None
+        };
+
         let ctx = Arc::new(ConnectionContext {
             policy: self.policy.clone(),
             db: self.db.clone(),
@@ -144,6 +160,7 @@ impl ProxyServer {
             rate_limiter: self.rate_limiter.clone(),
             mitm_enabled: self.mitm_enabled,
             cert_cache: self.cert_cache.clone(),
+            upstream_tls_config,
         });
         tokio::spawn(async move {
             connect::accept_loop(listener, ctx).await;

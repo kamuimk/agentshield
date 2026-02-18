@@ -38,13 +38,25 @@ pub enum Action {
     Ask,
 }
 
+/// Proxy mode: transparent pass-through or MITM TLS interception.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyMode {
+    /// Forward traffic without decryption (default).
+    #[default]
+    Transparent,
+    /// Decrypt HTTPS traffic for DLP scanning using a local Root CA.
+    Mitm,
+}
+
 /// Proxy server configuration (`[proxy]` section).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProxyConfig {
     /// Address to listen on (e.g., `"127.0.0.1:18080"`).
     pub listen: String,
-    /// Proxy mode: `"transparent"` (default) or `"mitm"` (TLS interception).
-    pub mode: String,
+    /// Proxy mode: `transparent` (default) or `mitm` (TLS interception).
+    #[serde(default)]
+    pub mode: ProxyMode,
     /// Path to the CA directory for MITM mode (default: `~/.agentshield/ca`).
     /// Only used when `mode = "mitm"`.
     #[serde(default)]

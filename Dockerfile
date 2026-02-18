@@ -14,4 +14,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=builder /build/target/release/agentshield /usr/local/bin/
 EXPOSE 18080 18081
 ENTRYPOINT ["agentshield"]
-CMD ["start"]
+CMD ["start", "--config", "/etc/agentshield/agentshield.toml"]

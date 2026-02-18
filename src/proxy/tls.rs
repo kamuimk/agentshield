@@ -42,7 +42,12 @@ impl CertCache {
             .next()
             .ok_or_else(|| anyhow::anyhow!("No certificate found in cert.pem"))?;
 
-        // Reconstruct CA params and self-sign so we can use it as issuer
+        // NOTE: rcgen does not support loading a Certificate from PEM/DER directly.
+        // We reconstruct a CA Certificate by self-signing new params with the same key.
+        // The resulting `ca_cert` has a different serial/validity than the disk cert, but
+        // since `signed_by()` uses the CA's *key* (not serial) for signing, domain certs
+        // are valid. The original `ca_cert_der` from disk is included in the TLS chain
+        // so clients can verify against the installed Root CA.
         let mut ca_params = rcgen::CertificateParams::default();
         ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         ca_params
@@ -71,14 +76,21 @@ impl CertCache {
     /// Otherwise a new ECDSA P-256 key pair and certificate (with SAN=domain)
     /// are generated, signed by the Root CA, and cached.
     pub fn get_or_create(&self, domain: &str) -> anyhow::Result<Arc<rustls::ServerConfig>> {
-        {
-            let mut cache = self.cache.lock().unwrap();
-            if let Some(config) = cache.get(domain) {
-                return Ok(Arc::clone(config));
-            }
+        let mut cache = self.cache.lock().unwrap();
+        if let Some(config) = cache.get(domain) {
+            return Ok(Arc::clone(config));
         }
 
-        // Generate a new key pair for this domain
+        // Generate within the lock to prevent duplicate cert generation for the same domain.
+        // Cert generation is fast (~1-2ms) so holding the lock is acceptable.
+        let config = self.create_domain_config(domain)?;
+        cache.put(domain.to_string(), Arc::clone(&config));
+        Ok(config)
+    }
+
+    /// Generate a new ECDSA P-256 key pair and certificate for the given domain,
+    /// signed by the Root CA, and wrap it in a `rustls::ServerConfig`.
+    fn create_domain_config(&self, domain: &str) -> anyhow::Result<Arc<rustls::ServerConfig>> {
         let domain_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 
         let mut domain_params = rcgen::CertificateParams::new(vec![domain.to_string()])?;
@@ -87,12 +99,9 @@ impl CertCache {
             .distinguished_name
             .push(rcgen::DnType::CommonName, domain);
 
-        // Sign domain cert with CA
         let domain_cert = domain_params.signed_by(&domain_key, &self.ca_cert, &self.ca_key)?;
 
-        // Build rustls ServerConfig
         let domain_cert_der = rustls::pki_types::CertificateDer::from(domain_cert.der().to_vec());
-
         let private_key = rustls::pki_types::PrivateKeyDer::from(
             rustls::pki_types::PrivatePkcs8KeyDer::from(domain_key.serialize_der()),
         );
@@ -104,14 +113,7 @@ impl CertCache {
         .with_no_client_auth()
         .with_single_cert(vec![domain_cert_der, self.ca_cert_der.clone()], private_key)?;
 
-        let config = Arc::new(server_config);
-
-        {
-            let mut cache = self.cache.lock().unwrap();
-            cache.put(domain.to_string(), Arc::clone(&config));
-        }
-
-        Ok(config)
+        Ok(Arc::new(server_config))
     }
 
     /// Return the current number of cached entries.

@@ -55,6 +55,8 @@ pub struct ConnectionContext {
     pub mitm_enabled: bool,
     /// Certificate cache for MITM TLS interception.
     pub cert_cache: Option<Arc<CertCache>>,
+    /// Shared TLS client config for upstream MITM connections (cached once).
+    pub upstream_tls_config: Option<Arc<rustls::ClientConfig>>,
 }
 
 /// Main accept loop: accept incoming connections and handle them.
@@ -310,7 +312,7 @@ async fn handle_connect(
                                 },
                             );
                             let response = format!(
-                                "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: {}\r\n\r\n",
+                                "HTTP/1.1 429 Too Many Requests\r\nX-AgentShield-Reason: {}\r\n\r\n",
                                 reason
                             );
                             client.write_all(response.as_bytes()).await?;
@@ -507,7 +509,7 @@ async fn handle_http_request(
                                 },
                             );
                             let response = format!(
-                                "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: {}\r\n\r\n",
+                                "HTTP/1.1 429 Too Many Requests\r\nX-AgentShield-Reason: {}\r\n\r\n",
                                 reason
                             );
                             client.write_all(response.as_bytes()).await?;
@@ -657,17 +659,61 @@ async fn handle_connect_mitm(
         }
     };
 
-    // Step 3: Read decrypted HTTP request from client (buffered, max 64KB)
-    let mut request_buf = vec![0u8; 65536];
-    let n = match client_tls.read(&mut request_buf).await {
-        Ok(0) => return Ok(()),
-        Ok(n) => n,
-        Err(e) => {
-            warn!("Failed to read decrypted request for {}: {}", domain, e);
-            return Ok(());
+    // Step 3: Read full decrypted HTTP request from client
+    // First read headers, then read remaining body based on Content-Length
+    let mut request_buf = Vec::with_capacity(8192);
+    let mut tmp = [0u8; 8192];
+    let mut header_end = None;
+
+    // Read until we find the end of headers (\r\n\r\n)
+    loop {
+        let n = match client_tls.read(&mut tmp).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => {
+                warn!("Failed to read decrypted request for {}: {}", domain, e);
+                return Ok(());
+            }
+        };
+        request_buf.extend_from_slice(&tmp[..n]);
+        if let Some(pos) = find_header_end(&request_buf) {
+            header_end = Some(pos);
+            break;
         }
-    };
-    let raw_request = &request_buf[..n];
+        // Safety limit: 64KB for headers alone
+        if request_buf.len() > 65536 {
+            break;
+        }
+    }
+
+    if request_buf.is_empty() {
+        return Ok(());
+    }
+
+    // If we found headers, read remaining body based on Content-Length
+    if let Some(hdr_end) = header_end {
+        let body_start = hdr_end + 4; // after \r\n\r\n
+        let header_str = String::from_utf8_lossy(&request_buf[..hdr_end]);
+        if let Some(content_length) = parse_content_length(&header_str) {
+            let body_so_far = request_buf.len() - body_start;
+            let remaining = content_length.saturating_sub(body_so_far);
+            // Cap at 10MB to prevent unbounded allocation
+            let remaining = remaining.min(10 * 1024 * 1024);
+            let mut left = remaining;
+            while left > 0 {
+                let to_read = left.min(tmp.len());
+                let n = match client_tls.read(&mut tmp[..to_read]).await {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                request_buf.extend_from_slice(&tmp[..n]);
+                left -= n;
+            }
+        }
+    }
+
+    let raw_request = &request_buf[..];
 
     // Parse method and path from decrypted request
     let request_str = String::from_utf8_lossy(raw_request);
@@ -722,18 +768,13 @@ async fn handle_connect_mitm(
         }
     }
 
-    // Step 5: TLS-connect to the real upstream server
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let client_config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|e| crate::error::AgentShieldError::Proxy(e.to_string()))?
-    .with_root_certificates(root_store)
-    .with_no_client_auth();
-
-    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+    // Step 5: TLS-connect to the real upstream server (reuse cached ClientConfig)
+    let tls_config = ctx
+        .upstream_tls_config
+        .as_ref()
+        .expect("upstream_tls_config must be set in MITM mode")
+        .clone();
+    let connector = tokio_rustls::TlsConnector::from(tls_config);
 
     let remote_tcp = match TcpStream::connect(target).await {
         Ok(s) => s,
@@ -768,34 +809,15 @@ async fn handle_connect_mitm(
         return Ok(());
     }
 
-    // Step 7: Read upstream response and forward back to client
-    // Buffered mode: read up to 1MB response
-    let mut response_buf = vec![0u8; 1_048_576];
-    let mut total = 0;
-    loop {
-        match remote_tls.read(&mut response_buf[total..]).await {
-            Ok(0) => break,
-            Ok(n) => {
-                total += n;
-                if total >= response_buf.len() {
-                    break;
-                }
-            }
-            Err(e) => {
-                warn!("Error reading upstream response from {}: {}", target, e);
-                break;
-            }
-        }
-    }
+    // Step 7: Stream upstream response back to client
+    let (mut remote_read, _remote_write) = tokio::io::split(remote_tls);
+    let (mut client_read, mut client_write) = tokio::io::split(client_tls);
+    let _ = tokio::io::copy(&mut remote_read, &mut client_write).await;
 
-    if total > 0 {
-        let _ = client_tls.write_all(&response_buf[..total]).await;
-    }
+    // Drain any remaining client data (keep-alive cleanup)
+    let _ = client_read.read(&mut [0u8; 0]).await;
 
-    info!(
-        "MITM {} https://{}{} - {}B response",
-        method, domain, path, total
-    );
+    info!("MITM {} https://{}{}", method, domain, path);
     log_to_db(
         ctx,
         method,
@@ -805,9 +827,31 @@ async fn handle_connect_mitm(
         "MITM inspected (DLP clean)",
     );
 
-    let _ = client_tls.shutdown().await;
+    let _ = client_write.shutdown().await;
 
     Ok(())
+}
+
+/// Find the end of HTTP headers (\r\n\r\n) in a buffer.
+fn find_header_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+/// Parse Content-Length value from HTTP headers string.
+fn parse_content_length(headers: &str) -> Option<usize> {
+    for line in headers.lines() {
+        if let Some(val) = line
+            .strip_prefix("Content-Length:")
+            .or_else(|| line.strip_prefix("content-length:"))
+        {
+            return val.trim().parse().ok();
+        }
+        // Case-insensitive check
+        if line.len() > 16 && line[..15].eq_ignore_ascii_case("content-length:") {
+            return line[15..].trim().parse().ok();
+        }
+    }
+    None
 }
 
 /// Check if a domain is in the system allowlist (bypass policy evaluation).
@@ -980,6 +1024,7 @@ mod tests {
             rate_limiter: None,
             mitm_enabled: false,
             cert_cache: None,
+            upstream_tls_config: None,
         };
 
         log_to_db(&ctx, "GET", "example.com", "/api", "allow", "test rule");
@@ -1006,6 +1051,7 @@ mod tests {
             rate_limiter: None,
             mitm_enabled: false,
             cert_cache: None,
+            upstream_tls_config: None,
         };
 
         // Should not panic when event_tx is None
@@ -1027,6 +1073,7 @@ mod tests {
             rate_limiter: None,
             mitm_enabled: false,
             cert_cache: None,
+            upstream_tls_config: None,
         };
 
         // Should not panic even with no active receivers
@@ -1048,6 +1095,7 @@ mod tests {
             rate_limiter: None,
             mitm_enabled: false,
             cert_cache: None,
+            upstream_tls_config: None,
         };
 
         log_to_db(&ctx, "PUT", "multi.com", "/data", "allow", "multi test");
@@ -1075,5 +1123,35 @@ mod tests {
         // Debug trait works
         let debug_str = format!("{:?}", event);
         assert!(debug_str.contains("test.com"));
+    }
+
+    #[test]
+    fn find_header_end_found() {
+        let buf = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\nbody";
+        assert_eq!(find_header_end(buf), Some(33));
+    }
+
+    #[test]
+    fn find_header_end_not_found() {
+        let buf = b"GET / HTTP/1.1\r\nHost: example.com\r\n";
+        assert_eq!(find_header_end(buf), None);
+    }
+
+    #[test]
+    fn parse_content_length_standard() {
+        let headers = "POST / HTTP/1.1\r\nContent-Length: 42\r\nHost: x";
+        assert_eq!(parse_content_length(headers), Some(42));
+    }
+
+    #[test]
+    fn parse_content_length_lowercase() {
+        let headers = "POST / HTTP/1.1\r\ncontent-length: 100\r\nHost: x";
+        assert_eq!(parse_content_length(headers), Some(100));
+    }
+
+    #[test]
+    fn parse_content_length_missing() {
+        let headers = "GET / HTTP/1.1\r\nHost: example.com";
+        assert_eq!(parse_content_length(headers), None);
     }
 }

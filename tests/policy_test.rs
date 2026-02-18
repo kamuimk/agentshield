@@ -1,4 +1,4 @@
-use agentshield::policy::config::{Action, AppConfig, TelegramConfig, WebConfig};
+use agentshield::policy::config::{Action, AppConfig, ProxyMode, TelegramConfig, WebConfig};
 
 const MINIMAL_TOML: &str = r#"
 [proxy]
@@ -43,7 +43,7 @@ patterns = ["AWS_KEY", "GITHUB_TOKEN"]
 fn parse_minimal_config() {
     let config: AppConfig = toml::from_str(MINIMAL_TOML).unwrap();
     assert_eq!(config.proxy.listen, "127.0.0.1:18080");
-    assert_eq!(config.proxy.mode, "transparent");
+    assert_eq!(config.proxy.mode, ProxyMode::Transparent);
     assert_eq!(config.policy.default, Action::Deny);
     assert!(config.policy.rules.is_empty());
 }
@@ -532,7 +532,7 @@ action = "allow"
 #[test]
 fn parse_proxy_mode_transparent() {
     let config: AppConfig = toml::from_str(MINIMAL_TOML).unwrap();
-    assert_eq!(config.proxy.mode, "transparent");
+    assert_eq!(config.proxy.mode, ProxyMode::Transparent);
     assert!(config.proxy.ca_dir.is_none());
 }
 
@@ -548,7 +548,7 @@ ca_dir = "/custom/ca/path"
 default = "deny"
 "#;
     let config: AppConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.proxy.mode, "mitm");
+    assert_eq!(config.proxy.mode, ProxyMode::Mitm);
     assert_eq!(config.proxy.ca_dir, Some("/custom/ca/path".to_string()));
 }
 
@@ -592,4 +592,18 @@ fn telegram_config_debug_masks_bot_token() {
         "Debug output must not contain the actual bot_token"
     );
     assert!(debug_output.contains("***"));
+}
+
+#[test]
+fn proxy_mode_defaults_to_transparent_when_omitted() {
+    let toml_str = r#"
+[proxy]
+listen = "127.0.0.1:18080"
+
+[policy]
+default = "deny"
+"#;
+    let config: AppConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.proxy.mode, ProxyMode::Transparent);
+    assert!(config.proxy.ca_dir.is_none());
 }

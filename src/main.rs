@@ -193,12 +193,12 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
     }
 
     // Initialize MITM mode if configured
-    if config.proxy.mode == "mitm" {
+    if config.proxy.mode == agentshield::policy::config::ProxyMode::Mitm {
         let ca_path = config
             .proxy
             .ca_dir
             .as_deref()
-            .map(std::path::PathBuf::from)
+            .map(expand_tilde)
             .unwrap_or_else(ca::ca_dir);
         match CertCache::load(&ca_path) {
             Ok(cache) => {
@@ -483,6 +483,24 @@ fn cmd_dashboard(config_path: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Expand `~` at the start of a path to the user's home directory.
+fn expand_tilde(path: &str) -> std::path::PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs_path().parent().and_then(|p| p.parent()) {
+            return home.join(rest);
+        }
+        // Fallback: try HOME env var
+        if let Ok(home) = std::env::var("HOME") {
+            return std::path::PathBuf::from(home).join(rest);
+        }
+    } else if path == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return std::path::PathBuf::from(home);
+        }
+    }
+    std::path::PathBuf::from(path)
 }
 
 /// Open a URL in the platform's default browser.
