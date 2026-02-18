@@ -488,16 +488,12 @@ fn cmd_dashboard(config_path: &Path) -> anyhow::Result<()> {
 /// Expand `~` at the start of a path to the user's home directory.
 fn expand_tilde(path: &str) -> std::path::PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs_path().parent().and_then(|p| p.parent()) {
+        if let Some(home) = dirs::home_dir() {
             return home.join(rest);
         }
-        // Fallback: try HOME env var
-        if let Ok(home) = std::env::var("HOME") {
-            return std::path::PathBuf::from(home).join(rest);
-        }
     } else if path == "~" {
-        if let Ok(home) = std::env::var("HOME") {
-            return std::path::PathBuf::from(home);
+        if let Some(home) = dirs::home_dir() {
+            return home;
         }
     }
     std::path::PathBuf::from(path)
@@ -520,4 +516,29 @@ fn open_browser(url: &str) -> anyhow::Result<()> {
             .spawn()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_tilde_with_subpath() {
+        let result = expand_tilde("~/some/path");
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(result, home.join("some/path"));
+    }
+
+    #[test]
+    fn expand_tilde_alone() {
+        let result = expand_tilde("~");
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(result, home);
+    }
+
+    #[test]
+    fn expand_tilde_no_tilde() {
+        let result = expand_tilde("/absolute/path");
+        assert_eq!(result, std::path::PathBuf::from("/absolute/path"));
+    }
 }
