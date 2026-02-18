@@ -77,7 +77,11 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Integrate { target } => match target {
             IntegrateTarget::Openclaw => integrate::cmd_integrate_openclaw()?,
+            IntegrateTarget::ClaudeCode { ca_cert } => {
+                integrate::cmd_integrate_claude_code(ca_cert.as_deref())?
+            }
             IntegrateTarget::Remove => integrate::cmd_integrate_remove()?,
+            IntegrateTarget::RemoveClaudeCode => integrate::cmd_integrate_remove_claude_code()?,
         },
         Commands::Dashboard => {
             cmd_dashboard(&cli.config)?;

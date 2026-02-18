@@ -96,8 +96,16 @@ pub enum CaAction {
 pub enum IntegrateTarget {
     /// Integrate with OpenClaw (set Telegram proxy)
     Openclaw,
+    /// Integrate with Claude Code (set HTTP(S)_PROXY in ~/.claude/settings.json)
+    ClaudeCode {
+        /// Path to CA certificate file (for MITM mode)
+        #[arg(long)]
+        ca_cert: Option<String>,
+    },
     /// Remove integration from OpenClaw
     Remove,
+    /// Remove integration from Claude Code
+    RemoveClaudeCode,
 }
 
 /// Actions for the `policy` subcommand.

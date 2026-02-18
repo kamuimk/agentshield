@@ -1,11 +1,14 @@
-//! OpenClaw integration for AgentShield.
+//! Integration commands for AgentShield.
 //!
-//! Provides commands to route [OpenClaw](https://openclaw.ai)'s Telegram traffic
-//! through the AgentShield proxy by modifying `~/.openclaw/openclaw.json` and
-//! restarting the OpenClaw gateway daemon via `launchctl`.
+//! Provides commands to route traffic from external tools through the AgentShield proxy.
 //!
+//! ## OpenClaw
 //! - [`cmd_integrate_openclaw`] — set the Telegram proxy and restart the daemon
 //! - [`cmd_integrate_remove`] — remove the proxy setting and restart the daemon
+//!
+//! ## Claude Code
+//! - [`cmd_integrate_claude_code`] — set HTTP(S)\_PROXY in `~/.claude/settings.json`
+//! - [`cmd_integrate_remove_claude_code`] — remove proxy env vars from settings
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -18,6 +21,11 @@ const OPENCLAW_CONFIG_FILENAME: &str = "openclaw.json";
 const OPENCLAW_DIR: &str = ".openclaw";
 /// macOS launchd label for the OpenClaw gateway daemon.
 const LAUNCHD_LABEL: &str = "ai.openclaw.gateway";
+
+/// Claude Code settings directory name under `$HOME`.
+const CLAUDE_CODE_DIR: &str = ".claude";
+/// Claude Code settings filename.
+const CLAUDE_CODE_SETTINGS_FILENAME: &str = "settings.json";
 
 /// Detect the OpenClaw config file path (~/.openclaw/openclaw.json)
 pub fn detect_openclaw_config() -> Option<PathBuf> {
@@ -100,6 +108,149 @@ pub fn restart_openclaw_daemon() -> anyhow::Result<()> {
             String::from_utf8_lossy(&load.stderr)
         );
     }
+
+    Ok(())
+}
+
+/// Detect the Claude Code settings file path (~/.claude/settings.json)
+pub fn detect_claude_code_settings() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let settings_path = home
+        .join(CLAUDE_CODE_DIR)
+        .join(CLAUDE_CODE_SETTINGS_FILENAME);
+    if settings_path.exists() {
+        Some(settings_path)
+    } else {
+        // Return parent dir path for creation
+        None
+    }
+}
+
+/// Return the default Claude Code settings path (creates dir if needed).
+fn claude_code_settings_path() -> anyhow::Result<PathBuf> {
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let claude_dir = home.join(CLAUDE_CODE_DIR);
+    if !claude_dir.exists() {
+        std::fs::create_dir_all(&claude_dir)?;
+    }
+    Ok(claude_dir.join(CLAUDE_CODE_SETTINGS_FILENAME))
+}
+
+/// Set HTTP(S)_PROXY env vars in Claude Code settings.json
+pub fn set_claude_code_proxy(
+    settings_path: &std::path::Path,
+    proxy_url: &str,
+    ca_cert_path: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut json: serde_json::Value = if settings_path.exists() {
+        let content = std::fs::read_to_string(settings_path)?;
+        serde_json::from_str(&content)?
+    } else {
+        serde_json::json!({})
+    };
+
+    // Ensure "env" object exists
+    if json.get("env").is_none() {
+        json["env"] = serde_json::json!({});
+    }
+
+    let env = json.get_mut("env").unwrap();
+    env["HTTPS_PROXY"] = serde_json::Value::String(proxy_url.to_string());
+    env["HTTP_PROXY"] = serde_json::Value::String(proxy_url.to_string());
+
+    if let Some(cert_path) = ca_cert_path {
+        env["NODE_EXTRA_CA_CERTS"] = serde_json::Value::String(cert_path.to_string());
+    }
+
+    // Ensure parent directory exists
+    if let Some(parent) = settings_path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    let formatted = serde_json::to_string_pretty(&json)?;
+    std::fs::write(settings_path, formatted)?;
+    Ok(())
+}
+
+/// Remove HTTP(S)_PROXY env vars from Claude Code settings.json
+pub fn remove_claude_code_proxy(settings_path: &std::path::Path) -> anyhow::Result<()> {
+    if !settings_path.exists() {
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(settings_path)?;
+    let mut json: serde_json::Value = serde_json::from_str(&content)?;
+
+    if let Some(env) = json.get_mut("env").and_then(|e| e.as_object_mut()) {
+        env.remove("HTTPS_PROXY");
+        env.remove("HTTP_PROXY");
+        env.remove("NODE_EXTRA_CA_CERTS");
+
+        // If env is now empty, remove it entirely
+        if env.is_empty() {
+            if let Some(obj) = json.as_object_mut() {
+                obj.remove("env");
+            }
+        }
+    }
+
+    let formatted = serde_json::to_string_pretty(&json)?;
+    std::fs::write(settings_path, formatted)?;
+    Ok(())
+}
+
+/// Execute the `agentshield integrate claude-code` command
+pub fn cmd_integrate_claude_code(ca_cert_path: Option<&str>) -> anyhow::Result<()> {
+    println!("Integrating AgentShield with Claude Code...");
+
+    let settings_path = claude_code_settings_path()?;
+    let exists = settings_path.exists();
+
+    set_claude_code_proxy(&settings_path, DEFAULT_PROXY_URL, ca_cert_path)?;
+
+    if exists {
+        println!("  Updated: {}", settings_path.display());
+    } else {
+        println!("  Created: {}", settings_path.display());
+    }
+
+    println!("  Set HTTPS_PROXY: {}", DEFAULT_PROXY_URL);
+    println!("  Set HTTP_PROXY: {}", DEFAULT_PROXY_URL);
+    if let Some(cert) = ca_cert_path {
+        println!("  Set NODE_EXTRA_CA_CERTS: {}", cert);
+    }
+
+    println!();
+    println!("Integration complete!");
+    println!("  Claude Code traffic will now route through AgentShield.");
+    println!("  Run 'agentshield integrate remove-claude-code' to undo.");
+
+    Ok(())
+}
+
+/// Execute the `agentshield integrate remove-claude-code` command
+pub fn cmd_integrate_remove_claude_code() -> anyhow::Result<()> {
+    println!("Removing AgentShield integration from Claude Code...");
+
+    let settings_path = match detect_claude_code_settings() {
+        Some(p) => p,
+        None => {
+            println!("  Claude Code settings not found (~/.claude/settings.json)");
+            println!("  Nothing to remove.");
+            return Ok(());
+        }
+    };
+
+    println!("  Found settings: {}", settings_path.display());
+
+    remove_claude_code_proxy(&settings_path)?;
+    println!("  Removed proxy environment variables");
+
+    println!();
+    println!("Integration removed. Claude Code will connect directly.");
 
     Ok(())
 }
@@ -279,6 +430,140 @@ mod tests {
                 .to_string()
                 .contains("channels.telegram not found")
         );
+    }
+
+    // --- Claude Code integration tests ---
+
+    fn sample_claude_settings_json() -> &'static str {
+        r#"{
+  "env": {
+    "SOME_VAR": "existing_value"
+  },
+  "permissions": {
+    "allow": []
+  }
+}"#
+    }
+
+    fn sample_claude_settings_with_proxy() -> &'static str {
+        r#"{
+  "env": {
+    "SOME_VAR": "existing_value",
+    "HTTPS_PROXY": "http://127.0.0.1:18080",
+    "HTTP_PROXY": "http://127.0.0.1:18080"
+  },
+  "permissions": {
+    "allow": []
+  }
+}"#
+    }
+
+    #[test]
+    fn test_set_claude_code_proxy() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        fs::write(&settings_path, sample_claude_settings_json()).unwrap();
+
+        set_claude_code_proxy(&settings_path, "http://127.0.0.1:18080", None).unwrap();
+
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert_eq!(result["env"]["HTTPS_PROXY"], "http://127.0.0.1:18080");
+        assert_eq!(result["env"]["HTTP_PROXY"], "http://127.0.0.1:18080");
+        // Existing env vars preserved
+        assert_eq!(result["env"]["SOME_VAR"], "existing_value");
+        // Other top-level fields preserved
+        assert!(result["permissions"].is_object());
+    }
+
+    #[test]
+    fn test_set_claude_code_proxy_creates_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join(".claude").join("settings.json");
+
+        set_claude_code_proxy(&settings_path, "http://127.0.0.1:18080", None).unwrap();
+
+        assert!(settings_path.exists());
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert_eq!(result["env"]["HTTPS_PROXY"], "http://127.0.0.1:18080");
+        assert_eq!(result["env"]["HTTP_PROXY"], "http://127.0.0.1:18080");
+    }
+
+    #[test]
+    fn test_set_claude_code_proxy_with_ca_cert() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        fs::write(&settings_path, "{}").unwrap();
+
+        set_claude_code_proxy(
+            &settings_path,
+            "http://127.0.0.1:18080",
+            Some("/path/to/ca-cert.pem"),
+        )
+        .unwrap();
+
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert_eq!(result["env"]["HTTPS_PROXY"], "http://127.0.0.1:18080");
+        assert_eq!(result["env"]["NODE_EXTRA_CA_CERTS"], "/path/to/ca-cert.pem");
+    }
+
+    #[test]
+    fn test_remove_claude_code_proxy() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        fs::write(&settings_path, sample_claude_settings_with_proxy()).unwrap();
+
+        remove_claude_code_proxy(&settings_path).unwrap();
+
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        // Proxy vars removed
+        assert!(result["env"]["HTTPS_PROXY"].is_null());
+        assert!(result["env"]["HTTP_PROXY"].is_null());
+        // Existing env vars preserved
+        assert_eq!(result["env"]["SOME_VAR"], "existing_value");
+        // Other top-level fields preserved
+        assert!(result["permissions"].is_object());
+    }
+
+    #[test]
+    fn test_remove_claude_code_proxy_empty_env_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        // Only proxy vars in env — env should be removed entirely after cleanup
+        fs::write(
+            &settings_path,
+            r#"{"env":{"HTTPS_PROXY":"http://127.0.0.1:18080","HTTP_PROXY":"http://127.0.0.1:18080"}}"#,
+        )
+        .unwrap();
+
+        remove_claude_code_proxy(&settings_path).unwrap();
+
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert!(result.get("env").is_none());
+    }
+
+    #[test]
+    fn test_remove_claude_code_proxy_file_not_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+
+        // Should not fail even when file doesn't exist
+        let result = remove_claude_code_proxy(&settings_path);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_set_claude_code_proxy_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        fs::write(&settings_path, "not valid json!!!").unwrap();
+
+        let result = set_claude_code_proxy(&settings_path, "http://127.0.0.1:18080", None);
+        assert!(result.is_err());
     }
 
     #[test]
