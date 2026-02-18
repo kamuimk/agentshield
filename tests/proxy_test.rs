@@ -46,6 +46,26 @@ async fn send_raw_request(proxy_addr: SocketAddr, request: &str) -> String {
     String::from_utf8_lossy(&buf).to_string()
 }
 
+/// Start a mock HTTP server that always returns 200 OK.
+/// Returns the address it's listening on.
+async fn start_mock_http_server() -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        }
+    });
+    addr
+}
+
 fn deny_all_policy() -> PolicyConfig {
     PolicyConfig {
         default: Action::Deny,
@@ -59,6 +79,20 @@ fn allow_example_policy() -> PolicyConfig {
         rules: vec![Rule {
             name: "allow-example".to_string(),
             domains: vec!["example.com".to_string()],
+            methods: None,
+            action: Action::Allow,
+            note: None,
+            rate_limit: None,
+        }],
+    }
+}
+
+fn allow_localhost_policy() -> PolicyConfig {
+    PolicyConfig {
+        default: Action::Deny,
+        rules: vec![Rule {
+            name: "allow-localhost".to_string(),
+            domains: vec!["127.0.0.1".to_string()],
             methods: None,
             action: Action::Allow,
             note: None,
@@ -329,16 +363,23 @@ async fn dlp_does_not_scan_connect_tunnels() {
 #[tokio::test]
 async fn system_allowlist_bypasses_dlp_for_http() {
     // System allowlist domain should bypass BOTH policy AND DLP
+    // Use a local mock server instead of external example.com to avoid flakiness
+    let mock_addr = start_mock_http_server().await;
+    let mock_host_port = format!("127.0.0.1:{}", mock_addr.port());
+
     let scanner: Arc<dyn DlpScanner> = Arc::new(RegexScanner::new());
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_dlp(scanner)
-        .with_system_allowlist(vec!["example.com".to_string()]);
+        .with_system_allowlist(vec!["127.0.0.1".to_string()]);
     let addr = server.start().await.unwrap();
 
     // HTTP POST with API key in body to allowlisted domain → should pass (not 403)
-    let request = "POST http://example.com/api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 50\r\n\r\nAuthorization: Bearer sk-abcdefghijklmnopqrstuvwxyz1234567890";
-    let response = send_raw_request(addr, request).await;
+    let request = format!(
+        "POST http://{}/api HTTP/1.1\r\nHost: {}\r\nContent-Length: 50\r\n\r\nAuthorization: Bearer sk-abcdefghijklmnopqrstuvwxyz1234567890",
+        mock_host_port, mock_host_port
+    );
+    let response = send_raw_request(addr, &request).await;
     assert!(
         !response.contains("403"),
         "System allowlist domain should bypass DLP, got: {}",
@@ -349,16 +390,23 @@ async fn system_allowlist_bypasses_dlp_for_http() {
 #[tokio::test]
 async fn non_allowlist_domain_still_blocked_by_dlp() {
     // Non-allowlist domain should still be subject to DLP scanning
+    // Use a local mock server; DLP blocks before forwarding, but avoid DNS dependency
+    let mock_addr = start_mock_http_server().await;
+    let mock_host_port = format!("127.0.0.1:{}", mock_addr.port());
+
     let scanner: Arc<dyn DlpScanner> = Arc::new(RegexScanner::new());
     let server = ProxyServer::new("127.0.0.1:0".to_string())
-        .with_policy(Arc::new(RwLock::new(allow_example_policy())))
+        .with_policy(Arc::new(RwLock::new(allow_localhost_policy())))
         .with_dlp(scanner)
         .with_system_allowlist(vec!["api.telegram.org".to_string()]);
     let addr = server.start().await.unwrap();
 
     // HTTP POST with API key to NON-allowlisted domain → should be blocked by DLP
-    let request = "POST http://example.com/api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 50\r\n\r\nAuthorization: Bearer sk-abcdefghijklmnopqrstuvwxyz1234567890";
-    let response = send_raw_request(addr, request).await;
+    let request = format!(
+        "POST http://{}/api HTTP/1.1\r\nHost: {}\r\nContent-Length: 50\r\n\r\nAuthorization: Bearer sk-abcdefghijklmnopqrstuvwxyz1234567890",
+        mock_host_port, mock_host_port
+    );
+    let response = send_raw_request(addr, &request).await;
     assert!(
         response.contains("403"),
         "Non-allowlist domain should still be blocked by DLP, got: {}",
