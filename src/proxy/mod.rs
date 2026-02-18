@@ -20,7 +20,7 @@ use crate::dlp::DlpScanner;
 use crate::error::Result;
 use crate::logging::{DbPool, LogEvent};
 use crate::notification::Notifier;
-use crate::policy::config::PolicyConfig;
+use crate::policy::config::{LoggingConfig, PolicyConfig};
 use crate::proxy::tls::CertCache;
 use crate::ratelimit::RateLimiter;
 use connect::ConnectionContext;
@@ -47,6 +47,7 @@ pub struct ProxyServer {
     rate_limiter: Option<Arc<RateLimiter>>,
     cert_cache: Option<Arc<CertCache>>,
     mitm_enabled: bool,
+    logging_config: Option<LoggingConfig>,
 }
 
 impl ProxyServer {
@@ -64,6 +65,7 @@ impl ProxyServer {
             rate_limiter: None,
             cert_cache: None,
             mitm_enabled: false,
+            logging_config: None,
         }
     }
 
@@ -127,6 +129,12 @@ impl ProxyServer {
         self
     }
 
+    /// Attach audit logging configuration.
+    pub fn with_logging_config(mut self, config: LoggingConfig) -> Self {
+        self.logging_config = Some(config);
+        self
+    }
+
     /// Start the proxy server and return the actual bound address.
     pub async fn start(&self) -> Result<SocketAddr> {
         let listener = TcpListener::bind(&self.listen_addr).await?;
@@ -161,6 +169,7 @@ impl ProxyServer {
             mitm_enabled: self.mitm_enabled,
             cert_cache: self.cert_cache.clone(),
             upstream_tls_config,
+            logging_config: self.logging_config.clone(),
         });
         tokio::spawn(async move {
             connect::accept_loop(listener, ctx).await;

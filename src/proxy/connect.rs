@@ -22,7 +22,7 @@ use crate::dlp::{DlpScanner, Severity};
 use crate::logging;
 use crate::logging::{DbPool, LogEvent};
 use crate::notification::{NotificationEvent, Notifier};
-use crate::policy::config::{Action, PolicyConfig};
+use crate::policy::config::{Action, LoggingConfig, PolicyConfig};
 use crate::policy::evaluator::{self, RequestInfo, domain_matches};
 use crate::proxy::tls::CertCache;
 use crate::ratelimit::RateLimiter;
@@ -57,6 +57,8 @@ pub struct ConnectionContext {
     pub cert_cache: Option<Arc<CertCache>>,
     /// Shared TLS client config for upstream MITM connections (cached once).
     pub upstream_tls_config: Option<Arc<rustls::ClientConfig>>,
+    /// Audit logging configuration.
+    pub logging_config: Option<LoggingConfig>,
 }
 
 /// Main accept loop: accept incoming connections and handle them.
@@ -138,6 +140,70 @@ fn log_to_db_with_audit(
             action: action.to_string(),
             reason: reason.to_string(),
         });
+    }
+}
+
+/// Check whether the given action should be audit-logged based on LoggingConfig.
+fn should_audit(config: Option<&LoggingConfig>, action: &str) -> bool {
+    let Some(cfg) = config else { return false };
+    if !cfg.audit {
+        return false;
+    }
+    // Empty audit_actions = audit all actions
+    if cfg.audit_actions.is_empty() {
+        return true;
+    }
+    cfg.audit_actions.iter().any(|a| a == action)
+}
+
+/// Format DLP findings as a JSON string for storage.
+fn format_dlp_findings(findings: &[crate::dlp::DlpFinding]) -> String {
+    let entries: Vec<String> = findings
+        .iter()
+        .map(|f| {
+            format!(
+                r#"{{"pattern":"{}","severity":"{:?}","matched":"{}"}}"#,
+                f.pattern_name, f.severity, f.matched_text
+            )
+        })
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
+/// Log with optional audit body capture. Checks should_audit and truncates body.
+#[allow(clippy::too_many_arguments)]
+fn log_to_db_audited(
+    ctx: &ConnectionContext,
+    method: &str,
+    domain: &str,
+    path: &str,
+    action: &str,
+    reason: &str,
+    body: Option<&[u8]>,
+    dlp_findings: Option<&str>,
+) {
+    if should_audit(ctx.logging_config.as_ref(), action) {
+        let max_size = ctx
+            .logging_config
+            .as_ref()
+            .map(|c| c.audit_max_body_size)
+            .unwrap_or(65536);
+        let truncated_body = body.and_then(|b| {
+            let slice = &b[..b.len().min(max_size)];
+            String::from_utf8(slice.to_vec()).ok()
+        });
+        log_to_db_with_audit(
+            ctx,
+            method,
+            domain,
+            path,
+            action,
+            reason,
+            truncated_body.as_deref(),
+            dlp_findings,
+        );
+    } else {
+        log_to_db(ctx, method, domain, path, action, reason);
     }
 }
 
@@ -410,10 +476,22 @@ async fn handle_http_request(
     let (host, port) = parse_host_port(uri)?;
     let path = parse_path(uri);
 
+    // Extract body early for audit logging
+    let request_body = extract_body(raw_request);
+
     // Validate domain to prevent header injection
     if !validate_domain(&host) {
         warn!("Invalid domain in HTTP request: {}", host);
-        log_to_db(ctx, method, &host, &path, "deny", "invalid domain");
+        log_to_db_audited(
+            ctx,
+            method,
+            &host,
+            &path,
+            "deny",
+            "invalid domain",
+            None,
+            None,
+        );
         let response = "HTTP/1.1 400 Bad Request\r\nX-AgentShield-Reason: invalid domain\r\n\r\n";
         client.write_all(response.as_bytes()).await?;
         return Ok(());
@@ -431,13 +509,15 @@ async fn handle_http_request(
             "SYSTEM-ALLOW {} {} (allowlist, policy+dlp bypass)",
             method, uri
         );
-        log_to_db(
+        log_to_db_audited(
             ctx,
             method,
             &host,
             &path,
             "system-allow",
             "system allowlist (policy+dlp bypass)",
+            request_body,
+            None,
         );
     }
     // Policy evaluation for HTTP
@@ -454,7 +534,16 @@ async fn handle_http_request(
         match result.action {
             Action::Deny => {
                 warn!("BLOCKED {} {} - {}", method, uri, result.reason);
-                log_to_db(ctx, method, &host, &path, "deny", &result.reason);
+                log_to_db_audited(
+                    ctx,
+                    method,
+                    &host,
+                    &path,
+                    "deny",
+                    &result.reason,
+                    request_body,
+                    None,
+                );
                 notify_event(
                     ctx,
                     NotificationEvent::RequestDenied {
@@ -489,9 +578,27 @@ async fn handle_http_request(
                 });
                 let allowed = ask_and_wait(ctx, &host, method, &path, body_str).await;
                 if allowed {
-                    log_to_db(ctx, method, &host, &path, "allow", "approved via ASK");
+                    log_to_db_audited(
+                        ctx,
+                        method,
+                        &host,
+                        &path,
+                        "allow",
+                        "approved via ASK",
+                        request_body,
+                        None,
+                    );
                 } else {
-                    log_to_db(ctx, method, &host, &path, "deny", "denied via ASK");
+                    log_to_db_audited(
+                        ctx,
+                        method,
+                        &host,
+                        &path,
+                        "deny",
+                        "denied via ASK",
+                        request_body,
+                        None,
+                    );
                     let response = format!(
                         "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: {}\r\n\r\n",
                         "denied via ASK prompt"
@@ -514,7 +621,16 @@ async fn handle_http_request(
                                 rl_config.max_requests, rl_config.window_secs, host
                             );
                             warn!("RATE-LIMITED {} {} - {}", method, uri, reason);
-                            log_to_db(ctx, method, &host, &path, "rate-limited", &reason);
+                            log_to_db_audited(
+                                ctx,
+                                method,
+                                &host,
+                                &path,
+                                "rate-limited",
+                                &reason,
+                                request_body,
+                                None,
+                            );
                             notify_event(
                                 ctx,
                                 NotificationEvent::RateLimited {
@@ -534,7 +650,16 @@ async fn handle_http_request(
                     }
                 }
                 info!("ALLOWED {} {} - {}", method, uri, result.reason);
-                log_to_db(ctx, method, &host, &path, "allow", &result.reason);
+                log_to_db_audited(
+                    ctx,
+                    method,
+                    &host,
+                    &path,
+                    "allow",
+                    &result.reason,
+                    request_body,
+                    None,
+                );
             }
         }
     }
@@ -557,7 +682,17 @@ async fn handle_http_request(
                             f.matched_text
                         );
                     }
-                    log_to_db(ctx, method, &host, &path, "deny", "DLP: critical finding");
+                    let dlp_str = format_dlp_findings(&findings);
+                    log_to_db_audited(
+                        ctx,
+                        method,
+                        &host,
+                        &path,
+                        "deny",
+                        "DLP: critical finding",
+                        request_body,
+                        Some(&dlp_str),
+                    );
                     // Notify about first critical finding
                     if let Some(f) = findings.iter().find(|f| f.severity == Severity::Critical) {
                         notify_event(
@@ -778,9 +913,12 @@ async fn handle_connect_mitm(
     let method = parts.first().copied().unwrap_or("UNKNOWN");
     let path = parts.get(1).copied().unwrap_or("/");
 
+    // Extract body for audit logging
+    let mitm_body = extract_body(raw_request);
+
     // Step 4: DLP scan
     if let Some(ref scanner) = ctx.dlp_scanner {
-        if let Some(body) = extract_body(raw_request) {
+        if let Some(body) = mitm_body {
             let findings = scanner.scan(body);
             let has_critical = findings.iter().any(|f| f.severity == Severity::Critical);
             if has_critical {
@@ -790,13 +928,16 @@ async fn handle_connect_mitm(
                         f.severity, method, domain, path, f.pattern_name, f.matched_text
                     );
                 }
-                log_to_db(
+                let dlp_str = format_dlp_findings(&findings);
+                log_to_db_audited(
                     ctx,
                     method,
                     domain,
                     path,
                     "deny",
                     "DLP: critical finding (MITM)",
+                    mitm_body,
+                    Some(&dlp_str),
                 );
                 if let Some(f) = findings.iter().find(|f| f.severity == Severity::Critical) {
                     notify_event(
@@ -874,13 +1015,15 @@ async fn handle_connect_mitm(
     let _ = client_read.read(&mut [0u8; 0]).await;
 
     info!("MITM {} https://{}{}", method, domain, path);
-    log_to_db(
+    log_to_db_audited(
         ctx,
         method,
         domain,
         path,
         "allow",
         "MITM inspected (DLP clean)",
+        mitm_body,
+        None,
     );
 
     let _ = client_write.shutdown().await;
@@ -1137,6 +1280,7 @@ mod tests {
             mitm_enabled: false,
             cert_cache: None,
             upstream_tls_config: None,
+            logging_config: None,
         };
 
         log_to_db(&ctx, "GET", "example.com", "/api", "allow", "test rule");
@@ -1164,6 +1308,7 @@ mod tests {
             mitm_enabled: false,
             cert_cache: None,
             upstream_tls_config: None,
+            logging_config: None,
         };
 
         // Should not panic when event_tx is None
@@ -1186,6 +1331,7 @@ mod tests {
             mitm_enabled: false,
             cert_cache: None,
             upstream_tls_config: None,
+            logging_config: None,
         };
 
         // Should not panic even with no active receivers
@@ -1208,6 +1354,7 @@ mod tests {
             mitm_enabled: false,
             cert_cache: None,
             upstream_tls_config: None,
+            logging_config: None,
         };
 
         log_to_db(&ctx, "PUT", "multi.com", "/data", "allow", "multi test");
@@ -1298,6 +1445,223 @@ mod tests {
         let input = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
         let result = decode_chunked_body(input, 1024).unwrap();
         assert_eq!(result, b"hello world");
+    }
+
+    #[test]
+    fn should_audit_disabled_by_default() {
+        assert!(!should_audit(None, "allow"));
+    }
+
+    #[test]
+    fn should_audit_disabled_when_false() {
+        let config = LoggingConfig {
+            audit: false,
+            ..Default::default()
+        };
+        assert!(!should_audit(Some(&config), "allow"));
+    }
+
+    #[test]
+    fn should_audit_enabled_all_actions() {
+        let config = LoggingConfig {
+            audit: true,
+            audit_max_body_size: 65536,
+            audit_actions: vec![],
+        };
+        assert!(should_audit(Some(&config), "allow"));
+        assert!(should_audit(Some(&config), "deny"));
+        assert!(should_audit(Some(&config), "system-allow"));
+    }
+
+    #[test]
+    fn should_audit_filtered_actions() {
+        let config = LoggingConfig {
+            audit: true,
+            audit_max_body_size: 65536,
+            audit_actions: vec!["deny".to_string(), "allow".to_string()],
+        };
+        assert!(should_audit(Some(&config), "deny"));
+        assert!(should_audit(Some(&config), "allow"));
+        assert!(!should_audit(Some(&config), "system-allow"));
+        assert!(!should_audit(Some(&config), "rate-limited"));
+    }
+
+    #[test]
+    fn format_dlp_findings_empty() {
+        let findings: Vec<crate::dlp::DlpFinding> = vec![];
+        assert_eq!(format_dlp_findings(&findings), "[]");
+    }
+
+    #[test]
+    fn format_dlp_findings_single() {
+        let findings = vec![crate::dlp::DlpFinding {
+            pattern_name: "test-pattern".to_string(),
+            severity: crate::dlp::Severity::Critical,
+            matched_text: "sk-secret".to_string(),
+        }];
+        let result = format_dlp_findings(&findings);
+        assert!(result.contains("test-pattern"));
+        assert!(result.contains("Critical"));
+        assert!(result.contains("sk-secret"));
+    }
+
+    #[test]
+    fn log_to_db_audited_stores_body_when_audit_enabled() {
+        let pool = crate::logging::open_memory_pool().unwrap();
+        let config = LoggingConfig {
+            audit: true,
+            audit_max_body_size: 65536,
+            audit_actions: vec![],
+        };
+        let ctx = ConnectionContext {
+            policy: None,
+            db: Some(pool.clone()),
+            ask_broadcaster: None,
+            dlp_scanner: None,
+            system_allowlist: None,
+            notifier: None,
+            event_tx: None,
+            rate_limiter: None,
+            mitm_enabled: false,
+            cert_cache: None,
+            upstream_tls_config: None,
+            logging_config: Some(config),
+        };
+
+        log_to_db_audited(
+            &ctx,
+            "POST",
+            "api.example.com",
+            "/v1/chat",
+            "allow",
+            "test rule",
+            Some(b"hello world"),
+            None,
+        );
+
+        let conn = pool.get().unwrap();
+        let logs = crate::logging::query_recent(&conn, 1).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].request_body.as_deref(), Some("hello world"));
+        assert!(logs[0].dlp_findings.is_none());
+    }
+
+    #[test]
+    fn log_to_db_audited_skips_body_when_audit_disabled() {
+        let pool = crate::logging::open_memory_pool().unwrap();
+        let ctx = ConnectionContext {
+            policy: None,
+            db: Some(pool.clone()),
+            ask_broadcaster: None,
+            dlp_scanner: None,
+            system_allowlist: None,
+            notifier: None,
+            event_tx: None,
+            rate_limiter: None,
+            mitm_enabled: false,
+            cert_cache: None,
+            upstream_tls_config: None,
+            logging_config: None,
+        };
+
+        log_to_db_audited(
+            &ctx,
+            "POST",
+            "api.example.com",
+            "/v1/chat",
+            "allow",
+            "test rule",
+            Some(b"hello world"),
+            None,
+        );
+
+        let conn = pool.get().unwrap();
+        let logs = crate::logging::query_recent(&conn, 1).unwrap();
+        assert_eq!(logs.len(), 1);
+        // Body should NOT be stored when audit is disabled
+        assert!(logs[0].request_body.is_none());
+    }
+
+    #[test]
+    fn log_to_db_audited_truncates_body() {
+        let pool = crate::logging::open_memory_pool().unwrap();
+        let config = LoggingConfig {
+            audit: true,
+            audit_max_body_size: 10, // Only 10 bytes
+            audit_actions: vec![],
+        };
+        let ctx = ConnectionContext {
+            policy: None,
+            db: Some(pool.clone()),
+            ask_broadcaster: None,
+            dlp_scanner: None,
+            system_allowlist: None,
+            notifier: None,
+            event_tx: None,
+            rate_limiter: None,
+            mitm_enabled: false,
+            cert_cache: None,
+            upstream_tls_config: None,
+            logging_config: Some(config),
+        };
+
+        log_to_db_audited(
+            &ctx,
+            "POST",
+            "api.example.com",
+            "/v1/chat",
+            "allow",
+            "test",
+            Some(b"this is a very long body that should be truncated"),
+            None,
+        );
+
+        let conn = pool.get().unwrap();
+        let logs = crate::logging::query_recent(&conn, 1).unwrap();
+        assert_eq!(logs.len(), 1);
+        let body = logs[0].request_body.as_deref().unwrap();
+        assert_eq!(body.len(), 10);
+        assert_eq!(body, "this is a ");
+    }
+
+    #[test]
+    fn log_to_db_audited_stores_dlp_findings() {
+        let pool = crate::logging::open_memory_pool().unwrap();
+        let config = LoggingConfig {
+            audit: true,
+            audit_max_body_size: 65536,
+            audit_actions: vec![],
+        };
+        let ctx = ConnectionContext {
+            policy: None,
+            db: Some(pool.clone()),
+            ask_broadcaster: None,
+            dlp_scanner: None,
+            system_allowlist: None,
+            notifier: None,
+            event_tx: None,
+            rate_limiter: None,
+            mitm_enabled: false,
+            cert_cache: None,
+            upstream_tls_config: None,
+            logging_config: Some(config),
+        };
+
+        log_to_db_audited(
+            &ctx,
+            "POST",
+            "api.example.com",
+            "/v1/chat",
+            "deny",
+            "DLP: critical",
+            Some(b"sk-secret123"),
+            Some(r#"[{"pattern":"openai","severity":"Critical","matched":"sk-secret123"}]"#),
+        );
+
+        let conn = pool.get().unwrap();
+        let logs = crate::logging::query_recent(&conn, 1).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].dlp_findings.as_deref().unwrap().contains("openai"));
     }
 
     #[test]

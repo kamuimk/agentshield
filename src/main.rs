@@ -64,8 +64,9 @@ async fn main() -> anyhow::Result<()> {
             tail,
             export,
             format,
+            show_body,
         } => {
-            cmd_logs(tail, export, &format)?;
+            cmd_logs(tail, export, &format, show_body)?;
         }
         Commands::Policy { action } => match action {
             PolicyAction::Show => cmd_policy_show(&cli.config)?,
@@ -230,6 +231,17 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
         }
     }
 
+    // Apply audit logging config if configured
+    if let Some(ref logging_config) = config.logging {
+        if logging_config.audit {
+            info!(
+                "Audit logging enabled (max_body_size: {} bytes)",
+                logging_config.audit_max_body_size
+            );
+            server = server.with_logging_config(logging_config.clone());
+        }
+    }
+
     // Initialize notification if configured
     if let Some(ref notif_config) = config.notification {
         if notif_config.enabled {
@@ -346,7 +358,7 @@ fn cmd_status() -> anyhow::Result<()> {
 }
 
 /// View recent request logs or export all logs as JSON/CSV.
-fn cmd_logs(tail: usize, export: bool, format: &str) -> anyhow::Result<()> {
+fn cmd_logs(tail: usize, export: bool, format: &str, show_body: bool) -> anyhow::Result<()> {
     let db = db_path();
     if !db.exists() {
         println!("No log database found. Run 'agentshield start' first.");
@@ -381,6 +393,14 @@ fn cmd_logs(tail: usize, export: bool, format: &str) -> anyhow::Result<()> {
                     "{:<20} {:<8} {:<30} {:<30} {:<8} {}",
                     log.timestamp, log.method, log.domain, log.path, log.action, log.reason
                 );
+                if show_body {
+                    if let Some(ref body) = log.request_body {
+                        println!("  Body: {}", body);
+                    }
+                    if let Some(ref findings) = log.dlp_findings {
+                        println!("  DLP: {}", findings);
+                    }
+                }
             }
         }
     }

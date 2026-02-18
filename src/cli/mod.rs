@@ -53,6 +53,9 @@ pub enum Commands {
         /// Export format (json or csv)
         #[arg(long, default_value = "json")]
         format: String,
+        /// Show request body (audit data)
+        #[arg(long)]
+        show_body: bool,
     },
     /// Policy management
     Policy {
