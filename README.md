@@ -6,6 +6,8 @@
 [![CI](https://github.com/kamuimk/agentshield/actions/workflows/ci.yml/badge.svg)](https://github.com/kamuimk/agentshield/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/kamuimk/agentshield/graph/badge.svg)](https://codecov.io/gh/kamuimk/agentshield)
 
+**[한국어 문서 (Korean)](docs/README.ko.md)**
+
 AgentShield is a transparent egress firewall for AI agents (OpenClaw, Claude Code, etc.). It intercepts all outbound HTTP/HTTPS traffic and enforces TOML-based policy rules — blocking unauthorized requests before they leave your machine. In MITM mode, it can decrypt HTTPS connections to perform DLP scanning on encrypted payloads.
 
 ## Architecture
@@ -436,7 +438,7 @@ AgentShield complements tools like [PipeLock](https://github.com/nichochar/pipel
 - **MSRV:** Rust 1.85 (edition 2024)
 
 ```bash
-cargo test --all     # Run all tests (284 tests)
+cargo test --all     # Run all tests (292 tests)
 cargo clippy         # Lint
 cargo fmt            # Format
 ```
