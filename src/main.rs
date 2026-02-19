@@ -127,6 +127,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Wrap(args) => {
             cmd_wrap(&cli.config, args).await?;
         }
+        Commands::Quickstart => {
+            cmd_quickstart(&cli.config)?;
+        }
     }
 
     Ok(())
@@ -710,6 +713,36 @@ fn cmd_init(config_path: &Path) -> anyhow::Result<()> {
     println!("  1. Apply a template: agentshield policy template openclaw-default");
     println!("  2. Start the proxy:  agentshield start");
     println!("  3. Set env variable: HTTPS_PROXY=http://127.0.0.1:18080");
+    Ok(())
+}
+
+/// Interactive setup wizard: prompts the user, generates config, and prints next steps.
+fn cmd_quickstart(config_path: &Path) -> anyhow::Result<()> {
+    use agentshield::cli::ca;
+    use agentshield::cli::quickstart;
+
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut reader = std::io::BufReader::new(stdin.lock());
+    let mut writer = stdout.lock();
+
+    let qc = quickstart::cmd_quickstart(&mut reader, &mut writer, config_path)?;
+
+    // MITM CA generation
+    if qc.mitm {
+        let ca_path = ca::ca_dir();
+        if !ca_path.join("cert.pem").exists() {
+            println!("Generating CA certificate for MITM mode...");
+            ca::generate_ca(&ca_path)?;
+            println!("CA generated at {}", ca_path.display());
+            println!("Run 'agentshield ca trust' to install the CA into your system trust store.");
+        }
+    }
+
+    // DB initialization
+    let db = db_path();
+    logging::open_db(&db)?;
+
     Ok(())
 }
 

@@ -10,6 +10,7 @@
 pub mod ca;
 pub mod integrate;
 pub mod prompt;
+pub mod quickstart;
 pub mod wrap;
 
 use std::path::PathBuf;
@@ -96,6 +97,8 @@ pub enum Commands {
     Validate,
     /// Wrap a command with proxy protection
     Wrap(wrap::WrapArgs),
+    /// Interactive setup wizard
+    Quickstart,
 }
 
 /// CA subcommands for certificate management.
