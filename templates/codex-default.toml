@@ -1,0 +1,44 @@
+# Codex/OpenAI Default Policy Template
+# OpenAI Codex CLI 사용에 필요한 최소한의 허용 룰
+
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+# LLM Provider APIs
+[[policy.rules]]
+name = "openai-api"
+domains = ["api.openai.com"]
+action = "allow"
+
+# GitHub (읽기 허용, 쓰기 승인 필요)
+[[policy.rules]]
+name = "github-read"
+domains = ["api.github.com", "github.com"]
+methods = ["GET"]
+action = "allow"
+
+[[policy.rules]]
+name = "github-write"
+domains = ["api.github.com"]
+methods = ["POST", "PUT", "PATCH", "DELETE"]
+action = "ask"
+
+# npm registry (읽기 전용)
+[[policy.rules]]
+name = "npm-registry"
+domains = ["registry.npmjs.org"]
+methods = ["GET"]
+action = "allow"
+
+# DLP (Data Loss Prevention)
+[dlp]
+enabled = true
+
+# Web dashboard
+[web]
+enabled = true
+listen = "127.0.0.1:18081"

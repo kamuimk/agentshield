@@ -3,6 +3,7 @@
 //! Parses command-line arguments via [`clap`] and dispatches to the appropriate
 //! handler: `start`, `stop`, `status`, `logs`, `policy`, `init`, or `integrate`.
 
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -46,9 +47,19 @@ fn dirs_path() -> std::path::PathBuf {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
-
     let cli = Cli::parse();
+
+    // For `wrap` without --verbose, suppress tracing to avoid polluting child output.
+    // For all other commands, use default tracing (respects RUST_LOG).
+    let is_wrap_quiet = matches!(&cli.command, Commands::Wrap(args) if !args.verbose);
+    if is_wrap_quiet {
+        use tracing_subscriber::EnvFilter;
+        tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::new("error"))
+            .init();
+    } else {
+        tracing_subscriber::fmt::init();
+    }
 
     match cli.command {
         Commands::Start { daemon: _ } => {
@@ -113,22 +124,35 @@ async fn main() -> anyhow::Result<()> {
         Commands::Validate => {
             cmd_validate(&cli.config)?;
         }
+        Commands::Wrap(args) => {
+            cmd_wrap(&cli.config, args).await?;
+        }
     }
 
     Ok(())
 }
 
+/// Handle returned by `start_proxy_server()`. Holds the bound address
+/// and keeps the file watcher alive for policy hot-reload.
+#[allow(dead_code)]
+struct ProxyHandle {
+    addr: SocketAddr,
+    _watcher: Option<notify::RecommendedWatcher>,
+}
+
 /// Start the proxy server with the given configuration.
 ///
 /// This function orchestrates the full startup sequence:
-/// 1. Load and validate the TOML configuration
-/// 2. Open a SQLite connection pool for request logging
-/// 3. Set up an async channel for interactive ASK prompts (stdin/stdout)
-/// 4. Optionally enable the system allowlist, DLP scanner, and Telegram notifier
-/// 5. Bind the TCP listener and enter the accept loop
-/// 6. Block until Ctrl-C is received
-async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
-    let config = AppConfig::load_from_path(config_path)?;
+/// 1. Open a SQLite connection pool for request logging
+/// 2. Set up ASK broadcaster with Terminal, Telegram, and Web responders
+/// 3. Configure rate limiter, system allowlist, MITM, DLP, notifications
+/// 4. Bind the TCP listener and enter the accept loop
+/// 5. Start web dashboard if enabled
+/// 6. Start policy hot-reload file watcher + SIGHUP handler
+///
+/// Returns a `ProxyHandle` with the bound address. The caller is responsible
+/// for keeping the handle alive and deciding when to shut down.
+async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::Result<ProxyHandle> {
     info!("AgentShield starting...");
     info!("Config: {}", config_path.display());
     info!("Listen: {}", config.proxy.listen);
@@ -323,7 +347,7 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
     }
 
     // Policy hot-reload: file watcher + SIGHUP handler
-    let _watcher = reload::start_file_watcher(config_path.to_path_buf(), policy.clone())
+    let watcher = reload::start_file_watcher(config_path.to_path_buf(), policy.clone())
         .map_err(|e| {
             warn!("Failed to start config file watcher: {}", e);
             e
@@ -331,10 +355,127 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
         .ok();
     reload::start_sighup_handler(config_path.to_path_buf(), policy);
 
+    Ok(ProxyHandle {
+        addr,
+        _watcher: watcher,
+    })
+}
+
+/// Start the proxy and block until Ctrl-C.
+async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
+    let config = AppConfig::load_from_path(config_path)?;
+    let _handle = start_proxy_server(&config, config_path).await?;
+
     // Keep running until interrupted
     tokio::signal::ctrl_c().await?;
     info!("Shutting down...");
     Ok(())
+}
+
+/// Wrap a command with proxy protection.
+///
+/// Detects the agent, resolves/generates a config, starts the proxy,
+/// injects environment variables, runs the child process, and exits
+/// with the child's exit code.
+async fn cmd_wrap(
+    config_path: &Path,
+    args: agentshield::cli::wrap::WrapArgs,
+) -> anyhow::Result<()> {
+    use agentshield::cli::wrap::{build_child_env, detect_agent, resolve_wrap_config};
+
+    if args.command.is_empty() {
+        anyhow::bail!("No command specified. Usage: agentshield wrap -- <command>");
+    }
+
+    // 1. Detect agent from command
+    let agent = detect_agent(&args.command);
+    let template_name = args
+        .template
+        .as_deref()
+        .unwrap_or_else(|| agent.template_name());
+    info!("Detected agent: {:?}, template: {}", agent, template_name);
+
+    // 2. Resolve config (auto-generate from template if needed)
+    let resolved_config_path = resolve_wrap_config(config_path, template_name)?;
+
+    // 3. Load config
+    let mut config = AppConfig::load_from_path(&resolved_config_path)?;
+
+    // 4. Apply CLI overrides
+    if let Some(port) = args.port {
+        config.proxy.listen = format!("127.0.0.1:{}", port);
+    }
+    if args.mitm {
+        config.proxy.mode = agentshield::policy::config::ProxyMode::Mitm;
+    }
+    if args.dashboard {
+        if config.web.is_none() {
+            config.web = Some(agentshield::policy::config::WebConfig {
+                enabled: true,
+                listen: "127.0.0.1:18081".to_string(),
+                auth_token: None,
+            });
+        } else if let Some(ref mut web) = config.web {
+            web.enabled = true;
+        }
+    }
+
+    // 5. Auto-generate CA if MITM mode
+    if config.proxy.mode == agentshield::policy::config::ProxyMode::Mitm {
+        let ca_path = ca::ca_dir();
+        if !ca_path.join("cert.pem").exists() {
+            println!("Generating CA certificate for MITM mode...");
+            ca::generate_ca(&ca_path)?;
+            println!("CA generated at {}", ca_path.display());
+            println!(
+                "Note: Run 'agentshield ca trust' to install the CA into your system trust store."
+            );
+        }
+    }
+
+    // 6. Ensure DB is initialized
+    let db = db_path();
+    logging::open_db(&db)?;
+
+    // 7. Start proxy server
+    let handle = start_proxy_server(&config, &resolved_config_path).await?;
+    println!("AgentShield proxy running on {}", handle.addr);
+
+    // 8. Build child environment
+    let child_env = build_child_env(handle.addr, args.mitm);
+
+    // 9. Spawn child process
+    let program = &args.command[0];
+    let child_args = &args.command[1..];
+
+    let mut child = tokio::process::Command::new(program)
+        .args(child_args)
+        .envs(child_env)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to start '{}': {}", program, e))?;
+
+    // 10. Wait for child or Ctrl-C
+    let exit_code = tokio::select! {
+        status = child.wait() => {
+            match status {
+                Ok(s) => s.code().unwrap_or(1),
+                Err(e) => {
+                    error!("Error waiting for child process: {}", e);
+                    1
+                }
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("Ctrl-C received, stopping child process...");
+            child.kill().await.ok();
+            130
+        }
+    };
+
+    std::process::exit(exit_code);
 }
 
 /// Stop a running AgentShield instance by removing its PID file.
@@ -478,9 +619,13 @@ fn cmd_policy_template(config_path: &Path, name: &str) -> anyhow::Result<()> {
         "openclaw-default" => include_str!("../templates/openclaw-default.toml"),
         "claude-code-default" => include_str!("../templates/claude-code-default.toml"),
         "strict" => include_str!("../templates/strict.toml"),
+        "aider-default" => include_str!("../templates/aider-default.toml"),
+        "codex-default" => include_str!("../templates/codex-default.toml"),
         _ => {
             println!("Unknown template: {}", name);
-            println!("Available templates: openclaw-default, claude-code-default, strict");
+            println!(
+                "Available templates: openclaw-default, claude-code-default, aider-default, codex-default, strict"
+            );
             return Ok(());
         }
     };
