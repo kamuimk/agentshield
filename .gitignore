@@ -3,5 +3,6 @@
 *.db
 .DS_Store
 .serena/
+.idea/
 agentshield.toml
 CODE_REVIEW.md
