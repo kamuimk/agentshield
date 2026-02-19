@@ -14,6 +14,7 @@
 //! - [`NotificationEvent::ProxyStarted`] — proxy server started
 //! - [`NotificationEvent::ProxyShutdown`] — proxy server shutting down
 
+pub mod slack;
 pub mod telegram;
 
 use std::sync::Arc;
@@ -129,6 +130,37 @@ impl Notifier for FilteredNotifier {
 
     fn name(&self) -> &str {
         self.inner.name()
+    }
+}
+
+/// A [`Notifier`] that dispatches events to multiple backends.
+///
+/// Individual backend failures are logged as warnings but do not prevent
+/// other backends from receiving the event.
+pub struct MultiNotifier {
+    notifiers: Vec<Arc<dyn Notifier>>,
+}
+
+impl MultiNotifier {
+    /// Create a new multi-notifier that dispatches to all given backends.
+    pub fn new(notifiers: Vec<Arc<dyn Notifier>>) -> Self {
+        Self { notifiers }
+    }
+}
+
+#[async_trait::async_trait]
+impl Notifier for MultiNotifier {
+    async fn notify(&self, event: &NotificationEvent) -> Result<()> {
+        for notifier in &self.notifiers {
+            if let Err(e) = notifier.notify(event).await {
+                tracing::warn!("Notifier '{}' failed: {}", notifier.name(), e);
+            }
+        }
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "multi"
     }
 }
 
@@ -489,5 +521,41 @@ mod tests {
         let event = NotificationEvent::ProxyShutdown;
         let msg = format_message(&event);
         assert!(msg.contains("Shutdown"));
+    }
+
+    /// A mock notifier that always fails, for testing MultiNotifier error handling.
+    struct FailingNotifier;
+
+    #[async_trait::async_trait]
+    impl Notifier for FailingNotifier {
+        async fn notify(&self, _event: &NotificationEvent) -> Result<()> {
+            Err(crate::error::AgentShieldError::Notification(
+                "test failure".to_string(),
+            ))
+        }
+        fn name(&self) -> &str {
+            "failing"
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_notifier_dispatches_to_all() {
+        let (mock1, events1) = MockNotifier::new();
+        let (mock2, events2) = MockNotifier::new();
+        let multi = MultiNotifier::new(vec![Arc::new(mock1), Arc::new(mock2)]);
+        let event = NotificationEvent::ProxyShutdown;
+        multi.notify(&event).await.unwrap();
+        assert_eq!(events1.lock().unwrap().len(), 1);
+        assert_eq!(events2.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn multi_notifier_continues_on_error() {
+        let (mock, events) = MockNotifier::new();
+        // First notifier fails, second should still receive the event
+        let multi = MultiNotifier::new(vec![Arc::new(FailingNotifier), Arc::new(mock)]);
+        let event = NotificationEvent::ProxyShutdown;
+        multi.notify(&event).await.unwrap();
+        assert_eq!(events.lock().unwrap().len(), 1);
     }
 }

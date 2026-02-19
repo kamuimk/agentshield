@@ -1,5 +1,6 @@
 use agentshield::policy::config::{
-    Action, AppConfig, ProxyMode, TelegramConfig, ValidationSeverity, WebConfig, validate_config,
+    Action, AppConfig, ProxyMode, SlackConfig, TelegramConfig, ValidationSeverity, WebConfig,
+    validate_config,
 };
 
 const MINIMAL_TOML: &str = r#"
@@ -816,4 +817,69 @@ fn validate_full_config_passes() {
     let config: AppConfig = toml::from_str(FULL_TOML).unwrap();
     let result = validate_config(&config);
     assert!(!result.has_errors());
+}
+
+#[test]
+fn parse_slack_config() {
+    let toml_str = r##"
+[proxy]
+listen = "127.0.0.1:18080"
+
+[policy]
+default = "deny"
+
+[notification]
+enabled = true
+
+[notification.slack]
+webhook_url = "https://hooks.slack.com/services/T123/B456/abcdef"
+events = ["deny", "dlp"]
+"##;
+    let config: AppConfig = toml::from_str(toml_str).unwrap();
+    let notif = config.notification.unwrap();
+    let slack = notif.slack.unwrap();
+    assert_eq!(
+        slack.webhook_url,
+        "https://hooks.slack.com/services/T123/B456/abcdef"
+    );
+    assert_eq!(slack.events, vec!["deny", "dlp"]);
+}
+
+#[test]
+fn slack_config_debug_masks_url() {
+    let slack = SlackConfig {
+        webhook_url: "https://hooks.slack.com/services/T123/B456/secret".to_string(),
+        events: vec![],
+    };
+    let debug_output = format!("{:?}", slack);
+    assert!(
+        !debug_output.contains("secret"),
+        "Debug output must not contain the actual webhook_url"
+    );
+    assert!(debug_output.contains("***"));
+}
+
+#[test]
+fn parse_notification_both_telegram_and_slack() {
+    let toml_str = r##"
+[proxy]
+listen = "127.0.0.1:18080"
+
+[policy]
+default = "deny"
+
+[notification]
+enabled = true
+
+[notification.telegram]
+bot_token = "123:ABC"
+chat_id = "999"
+
+[notification.slack]
+webhook_url = "https://hooks.slack.com/services/T/B/xxx"
+"##;
+    let config: AppConfig = toml::from_str(toml_str).unwrap();
+    let notif = config.notification.unwrap();
+    assert!(notif.telegram.is_some());
+    assert!(notif.slack.is_some());
 }

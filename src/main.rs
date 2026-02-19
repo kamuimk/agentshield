@@ -17,7 +17,9 @@ use agentshield::dlp::DlpScanner;
 use agentshield::dlp::patterns::RegexScanner;
 use agentshield::logging::{self, LogEvent};
 use agentshield::notification::FilteredNotifier;
+use agentshield::notification::MultiNotifier;
 use agentshield::notification::Notifier;
+use agentshield::notification::slack::SlackNotifier;
 use agentshield::notification::telegram::TelegramNotifier;
 use agentshield::policy::config::AppConfig;
 use agentshield::policy::reload;
@@ -288,6 +290,8 @@ async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::R
     // Initialize notification if configured
     if let Some(ref notif_config) = config.notification {
         if notif_config.enabled {
+            let mut notifiers: Vec<Arc<dyn Notifier>> = Vec::new();
+
             if let Some(ref tg) = notif_config.telegram {
                 let inner: Arc<dyn Notifier> = Arc::new(TelegramNotifier::new(
                     tg.bot_token.clone(),
@@ -306,7 +310,26 @@ async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::R
                     );
                     Arc::new(FilteredNotifier::new(inner, tg.events.clone()))
                 };
-                server = server.with_notifier(notifier);
+                notifiers.push(notifier);
+            }
+
+            if let Some(ref slack) = notif_config.slack {
+                let inner: Arc<dyn Notifier> =
+                    Arc::new(SlackNotifier::new(slack.webhook_url.clone()));
+                let notifier: Arc<dyn Notifier> = if slack.events.is_empty() {
+                    info!("Slack notification enabled (events: all)");
+                    inner
+                } else {
+                    info!("Slack notification enabled (events: {:?})", slack.events);
+                    Arc::new(FilteredNotifier::new(inner, slack.events.clone()))
+                };
+                notifiers.push(notifier);
+            }
+
+            match notifiers.len() {
+                0 => {}
+                1 => server = server.with_notifier(notifiers.remove(0)),
+                _ => server = server.with_notifier(Arc::new(MultiNotifier::new(notifiers))),
             }
         }
     }

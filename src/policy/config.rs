@@ -146,6 +146,25 @@ impl std::fmt::Debug for TelegramConfig {
     }
 }
 
+/// Slack Incoming Webhook configuration (`[notification.slack]`).
+#[derive(Clone, Deserialize, Serialize)]
+pub struct SlackConfig {
+    /// Incoming Webhook URL (e.g., `https://hooks.slack.com/services/T.../B.../xxx`).
+    pub webhook_url: String,
+    /// Event types to send (empty = all).
+    #[serde(default)]
+    pub events: Vec<String>,
+}
+
+impl std::fmt::Debug for SlackConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SlackConfig")
+            .field("webhook_url", &"***")
+            .field("events", &self.events)
+            .finish()
+    }
+}
+
 /// Notification configuration (`[notification]` section).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NotificationConfig {
@@ -155,6 +174,9 @@ pub struct NotificationConfig {
     /// Optional Telegram backend configuration.
     #[serde(default)]
     pub telegram: Option<TelegramConfig>,
+    /// Optional Slack backend configuration.
+    #[serde(default)]
+    pub slack: Option<SlackConfig>,
 }
 
 /// Web dashboard configuration (`[web]` section).
