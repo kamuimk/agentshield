@@ -62,20 +62,39 @@ pub struct ConnectionContext {
 }
 
 /// Main accept loop: accept incoming connections and handle them.
-pub async fn accept_loop(listener: TcpListener, ctx: Arc<ConnectionContext>) {
+///
+/// Listens for incoming connections until a shutdown signal is received.
+/// When `shutdown_rx` fires, stops accepting new connections. Existing
+/// connections continue until they complete naturally (draining is handled
+/// by the caller via the returned `JoinHandle`).
+pub async fn accept_loop(
+    listener: TcpListener,
+    ctx: Arc<ConnectionContext>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
     loop {
-        match listener.accept().await {
-            Ok((stream, peer_addr)) => {
-                info!("New connection from {}", peer_addr);
-                let ctx = ctx.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, &ctx).await {
-                        error!("Error handling connection from {}: {}", peer_addr, e);
+        tokio::select! {
+            result = listener.accept() => {
+                match result {
+                    Ok((stream, peer_addr)) => {
+                        info!("New connection from {}", peer_addr);
+                        let ctx = ctx.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_connection(stream, &ctx).await {
+                                error!("Error handling connection from {}: {}", peer_addr, e);
+                            }
+                        });
                     }
-                });
+                    Err(e) => {
+                        error!("Failed to accept connection: {}", e);
+                    }
+                }
             }
-            Err(e) => {
-                error!("Failed to accept connection: {}", e);
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    info!("Accept loop shutting down (no new connections)");
+                    break;
+                }
             }
         }
     }
@@ -1807,5 +1826,43 @@ mod tests {
     fn parse_content_length_mixed_case() {
         let headers = "POST / HTTP/1.1\r\nCONTENT-LENGTH: 99\r\nHost: x";
         assert_eq!(parse_content_length(headers), Some(99));
+    }
+
+    #[tokio::test]
+    async fn accept_loop_stops_on_shutdown_signal() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ctx = Arc::new(ConnectionContext {
+            policy: None,
+            db: None,
+            ask_broadcaster: None,
+            dlp_scanner: None,
+            system_allowlist: None,
+            notifier: None,
+            event_tx: None,
+            rate_limiter: None,
+            mitm_enabled: false,
+            cert_cache: None,
+            upstream_tls_config: None,
+            logging_config: None,
+        });
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let accept_handle = tokio::spawn(async move {
+            accept_loop(listener, ctx, shutdown_rx).await;
+        });
+
+        // Verify the proxy is accepting connections
+        let _conn = TcpStream::connect(addr).await.unwrap();
+
+        // Send shutdown signal
+        shutdown_tx.send(true).unwrap();
+
+        // accept_loop should terminate
+        tokio::time::timeout(std::time::Duration::from_secs(3), accept_handle)
+            .await
+            .expect("accept_loop should stop within 3s")
+            .expect("accept_loop task should not panic");
     }
 }

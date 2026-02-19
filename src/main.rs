@@ -138,12 +138,15 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Handle returned by `start_proxy_server()`. Holds the bound address
-/// and keeps the file watcher alive for policy hot-reload.
+/// Handle returned by `start_proxy_server()`. Holds the bound address,
+/// keeps the file watcher alive for policy hot-reload, and provides
+/// a shutdown trigger for graceful termination.
 #[allow(dead_code)]
 struct ProxyHandle {
     addr: SocketAddr,
     _watcher: Option<notify::RecommendedWatcher>,
+    /// Send `true` to stop the accept loop (graceful shutdown).
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
 /// Start the proxy server with the given configuration.
@@ -360,7 +363,7 @@ async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::R
         }
     }
 
-    let addr = server.start().await?;
+    let (addr, shutdown_tx) = server.start().await?;
     info!("Proxy running on {}", addr);
     info!(
         "Set HTTPS_PROXY=http://{} to route traffic through AgentShield",
@@ -410,17 +413,25 @@ async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::R
     Ok(ProxyHandle {
         addr,
         _watcher: watcher,
+        shutdown_tx,
     })
 }
 
-/// Start the proxy and block until Ctrl-C.
+/// Start the proxy and block until Ctrl-C, then shut down gracefully.
 async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
     let config = AppConfig::load_from_path(config_path)?;
-    let _handle = start_proxy_server(&config, config_path).await?;
+    let handle = start_proxy_server(&config, config_path).await?;
 
     // Keep running until interrupted
     tokio::signal::ctrl_c().await?;
-    info!("Shutting down...");
+    info!("Shutting down gracefully...");
+
+    // Stop accepting new connections
+    let _ = handle.shutdown_tx.send(true);
+
+    // Brief drain period for in-flight connections
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    info!("Shutdown complete");
     Ok(())
 }
 
@@ -429,6 +440,10 @@ async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
 /// Detects the agent, resolves/generates a config, starts the proxy,
 /// injects environment variables, runs the child process, and exits
 /// with the child's exit code.
+///
+/// On Ctrl-C, sends SIGTERM to the child (Unix) and waits up to 10 seconds
+/// for it to exit, then falls back to SIGKILL. The proxy accept loop is
+/// also stopped gracefully.
 async fn cmd_wrap(
     config_path: &Path,
     args: agentshield::cli::wrap::WrapArgs,
@@ -521,13 +536,56 @@ async fn cmd_wrap(
             }
         }
         _ = tokio::signal::ctrl_c() => {
-            info!("Ctrl-C received, stopping child process...");
-            child.kill().await.ok();
-            130
+            info!("Ctrl-C received, shutting down gracefully...");
+            graceful_kill_child(&mut child).await
         }
     };
 
+    // 11. Shut down proxy accept loop
+    let _ = handle.shutdown_tx.send(true);
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
     std::process::exit(exit_code);
+}
+
+/// Gracefully terminate a child process: send SIGTERM, wait up to 10s, then SIGKILL.
+///
+/// Returns the exit code (130 for signal-terminated processes).
+async fn graceful_kill_child(child: &mut tokio::process::Child) -> i32 {
+    // Try SIGTERM first (Unix only)
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        info!("Sending SIGTERM to child process (pid: {})", pid);
+        // Safety: sending a standard signal to our own child process
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+    }
+
+    // On non-Unix, fall through to kill() directly
+    #[cfg(not(unix))]
+    {
+        child.kill().await.ok();
+        return 130;
+    }
+
+    // Wait up to 10 seconds for the child to exit
+    match tokio::time::timeout(std::time::Duration::from_secs(10), child.wait()).await {
+        Ok(Ok(status)) => {
+            info!("Child exited after SIGTERM: {:?}", status);
+            status.code().unwrap_or(130)
+        }
+        Ok(Err(e)) => {
+            warn!("Error waiting for child after SIGTERM: {}", e);
+            130
+        }
+        Err(_) => {
+            // Timeout: escalate to SIGKILL
+            warn!("Child did not exit within 10s, sending SIGKILL");
+            child.kill().await.ok();
+            130
+        }
+    }
 }
 
 /// Stop a running AgentShield instance by removing its PID file.
@@ -871,5 +929,30 @@ mod tests {
     fn expand_tilde_no_tilde() {
         let result = expand_tilde("/absolute/path");
         assert_eq!(result, std::path::PathBuf::from("/absolute/path"));
+    }
+
+    #[tokio::test]
+    async fn graceful_kill_child_terminates_process() {
+        // Spawn a long-running child (sleep 60)
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+
+        let exit_code = graceful_kill_child(&mut child).await;
+        // On Unix, SIGTERM causes exit with signal (non-zero)
+        assert_ne!(exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn graceful_kill_child_already_exited() {
+        // Spawn a process that exits immediately
+        let mut child = tokio::process::Command::new("true").spawn().unwrap();
+        // Wait for it to finish
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let exit_code = graceful_kill_child(&mut child).await;
+        // Should handle already-exited process gracefully
+        assert!(exit_code == 0 || exit_code == 130);
     }
 }

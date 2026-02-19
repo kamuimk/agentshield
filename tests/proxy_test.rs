@@ -113,7 +113,7 @@ async fn proxy_starts_and_accepts_connections() {
 #[tokio::test]
 async fn proxy_responds_to_connect_request() {
     let server = ProxyServer::new("127.0.0.1:0".to_string());
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
     let connect_req = "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n";
@@ -132,7 +132,7 @@ async fn proxy_responds_to_connect_request() {
 #[tokio::test]
 async fn proxy_handles_http_request() {
     let server = ProxyServer::new("127.0.0.1:0".to_string());
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     let request = "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n";
     let response = send_raw_request(addr, request).await;
@@ -150,7 +150,7 @@ async fn proxy_handles_http_request() {
 async fn policy_deny_all_blocks_connect() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(deny_all_policy())));
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
     let connect_req = "CONNECT evil.com:443 HTTP/1.1\r\nHost: evil.com:443\r\n\r\n";
@@ -175,7 +175,7 @@ async fn policy_deny_all_blocks_connect() {
 async fn policy_deny_all_blocks_http() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(deny_all_policy())));
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     let request = "GET http://evil.com/ HTTP/1.1\r\nHost: evil.com\r\n\r\n";
     let response = send_raw_request(addr, request).await;
@@ -191,7 +191,7 @@ async fn policy_deny_all_blocks_http() {
 async fn policy_allows_whitelisted_domain_connect() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(allow_example_policy())));
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
     let connect_req = "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n";
@@ -208,7 +208,7 @@ async fn policy_allows_whitelisted_domain_connect() {
 async fn policy_blocks_non_whitelisted_domain() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(allow_example_policy())));
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
     let connect_req = "CONNECT evil.com:443 HTTP/1.1\r\nHost: evil.com:443\r\n\r\n";
@@ -231,7 +231,7 @@ async fn openclaw_policy_allows_anthropic() {
 
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(config.policy.clone())));
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     // api.anthropic.com should be allowed
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -256,7 +256,7 @@ async fn system_allowlist_bypasses_deny_all_connect() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_system_allowlist(vec!["example.com".to_string()]);
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     // example.com is in allowlist → should get 200 despite deny-all
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -279,7 +279,7 @@ async fn system_allowlist_does_not_affect_unlisted_domain() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_system_allowlist(vec!["api.telegram.org".to_string()]);
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     // evil.com is NOT in allowlist → should still be denied
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -305,7 +305,7 @@ async fn dlp_blocks_http_request_with_critical_finding() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(allow_example_policy())))
         .with_dlp(scanner);
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     // HTTP POST with OpenAI API key in body (Critical severity)
     let request = "POST http://example.com/api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 50\r\n\r\nAuthorization: Bearer sk-abcdefghijklmnopqrstuvwxyz1234567890";
@@ -323,7 +323,7 @@ async fn dlp_allows_clean_http_request() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(allow_example_policy())))
         .with_dlp(scanner);
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     // Clean HTTP request — no sensitive data
     let request = "POST http://example.com/api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 13\r\n\r\nHello, world!";
@@ -341,7 +341,7 @@ async fn dlp_does_not_scan_connect_tunnels() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(allow_example_policy())))
         .with_dlp(scanner);
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     // CONNECT request — DLP should be skipped (encrypted tunnel)
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -372,7 +372,7 @@ async fn system_allowlist_bypasses_dlp_for_http() {
         .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_dlp(scanner)
         .with_system_allowlist(vec!["127.0.0.1".to_string()]);
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     // HTTP POST with API key in body to allowlisted domain → should pass (not 403)
     let request = format!(
@@ -399,7 +399,7 @@ async fn non_allowlist_domain_still_blocked_by_dlp() {
         .with_policy(Arc::new(RwLock::new(allow_localhost_policy())))
         .with_dlp(scanner)
         .with_system_allowlist(vec!["api.telegram.org".to_string()]);
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     // HTTP POST with API key to NON-allowlisted domain → should be blocked by DLP
     let request = format!(
@@ -422,7 +422,7 @@ async fn notification_fires_on_deny() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_notifier(notifier);
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
     stream
@@ -456,7 +456,7 @@ async fn notification_fires_on_dlp_critical() {
         .with_policy(Arc::new(RwLock::new(allow_example_policy())))
         .with_dlp(scanner)
         .with_notifier(notifier);
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     let request = "POST http://example.com/api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 50\r\n\r\nAuthorization: Bearer sk-abcdefghijklmnopqrstuvwxyz1234567890";
     send_raw_request(addr, request).await;
@@ -481,7 +481,7 @@ async fn notification_does_not_fire_on_allow() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(allow_example_policy())))
         .with_notifier(notifier);
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
     stream
@@ -523,7 +523,7 @@ async fn notification_failure_does_not_crash_proxy() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_notifier(notifier);
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     // Proxy should still work even if notification fails
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -559,7 +559,7 @@ async fn mitm_mode_responds_200_then_tls() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(allow_example_policy())))
         .with_cert_cache(cert_cache);
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
     stream
@@ -586,7 +586,7 @@ async fn mitm_system_allowlist_bypasses_to_tunnel() {
         .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_system_allowlist(vec!["example.com".to_string()])
         .with_cert_cache(cert_cache);
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
     stream
@@ -612,7 +612,7 @@ async fn mitm_denied_domain_still_blocked() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_cert_cache(cert_cache);
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
     stream
@@ -635,7 +635,7 @@ async fn mitm_transparent_mode_unchanged() {
     // Without cert_cache, MITM should not activate (plain tunnel)
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(allow_example_policy())));
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
     stream

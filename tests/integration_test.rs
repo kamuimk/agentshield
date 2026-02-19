@@ -112,7 +112,7 @@ async fn e2e_proxy_policy_deny_logs_nothing_yet() {
     };
     let server =
         ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
     stream
@@ -135,7 +135,7 @@ async fn e2e_openclaw_full_flow() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(config.policy.clone())))
         .with_ask_broadcaster(auto_broadcaster(true));
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     // 1. Anthropic API - should be ALLOWED
     assert_connect_result(addr, "api.anthropic.com:443", "200").await;
@@ -385,7 +385,7 @@ async fn ask_policy_without_channel_defaults_to_deny() {
     // No ASK broadcaster attached — should default to deny (fail-closed)
     let server =
         ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
     stream
@@ -421,7 +421,7 @@ async fn proxy_handles_concurrent_connections() {
 
     let server =
         ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     // Spawn 10 concurrent requests
     let mut handles = vec![];
@@ -489,7 +489,7 @@ async fn proxy_logs_requests_to_sqlite() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(policy)))
         .with_db(pool.clone());
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     // 1. Allowed request (CONNECT to example.com)
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -554,7 +554,7 @@ async fn ask_channel_sends_request_on_ask_policy() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(policy)))
         .with_ask_broadcaster(auto_broadcaster(true));
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     // Send CONNECT to example.com (ASK rule) — auto-approved by broadcaster
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -591,7 +591,7 @@ async fn ask_channel_deny_returns_403() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
         .with_policy(Arc::new(RwLock::new(policy)))
         .with_ask_broadcaster(auto_broadcaster(false));
-    let addr = server.start().await.unwrap();
+    let (addr, _shutdown) = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
     stream

@@ -135,8 +135,9 @@ impl ProxyServer {
         self
     }
 
-    /// Start the proxy server and return the actual bound address.
-    pub async fn start(&self) -> Result<SocketAddr> {
+    /// Start the proxy server and return the actual bound address plus a
+    /// shutdown sender. Sending `true` on the sender stops the accept loop.
+    pub async fn start(&self) -> Result<(SocketAddr, tokio::sync::watch::Sender<bool>)> {
         let listener = TcpListener::bind(&self.listen_addr).await?;
         let local_addr = listener.local_addr()?;
         info!("AgentShield proxy listening on {}", local_addr);
@@ -171,10 +172,12 @@ impl ProxyServer {
             upstream_tls_config,
             logging_config: self.logging_config.clone(),
         });
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         tokio::spawn(async move {
-            connect::accept_loop(listener, ctx).await;
+            connect::accept_loop(listener, ctx, shutdown_rx).await;
         });
 
-        Ok(local_addr)
+        Ok((local_addr, shutdown_tx))
     }
 }
