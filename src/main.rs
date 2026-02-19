@@ -110,6 +110,9 @@ async fn main() -> anyhow::Result<()> {
                 CaAction::Export { path } => ca::cmd_ca_export(&ca_dir, &path)?,
             }
         }
+        Commands::Validate => {
+            cmd_validate(&cli.config)?;
+        }
     }
 
     Ok(())
@@ -484,6 +487,54 @@ fn cmd_policy_template(config_path: &Path, name: &str) -> anyhow::Result<()> {
 
     std::fs::write(config_path, template_content)?;
     println!("Applied template '{}' to {}", name, config_path.display());
+    Ok(())
+}
+
+/// Validate the configuration file and print errors/warnings.
+fn cmd_validate(config_path: &Path) -> anyhow::Result<()> {
+    use agentshield::policy::config::{ValidationSeverity, validate_config};
+
+    println!("Validating {}", config_path.display());
+    println!("{}", "─".repeat(50));
+
+    // Step 1: Check file exists
+    if !config_path.exists() {
+        println!("  [ERROR] Config file not found: {}", config_path.display());
+        std::process::exit(1);
+    }
+
+    // Step 2: Try to load (catches TOML parse errors and missing env vars)
+    let config = match AppConfig::load_from_path(config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("  [ERROR] Failed to parse config: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Step 3: Semantic validation
+    let result = validate_config(&config);
+
+    if result.messages.is_empty() {
+        println!("  [OK] Configuration is valid");
+        println!();
+        println!("  Proxy:   {}", config.proxy.listen);
+        println!("  Mode:    {:?}", config.proxy.mode);
+        println!("  Default: {:?}", config.policy.default);
+        println!("  Rules:   {}", config.policy.rules.len());
+    } else {
+        for msg in &result.messages {
+            match msg.severity {
+                ValidationSeverity::Error => println!("  [ERROR] {}", msg.message),
+                ValidationSeverity::Warning => println!("  [WARN]  {}", msg.message),
+            }
+        }
+    }
+
+    if result.has_errors() {
+        std::process::exit(1);
+    }
+
     Ok(())
 }
 

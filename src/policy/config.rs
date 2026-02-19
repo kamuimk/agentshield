@@ -242,6 +242,127 @@ impl AppConfig {
     }
 }
 
+/// Severity level for validation messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValidationSeverity {
+    Error,
+    Warning,
+}
+
+/// A single validation message with severity.
+#[derive(Debug, Clone)]
+pub struct ValidationMessage {
+    pub severity: ValidationSeverity,
+    pub message: String,
+}
+
+/// Result of config validation.
+#[derive(Debug, Default)]
+pub struct ValidationResult {
+    pub messages: Vec<ValidationMessage>,
+}
+
+impl ValidationResult {
+    pub fn has_errors(&self) -> bool {
+        self.messages
+            .iter()
+            .any(|m| m.severity == ValidationSeverity::Error)
+    }
+
+    fn error(&mut self, msg: impl Into<String>) {
+        self.messages.push(ValidationMessage {
+            severity: ValidationSeverity::Error,
+            message: msg.into(),
+        });
+    }
+
+    fn warning(&mut self, msg: impl Into<String>) {
+        self.messages.push(ValidationMessage {
+            severity: ValidationSeverity::Warning,
+            message: msg.into(),
+        });
+    }
+}
+
+/// Validate an AppConfig and return all errors/warnings found.
+pub fn validate_config(config: &AppConfig) -> ValidationResult {
+    let mut result = ValidationResult::default();
+
+    // 1. Validate listen address
+    if config.proxy.listen.parse::<std::net::SocketAddr>().is_err() {
+        result.error(format!(
+            "Invalid listen address: '{}' (expected host:port)",
+            config.proxy.listen
+        ));
+    }
+
+    // 2. MITM mode requires ca_dir to exist (if specified)
+    if config.proxy.mode == ProxyMode::Mitm {
+        if let Some(ref ca_dir) = config.proxy.ca_dir {
+            let expanded = crate::policy::config::expand_ca_dir(ca_dir);
+            if !expanded.exists() {
+                result.error(format!(
+                    "MITM mode: CA directory not found: '{}' (run 'agentshield ca generate')",
+                    ca_dir
+                ));
+            }
+        }
+        // If ca_dir is None, default path will be used — just warn
+        else {
+            result.warning("MITM mode: using default CA directory (~/.agentshield/ca)");
+        }
+    }
+
+    // 3. Validate policy rules
+    let mut seen_names = std::collections::HashSet::new();
+    let mut has_catch_all = false;
+    for rule in &config.policy.rules {
+        // Duplicate rule names
+        if !seen_names.insert(&rule.name) {
+            result.warning(format!("Duplicate rule name: '{}'", rule.name));
+        }
+
+        // Empty domains
+        if rule.domains.is_empty() {
+            result.error(format!(
+                "Rule '{}': domains list is empty (rule will never match)",
+                rule.name
+            ));
+        }
+
+        // Catch-all wildcard
+        if rule.domains.contains(&"*".to_string()) {
+            has_catch_all = true;
+        }
+
+        // Rate limit on non-allow action
+        if rule.rate_limit.is_some() && rule.action != Action::Allow {
+            result.warning(format!(
+                "Rule '{}': rate_limit on {:?} action has no effect (only works with Allow)",
+                rule.name, rule.action
+            ));
+        }
+    }
+
+    if has_catch_all {
+        result.warning(
+            "Catch-all rule ('*') found — default action will be overridden for all domains",
+        );
+    }
+
+    result
+}
+
+/// Expand tilde in ca_dir path (helper for validation).
+pub fn expand_ca_dir(path: &str) -> std::path::PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    std::path::PathBuf::from(path)
+}
+
 /// Replace `${VAR_NAME}` and `$VAR_NAME` placeholders with environment variable values.
 ///
 /// Uses a single-pass regex to avoid double-substitution when a resolved value

@@ -1,5 +1,6 @@
 use agentshield::policy::config::{
-    Action, AppConfig, LoggingConfig, ProxyMode, TelegramConfig, WebConfig,
+    Action, AppConfig, LoggingConfig, ProxyMode, TelegramConfig, ValidationSeverity, WebConfig,
+    validate_config,
 };
 
 const MINIMAL_TOML: &str = r#"
@@ -654,4 +655,166 @@ audit = true
     assert!(logging.audit);
     assert_eq!(logging.audit_max_body_size, 65536); // default 64KB
     assert!(logging.audit_actions.is_empty()); // default empty = all
+}
+
+// --- validate_config tests ---
+
+#[test]
+fn validate_valid_config() {
+    let config: AppConfig = toml::from_str(MINIMAL_TOML).unwrap();
+    let result = validate_config(&config);
+    assert!(!result.has_errors());
+    assert!(result.messages.is_empty());
+}
+
+#[test]
+fn validate_invalid_listen_address() {
+    let toml_str = r#"
+[proxy]
+listen = "not-a-valid-address"
+
+[policy]
+default = "deny"
+"#;
+    let config: AppConfig = toml::from_str(toml_str).unwrap();
+    let result = validate_config(&config);
+    assert!(result.has_errors());
+    assert!(
+        result.messages[0]
+            .message
+            .contains("Invalid listen address")
+    );
+}
+
+#[test]
+fn validate_duplicate_rule_names() {
+    let toml_str = r##"
+[proxy]
+listen = "127.0.0.1:18080"
+
+[policy]
+default = "deny"
+
+[[policy.rules]]
+name = "my-rule"
+domains = ["a.com"]
+action = "allow"
+
+[[policy.rules]]
+name = "my-rule"
+domains = ["b.com"]
+action = "deny"
+"##;
+    let config: AppConfig = toml::from_str(toml_str).unwrap();
+    let result = validate_config(&config);
+    assert!(!result.has_errors()); // warnings only
+    let warnings: Vec<_> = result
+        .messages
+        .iter()
+        .filter(|m| m.severity == ValidationSeverity::Warning)
+        .collect();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.message.contains("Duplicate rule name"))
+    );
+}
+
+#[test]
+fn validate_empty_domains() {
+    let toml_str = r##"
+[proxy]
+listen = "127.0.0.1:18080"
+
+[policy]
+default = "deny"
+
+[[policy.rules]]
+name = "empty-rule"
+domains = []
+action = "allow"
+"##;
+    let config: AppConfig = toml::from_str(toml_str).unwrap();
+    let result = validate_config(&config);
+    assert!(result.has_errors());
+    assert!(result.messages[0].message.contains("domains list is empty"));
+}
+
+#[test]
+fn validate_catch_all_warning() {
+    let toml_str = r##"
+[proxy]
+listen = "127.0.0.1:18080"
+
+[policy]
+default = "deny"
+
+[[policy.rules]]
+name = "catch-all"
+domains = ["*"]
+action = "allow"
+"##;
+    let config: AppConfig = toml::from_str(toml_str).unwrap();
+    let result = validate_config(&config);
+    assert!(!result.has_errors());
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|m| m.message.contains("Catch-all"))
+    );
+}
+
+#[test]
+fn validate_mitm_missing_ca_dir() {
+    let toml_str = r#"
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "mitm"
+ca_dir = "/nonexistent/ca/path"
+
+[policy]
+default = "deny"
+"#;
+    let config: AppConfig = toml::from_str(toml_str).unwrap();
+    let result = validate_config(&config);
+    assert!(result.has_errors());
+    assert!(
+        result.messages[0]
+            .message
+            .contains("CA directory not found")
+    );
+}
+
+#[test]
+fn validate_rate_limit_on_deny() {
+    let toml_str = r##"
+[proxy]
+listen = "127.0.0.1:18080"
+
+[policy]
+default = "deny"
+
+[[policy.rules]]
+name = "useless-rate-limit"
+domains = ["a.com"]
+action = "deny"
+rate_limit = { max_requests = 10, window_secs = 60 }
+"##;
+    let config: AppConfig = toml::from_str(toml_str).unwrap();
+    let result = validate_config(&config);
+    assert!(!result.has_errors());
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|m| m.message.contains("rate_limit on Deny"))
+    );
+}
+
+#[test]
+fn validate_full_config_passes() {
+    let config: AppConfig = toml::from_str(FULL_TOML).unwrap();
+    let result = validate_config(&config);
+    assert!(!result.has_errors());
 }

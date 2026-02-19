@@ -91,6 +91,8 @@ pub enum Commands {
         #[command(subcommand)]
         action: CaAction,
     },
+    /// Validate the configuration file
+    Validate,
 }
 
 /// CA subcommands for certificate management.
