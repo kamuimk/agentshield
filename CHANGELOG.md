@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-02-19
+
 ### Added
 - `agentshield wrap` command — one-line proxy setup for any AI agent
 - `agentshield quickstart` — interactive setup wizard
@@ -26,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `ProxyServer::start()` returns `ProxyHandle` for graceful shutdown
 - `cmd_policy_template()` refactored to use `resolve_template()` with built-in + community fallback
+
+### Fixed
+- Discord Gateway periodic heartbeat (prevents ~41s disconnect)
+- Discord Gateway URL fetched dynamically from `/api/v10/gateway/bot`
 
 ## [0.9.0] - 2025-02-19
 
@@ -131,7 +137,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SQLite request logging
 - OpenClaw integration (`agentshield integrate openclaw`)
 
-[Unreleased]: https://github.com/kamuimk/agentshield/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/kamuimk/agentshield/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/kamuimk/agentshield/compare/v0.9.0...v1.0.0
 [0.9.0]: https://github.com/kamuimk/agentshield/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/kamuimk/agentshield/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/kamuimk/agentshield/compare/v0.6.0...v0.7.0

@@ -10,6 +10,8 @@ class Agentshield < Formula
   homepage "https://github.com/kamuimk/agentshield"
   license "Apache-2.0"
   version "1.0.0"
+  # SHA256 values are automatically computed in the release workflow.
+  # Update these after each release using the values from the GitHub Release page.
 
   on_macos do
     on_intel do
