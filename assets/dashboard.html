@@ -129,6 +129,28 @@
             .md\:grid-cols-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
         }
 
+        /* Log row action coloring */
+        tr[data-action="deny"] { background-color: rgba(127, 29, 29, 0.2); }
+        tr[data-action="rate-limited"] { background-color: rgba(127, 29, 29, 0.1); }
+        tr[data-action="ask"] { background-color: rgba(113, 63, 18, 0.15); }
+        tr[data-action="system-allow"] { background-color: rgba(30, 58, 138, 0.15); }
+
+        /* Theme toggle */
+        [data-theme="light"] { --bg-primary: #ffffff; --bg-secondary: #f3f4f6; --bg-tertiary: #e5e7eb; --text-primary: #111827; --text-secondary: #4b5563; --text-muted: #9ca3af; --border-color: #d1d5db; }
+        [data-theme="light"] body, [data-theme="light"] .bg-gray-900 { background-color: var(--bg-primary); color: var(--text-primary); }
+        [data-theme="light"] .bg-gray-800 { background-color: var(--bg-secondary); }
+        [data-theme="light"] .bg-gray-750, [data-theme="light"] .hover\:bg-gray-750:hover { background-color: var(--bg-tertiary); }
+        [data-theme="light"] .text-gray-100, [data-theme="light"] .text-white { color: var(--text-primary); }
+        [data-theme="light"] .text-gray-400, [data-theme="light"] .text-gray-500 { color: var(--text-secondary); }
+        [data-theme="light"] .border-gray-700, [data-theme="light"] .border-gray-600 { border-color: var(--border-color); }
+        [data-theme="light"] input, [data-theme="light"] select, [data-theme="light"] textarea { background-color: var(--bg-primary); color: var(--text-primary); border-color: var(--border-color); }
+
+        /* Timeline chart */
+        .timeline-chart { height: 120px; display: flex; align-items: flex-end; gap: 2px; }
+        .timeline-bar { flex: 1; min-width: 2px; border-radius: 2px 2px 0 0; position: relative; }
+        .timeline-bar .bar-allowed { background-color: #16a34a; }
+        .timeline-bar .bar-denied { background-color: #dc2626; position: absolute; bottom: 0; width: 100%; border-radius: 2px 2px 0 0; }
+
         /* Animations */
         .fade-in { animation: fadeIn 0.3s ease-in; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
@@ -138,7 +160,10 @@
     <nav class="bg-gray-800 border-b border-gray-700 px-6 py-4">
         <div class="flex items-center justify-between max-w-7xl mx-auto">
             <h1 class="text-xl font-bold text-blue-400">AgentShield Dashboard</h1>
-            <span id="connectionStatus" class="text-sm text-gray-400">Connecting...</span>
+            <div class="flex items-center space-x-3">
+                <span id="connectionStatus" class="text-sm text-gray-400">Connecting...</span>
+                <button id="themeToggle" onclick="toggleTheme()" class="text-sm text-gray-400 hover:text-gray-200 px-2 py-1 rounded border border-gray-600" title="Toggle theme">Light</button>
+            </div>
         </div>
     </nav>
 
@@ -182,6 +207,18 @@
             </div>
         </section>
 
+        <!-- Timeline Chart -->
+        <section class="bg-gray-800 rounded-lg p-4">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-sm font-semibold text-gray-400">Request Timeline (last 60 min)</h2>
+                <div class="flex items-center space-x-2">
+                    <span class="text-xs text-green-400">Allowed</span>
+                    <span class="text-xs text-red-400">Denied</span>
+                </div>
+            </div>
+            <div id="timelineChart" class="timeline-chart"></div>
+        </section>
+
         <!-- Pending ASK Requests -->
         <section id="askSection" class="hidden">
             <h2 class="text-lg font-semibold mb-3 text-yellow-400">Pending ASK Requests</h2>
@@ -206,6 +243,9 @@
                     <option value="system-allow">System-allow</option>
                     <option value="rate-limited">Rate-limited</option>
                 </select>
+                <label class="flex items-center space-x-2 text-sm text-gray-400">
+                    <input id="autoScroll" type="checkbox" checked> <span>Auto-scroll</span>
+                </label>
             </div>
             <div class="bg-gray-800 rounded-lg overflow-hidden">
                 <table class="w-full text-sm">
@@ -350,7 +390,7 @@
 
         empty.classList.add('hidden');
         tbody.innerHTML = filtered.slice(-200).reverse().map(l => `
-            <tr class="border-t border-gray-700 hover:bg-gray-750 fade-in">
+            <tr data-action="${l.action}" class="border-t border-gray-700 hover:bg-gray-750 fade-in">
                 <td class="px-4 py-2 text-gray-400 whitespace-nowrap">${formatTime(l.timestamp)}</td>
                 <td class="px-4 py-2 font-mono">${l.method}</td>
                 <td class="px-4 py-2">${l.domain}</td>
@@ -391,6 +431,7 @@
                 allLogs.push(log);
                 if (allLogs.length > MAX_LOGS) allLogs.shift();
                 renderLogs();
+                scrollToBottom();
                 loadStats();
             } catch (err) { console.error('SSE parse error:', err); }
         };
@@ -509,6 +550,64 @@
         if (name === 'policy') loadPolicy();
     }
 
+    // ─── Theme Toggle ────────────────────────────────────────
+    function initTheme() {
+        const saved = localStorage.getItem('agentshield_theme');
+        const theme = saved || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+        applyTheme(theme);
+    }
+
+    function applyTheme(theme) {
+        document.documentElement.setAttribute('data-theme', theme);
+        const btn = document.getElementById('themeToggle');
+        btn.textContent = theme === 'dark' ? 'Light' : 'Dark';
+        localStorage.setItem('agentshield_theme', theme);
+    }
+
+    function toggleTheme() {
+        const current = document.documentElement.getAttribute('data-theme') || 'dark';
+        applyTheme(current === 'dark' ? 'light' : 'dark');
+    }
+
+    // ─── Timeline Chart ──────────────────────────────────────
+    async function loadTimeline() {
+        try {
+            const res = await apiFetch(`${API_BASE}/api/stats/timeline?minutes=60`);
+            if (!res.ok) return;
+            const data = await res.json();
+            renderTimeline(data);
+        } catch (e) { console.error('Timeline error:', e); }
+    }
+
+    function renderTimeline(buckets) {
+        const chart = document.getElementById('timelineChart');
+        if (!buckets || buckets.length === 0) {
+            chart.innerHTML = '<div class="text-gray-500 text-sm text-center w-full" style="line-height:120px">No data</div>';
+            return;
+        }
+        const maxTotal = Math.max(...buckets.map(b => b.total), 1);
+        chart.innerHTML = buckets.map(b => {
+            const h = Math.max((b.total / maxTotal) * 100, 2);
+            const deniedH = b.total > 0 ? (b.denied / b.total) * h : 0;
+            const allowedH = h - deniedH;
+            const time = b.minute.slice(11); // HH:MM
+            return `<div class="timeline-bar" style="height:${h}%" title="${time}: ${b.total} total, ${b.allowed} allowed, ${b.denied} denied">
+                <div style="height:${allowedH}%;background:#16a34a;border-radius:2px 2px 0 0;"></div>
+                <div style="height:${deniedH}%;background:#dc2626;"></div>
+            </div>`;
+        }).join('');
+    }
+
+    // ─── Auto-scroll ──────────────────────────────────────────
+    function scrollToBottom() {
+        if (document.getElementById('autoScroll').checked) {
+            const tbody = document.getElementById('logTableBody');
+            if (tbody.lastElementChild) {
+                tbody.lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'end' });
+            }
+        }
+    }
+
     // ─── Filters ────────────────────────────────────────────
     document.getElementById('filterInput').addEventListener('input', renderLogs);
     document.getElementById('filterAction').addEventListener('change', renderLogs);
@@ -517,10 +616,16 @@
     function initDashboard() {
         loadStats();
         loadLogs();
+        loadTimeline();
         loadPendingAsks();
         connectLogStream();
         connectAskStream();
+        // Refresh timeline every 60 seconds
+        setInterval(loadTimeline, 60000);
     }
+
+    // Apply saved theme immediately
+    initTheme();
 
     // Check if auth is required by probing the status endpoint
     (async function boot() {

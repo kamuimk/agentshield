@@ -296,6 +296,51 @@ pub fn query_stats(conn: &Connection) -> Result<RequestStats> {
     Ok(stats)
 }
 
+/// A single bucket in the timeline aggregation.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TimelineBucket {
+    /// Start of the bucket (ISO 8601 timestamp, truncated to minute).
+    pub minute: String,
+    /// Total requests in this bucket.
+    pub total: i64,
+    /// Allowed requests.
+    pub allowed: i64,
+    /// Denied requests.
+    pub denied: i64,
+}
+
+/// Query bucketed request counts per minute over the last N minutes.
+pub fn query_timeline(conn: &Connection, minutes: i64) -> Result<Vec<TimelineBucket>> {
+    let since = chrono::Utc::now() - chrono::Duration::minutes(minutes);
+    let since_str = since.format("%Y-%m-%dT%H:%M").to_string();
+
+    let mut stmt = conn.prepare(
+        "SELECT substr(timestamp, 1, 16) AS minute,
+                COUNT(*) AS total,
+                SUM(CASE WHEN action = 'allow' OR action = 'system-allow' THEN 1 ELSE 0 END) AS allowed,
+                SUM(CASE WHEN action = 'deny' THEN 1 ELSE 0 END) AS denied
+         FROM requests
+         WHERE substr(timestamp, 1, 16) >= ?1
+         GROUP BY minute
+         ORDER BY minute ASC",
+    )?;
+
+    let rows = stmt.query_map(rusqlite::params![since_str], |row| {
+        Ok(TimelineBucket {
+            minute: row.get(0)?,
+            total: row.get(1)?,
+            allowed: row.get(2)?,
+            denied: row.get(3)?,
+        })
+    })?;
+
+    let mut buckets = Vec::new();
+    for row in rows {
+        buckets.push(row?);
+    }
+    Ok(buckets)
+}
+
 /// Open or create a SQLite database at the given path.
 pub fn open_db(path: &std::path::Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
@@ -738,5 +783,40 @@ mod tests {
         let logs = query_filtered(&conn, &filter).unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].domain, "api.test.com");
+    }
+
+    #[test]
+    fn query_timeline_returns_buckets() {
+        let conn = open_memory_db().unwrap();
+        let now = chrono::Utc::now();
+        // Insert logs at the current minute
+        let ts = now.format("%Y-%m-%dT%H:%M:00Z").to_string();
+        for action in &["allow", "deny", "allow"] {
+            let log = RequestLog {
+                id: None,
+                timestamp: ts.clone(),
+                method: "GET".to_string(),
+                domain: "test.com".to_string(),
+                path: "/".to_string(),
+                action: action.to_string(),
+                reason: "test".to_string(),
+                request_body: None,
+                dlp_findings: None,
+            };
+            log_request(&conn, &log).unwrap();
+        }
+
+        let buckets = super::query_timeline(&conn, 5).unwrap();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].total, 3);
+        assert_eq!(buckets[0].allowed, 2);
+        assert_eq!(buckets[0].denied, 1);
+    }
+
+    #[test]
+    fn query_timeline_empty_db() {
+        let conn = open_memory_db().unwrap();
+        let buckets = super::query_timeline(&conn, 60).unwrap();
+        assert!(buckets.is_empty());
     }
 }

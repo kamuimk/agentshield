@@ -56,6 +56,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/logs/stream", get(get_logs_stream))
         .route("/api/status", get(get_status))
         .route("/api/policy", get(get_policy).put(put_policy))
+        .route("/api/stats/timeline", get(get_stats_timeline))
         .with_state(state.clone());
 
     let api = if let Some(ref token) = state.auth_token {
@@ -316,6 +317,54 @@ async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
     match logging::query_stats(&conn) {
         Ok(stats) => Json(StatusResponse::from(stats)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Query parameters for the timeline endpoint.
+#[derive(Deserialize)]
+struct TimelineQuery {
+    /// Number of minutes to look back (1–1440). Default: 60.
+    #[serde(default = "default_timeline_minutes")]
+    minutes: i64,
+}
+
+fn default_timeline_minutes() -> i64 {
+    60
+}
+
+/// `GET /api/stats/timeline` — per-minute bucketed request counts.
+async fn get_stats_timeline(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TimelineQuery>,
+) -> impl IntoResponse {
+    let Some(ref pool) = state.db else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "no database"})),
+        )
+            .into_response();
+    };
+
+    let minutes = query.minutes.clamp(1, 1440);
+
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+    };
+
+    match logging::query_timeline(&conn, minutes) {
+        Ok(buckets) => Json(buckets).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
@@ -802,5 +851,60 @@ mod tests {
     #[test]
     fn token_matches_both_empty() {
         assert!(super::token_matches("", ""));
+    }
+
+    #[tokio::test]
+    async fn get_stats_timeline_returns_array() {
+        let (state, _dir) = test_state();
+        let app = super::router(state);
+
+        let response = axum::http::Request::builder()
+            .uri("/api/stats/timeline?minutes=60")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let response = tower::ServiceExt::oneshot(app, response).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_array());
+    }
+
+    #[tokio::test]
+    async fn get_stats_timeline_empty_db() {
+        let (state, _dir) = test_state();
+        let app = super::router(state);
+
+        let response = axum::http::Request::builder()
+            .uri("/api/stats/timeline?minutes=10")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let response = tower::ServiceExt::oneshot(app, response).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn get_stats_timeline_clamps_minutes() {
+        let (state, _dir) = test_state();
+        let app = super::router(state);
+
+        // minutes=0 should be clamped to 1
+        let response = axum::http::Request::builder()
+            .uri("/api/stats/timeline?minutes=0")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let response = tower::ServiceExt::oneshot(app, response).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

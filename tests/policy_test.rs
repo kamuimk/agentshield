@@ -1,6 +1,5 @@
 use agentshield::policy::config::{
-    Action, AppConfig, LoggingConfig, ProxyMode, TelegramConfig, ValidationSeverity, WebConfig,
-    validate_config,
+    Action, AppConfig, ProxyMode, TelegramConfig, ValidationSeverity, WebConfig, validate_config,
 };
 
 const MINIMAL_TOML: &str = r#"
