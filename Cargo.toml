@@ -5,6 +5,22 @@ edition = "2024"
 rust-version = "1.85"
 description = "AI Agent Egress Firewall - Default-deny egress control for AI agents"
 license = "Apache-2.0"
+repository = "https://github.com/kamuimk/agentshield"
+homepage = "https://github.com/kamuimk/agentshield"
+readme = "README.md"
+keywords = ["ai", "agent", "firewall", "proxy", "security"]
+categories = ["command-line-utilities", "network-programming"]
+exclude = [
+  ".github/",
+  ".taskmaster/",
+  ".idea/",
+  ".serena/",
+  ".claude/",
+  "Formula/",
+  "install.sh",
+  "Dockerfile",
+  "docker-compose.yml",
+]
 
 [dependencies]
 hyper = { version = "1.6", features = ["full"] }
