@@ -182,6 +182,38 @@ impl std::fmt::Debug for SlackConfig {
     }
 }
 
+/// Discord configuration (`[notification.discord]`).
+#[derive(Clone, Deserialize, Serialize)]
+pub struct DiscordConfig {
+    /// Webhook URL for one-way notifications.
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    /// Bot token for interactive ASK via Gateway WebSocket.
+    #[serde(default)]
+    pub bot_token: Option<String>,
+    /// Channel ID to post ASK messages to (required for interactive mode).
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    /// Event types to send (empty = all).
+    #[serde(default)]
+    pub events: Vec<String>,
+    /// Enable bidirectional ASK approval via interactive buttons.
+    #[serde(default)]
+    pub interactive: bool,
+}
+
+impl std::fmt::Debug for DiscordConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiscordConfig")
+            .field("webhook_url", &self.webhook_url.as_ref().map(|_| "***"))
+            .field("bot_token", &self.bot_token.as_ref().map(|_| "***"))
+            .field("channel_id", &self.channel_id)
+            .field("events", &self.events)
+            .field("interactive", &self.interactive)
+            .finish()
+    }
+}
+
 /// Notification configuration (`[notification]` section).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NotificationConfig {
@@ -194,6 +226,9 @@ pub struct NotificationConfig {
     /// Optional Slack backend configuration.
     #[serde(default)]
     pub slack: Option<SlackConfig>,
+    /// Optional Discord backend configuration.
+    #[serde(default)]
+    pub discord: Option<DiscordConfig>,
 }
 
 /// Web dashboard configuration (`[web]` section).

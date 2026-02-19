@@ -9,6 +9,7 @@
 //! If no responder answers within the configured timeout, the request is denied
 //! (fail-closed).
 
+pub mod discord;
 pub mod slack;
 pub mod telegram;
 pub mod terminal;

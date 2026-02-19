@@ -225,6 +225,29 @@ async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::R
         }
     }
 
+    // Add DiscordAskResponder if interactive mode is enabled
+    if let Some(ref notif_config) = config.notification {
+        if notif_config.enabled {
+            if let Some(ref discord) = notif_config.discord {
+                if discord.interactive {
+                    if let (Some(bot_token), Some(channel_id)) =
+                        (&discord.bot_token, &discord.channel_id)
+                    {
+                        let discord_responder =
+                            Arc::new(agentshield::ask::discord::DiscordAskResponder::new(
+                                bot_token.clone(),
+                                channel_id.clone(),
+                            ));
+                        broadcaster.add_responder(discord_responder);
+                        info!("Discord ASK responder enabled (interactive mode)");
+                    } else {
+                        warn!("Discord interactive mode requires bot_token and channel_id");
+                    }
+                }
+            }
+        }
+    }
+
     // Add WebDashboardResponder if web is enabled
     if let Some(ref web_config) = config.web {
         if web_config.enabled {
@@ -350,6 +373,26 @@ async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::R
                     } else {
                         info!("Slack notification enabled (events: {:?})", slack.events);
                         Arc::new(FilteredNotifier::new(inner, slack.events.clone()))
+                    };
+                    notifiers.push(notifier);
+                }
+            }
+
+            if let Some(ref discord) = notif_config.discord {
+                if let Some(ref webhook_url) = discord.webhook_url {
+                    let inner: Arc<dyn Notifier> =
+                        Arc::new(agentshield::notification::discord::DiscordNotifier::new(
+                            webhook_url.clone(),
+                        ));
+                    let notifier: Arc<dyn Notifier> = if discord.events.is_empty() {
+                        info!("Discord notification enabled (events: all)");
+                        inner
+                    } else {
+                        info!(
+                            "Discord notification enabled (events: {:?})",
+                            discord.events
+                        );
+                        Arc::new(FilteredNotifier::new(inner, discord.events.clone()))
                     };
                     notifiers.push(notifier);
                 }

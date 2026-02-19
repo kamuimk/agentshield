@@ -1,6 +1,6 @@
 use agentshield::policy::config::{
-    Action, AppConfig, ProxyMode, SlackConfig, TelegramConfig, ValidationSeverity, WebConfig,
-    validate_config,
+    Action, AppConfig, DiscordConfig, ProxyMode, SlackConfig, TelegramConfig, ValidationSeverity,
+    WebConfig, validate_config,
 };
 
 const MINIMAL_TOML: &str = r#"
@@ -894,4 +894,103 @@ webhook_url = "https://hooks.slack.com/services/T/B/xxx"
     let notif = config.notification.unwrap();
     assert!(notif.telegram.is_some());
     assert!(notif.slack.is_some());
+}
+
+#[test]
+fn parse_discord_config() {
+    let toml_str = r##"
+[proxy]
+listen = "127.0.0.1:18080"
+
+[policy]
+default = "deny"
+
+[notification]
+enabled = true
+
+[notification.discord]
+webhook_url = "https://discord.com/api/webhooks/123/abc"
+events = ["deny", "dlp"]
+"##;
+    let config: AppConfig = toml::from_str(toml_str).unwrap();
+    let notif = config.notification.unwrap();
+    let discord = notif.discord.unwrap();
+    assert_eq!(
+        discord.webhook_url.unwrap(),
+        "https://discord.com/api/webhooks/123/abc"
+    );
+    assert_eq!(discord.events, vec!["deny", "dlp"]);
+    assert!(!discord.interactive);
+}
+
+#[test]
+fn discord_config_debug_masks_tokens() {
+    let discord = DiscordConfig {
+        webhook_url: Some("https://discord.com/api/webhooks/123/secret".to_string()),
+        bot_token: Some("secret-bot-token".to_string()),
+        channel_id: Some("123456789".to_string()),
+        events: vec![],
+        interactive: false,
+    };
+    let debug_output = format!("{:?}", discord);
+    assert!(
+        !debug_output.contains("secret"),
+        "Debug output must not contain the actual tokens"
+    );
+    assert!(debug_output.contains("***"));
+    assert!(debug_output.contains("123456789")); // channel_id is not masked
+}
+
+#[test]
+fn parse_discord_interactive_config() {
+    let toml_str = r##"
+[proxy]
+listen = "127.0.0.1:18080"
+
+[policy]
+default = "deny"
+
+[notification]
+enabled = true
+
+[notification.discord]
+bot_token = "my-bot-token"
+channel_id = "123456789"
+interactive = true
+"##;
+    let config: AppConfig = toml::from_str(toml_str).unwrap();
+    let notif = config.notification.unwrap();
+    let discord = notif.discord.unwrap();
+    assert!(discord.interactive);
+    assert_eq!(discord.bot_token.unwrap(), "my-bot-token");
+    assert_eq!(discord.channel_id.unwrap(), "123456789");
+}
+
+#[test]
+fn parse_notification_all_three_backends() {
+    let toml_str = r##"
+[proxy]
+listen = "127.0.0.1:18080"
+
+[policy]
+default = "deny"
+
+[notification]
+enabled = true
+
+[notification.telegram]
+bot_token = "123:ABC"
+chat_id = "999"
+
+[notification.slack]
+webhook_url = "https://hooks.slack.com/services/T/B/xxx"
+
+[notification.discord]
+webhook_url = "https://discord.com/api/webhooks/123/abc"
+"##;
+    let config: AppConfig = toml::from_str(toml_str).unwrap();
+    let notif = config.notification.unwrap();
+    assert!(notif.telegram.is_some());
+    assert!(notif.slack.is_some());
+    assert!(notif.discord.is_some());
 }

@@ -14,6 +14,7 @@
 //! - [`NotificationEvent::ProxyStarted`] — proxy server started
 //! - [`NotificationEvent::ProxyShutdown`] — proxy server shutting down
 
+pub mod discord;
 pub mod slack;
 pub mod telegram;
 
