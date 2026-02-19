@@ -364,22 +364,62 @@ pub fn parse_interaction_event(
     }
 }
 
+/// Fetch the Discord Gateway URL dynamically via the Bot API.
+///
+/// Falls back to the well-known URL if the API call fails.
+async fn get_gateway_url(client: &reqwest::Client, bot_token: &str) -> String {
+    let fallback = "wss://gateway.discord.gg/?v=10&encoding=json".to_string();
+
+    let resp = client
+        .get("https://discord.com/api/v10/gateway/bot")
+        .header("Authorization", format!("Bot {}", bot_token))
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            if let Ok(json) = r.json::<serde_json::Value>().await {
+                if let Some(url) = json["url"].as_str() {
+                    return format!("{}/?v=10&encoding=json", url);
+                }
+            }
+            warn!("Discord Gateway API response missing url, using fallback");
+            fallback
+        }
+        Ok(r) => {
+            warn!(
+                "Discord Gateway API returned {}, using fallback URL",
+                r.status()
+            );
+            fallback
+        }
+        Err(e) => {
+            warn!(
+                "Discord Gateway API request failed: {}, using fallback URL",
+                e
+            );
+            fallback
+        }
+    }
+}
+
 /// Background Discord Gateway WebSocket loop.
 ///
 /// Connects to Discord's Gateway, identifies with bot token, receives
 /// INTERACTION_CREATE events, and resolves pending ASK requests.
+/// Uses `tokio::select!` with a heartbeat timer to keep the connection alive.
 /// Auto-reconnects on disconnect.
 async fn gateway_loop(
     client: &reqwest::Client,
     bot_token: &str,
     pending: &Arc<Mutex<HashMap<String, PendingAsk>>>,
 ) {
-    let gateway_url = "wss://gateway.discord.gg/?v=10&encoding=json";
-
     loop {
+        let gateway_url = get_gateway_url(client, bot_token).await;
+
         // Connect WebSocket
-        let ws_result = tokio_tungstenite::connect_async(gateway_url).await;
-        let (mut ws, _) = match ws_result {
+        let ws_result = tokio_tungstenite::connect_async(&gateway_url).await;
+        let (ws, _) = match ws_result {
             Ok(pair) => pair,
             Err(e) => {
                 error!("Discord Gateway connection error: {}", e);
@@ -390,148 +430,165 @@ async fn gateway_loop(
 
         info!("Discord Gateway connected");
 
+        let (mut write, mut read) = ws.split();
         let mut heartbeat_interval_ms: u64 = 41250; // default
         let mut sequence: Option<u64> = None;
         let mut identified = false;
+        let mut heartbeat_timer =
+            tokio::time::interval(std::time::Duration::from_millis(heartbeat_interval_ms));
+        // Don't send heartbeat immediately on first tick
+        heartbeat_timer.reset();
 
-        // Read messages from WebSocket
-        while let Some(msg) = ws.next().await {
-            let msg = match msg {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!("Discord Gateway read error: {}", e);
-                    break; // Reconnect
-                }
-            };
-
-            let text = match msg {
-                tokio_tungstenite::tungstenite::Message::Text(t) => t,
-                tokio_tungstenite::tungstenite::Message::Ping(_) => continue,
-                tokio_tungstenite::tungstenite::Message::Close(_) => {
-                    info!("Discord Gateway closed, reconnecting...");
-                    break;
-                }
-                _ => continue,
-            };
-
-            let event: serde_json::Value = match serde_json::from_str(&text) {
-                Ok(v) => v,
-                Err(e) => {
-                    debug!("Discord Gateway non-JSON message: {}", e);
-                    continue;
-                }
-            };
-
-            let op = event.get("op").and_then(|v| v.as_u64()).unwrap_or(0);
-
-            // Track sequence number
-            if let Some(s) = event.get("s").and_then(|v| v.as_u64()) {
-                sequence = Some(s);
-            }
-
-            match op {
-                // Opcode 10: Hello — start heartbeating and identify
-                10 => {
-                    if let Some(interval) = event
-                        .get("d")
-                        .and_then(|d| d.get("heartbeat_interval"))
-                        .and_then(|v| v.as_u64())
-                    {
-                        heartbeat_interval_ms = interval;
-                    }
-
-                    // Send Identify (opcode 2)
-                    if !identified {
-                        let identify = serde_json::json!({
-                            "op": 2,
-                            "d": {
-                                "token": bot_token,
-                                "intents": 0,
-                                "properties": {
-                                    "os": "linux",
-                                    "browser": "agentshield",
-                                    "device": "agentshield"
-                                }
-                            }
-                        });
-                        if let Err(e) = ws
-                            .send(tokio_tungstenite::tungstenite::Message::Text(
-                                identify.to_string().into(),
-                            ))
-                            .await
-                        {
-                            error!("Failed to send Discord Identify: {}", e);
+        loop {
+            tokio::select! {
+                msg = read.next() => {
+                    let msg = match msg {
+                        Some(Ok(m)) => m,
+                        Some(Err(e)) => {
+                            warn!("Discord Gateway read error: {}", e);
                             break;
                         }
-                        identified = true;
+                        None => break,
+                    };
 
-                        // Spawn heartbeat task
-                        let heartbeat_interval =
-                            std::time::Duration::from_millis(heartbeat_interval_ms);
-                        let seq_clone = sequence;
-                        // Note: In a production implementation, heartbeat should use
-                        // a shared reference to send on the same ws connection.
-                        // For simplicity, we send heartbeats inline below.
-                        let _ = seq_clone;
-                        let _ = heartbeat_interval;
+                    let text = match msg {
+                        tokio_tungstenite::tungstenite::Message::Text(t) => t,
+                        tokio_tungstenite::tungstenite::Message::Ping(_) => continue,
+                        tokio_tungstenite::tungstenite::Message::Close(_) => {
+                            info!("Discord Gateway closed, reconnecting...");
+                            break;
+                        }
+                        _ => continue,
+                    };
+
+                    let event: serde_json::Value = match serde_json::from_str(&text) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            debug!("Discord Gateway non-JSON message: {}", e);
+                            continue;
+                        }
+                    };
+
+                    let op = event.get("op").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                    // Track sequence number
+                    if let Some(s) = event.get("s").and_then(|v| v.as_u64()) {
+                        sequence = Some(s);
+                    }
+
+                    match op {
+                        // Opcode 10: Hello — extract heartbeat interval and identify
+                        10 => {
+                            if let Some(interval) = event
+                                .get("d")
+                                .and_then(|d| d.get("heartbeat_interval"))
+                                .and_then(|v| v.as_u64())
+                            {
+                                heartbeat_interval_ms = interval;
+                                heartbeat_timer = tokio::time::interval(
+                                    std::time::Duration::from_millis(heartbeat_interval_ms),
+                                );
+                                // First tick fires immediately (initial heartbeat)
+                            }
+
+                            // Send Identify (opcode 2)
+                            if !identified {
+                                let identify = serde_json::json!({
+                                    "op": 2,
+                                    "d": {
+                                        "token": bot_token,
+                                        "intents": 0,
+                                        "properties": {
+                                            "os": "linux",
+                                            "browser": "agentshield",
+                                            "device": "agentshield"
+                                        }
+                                    }
+                                });
+                                if let Err(e) = write
+                                    .send(tokio_tungstenite::tungstenite::Message::Text(
+                                        identify.to_string().into(),
+                                    ))
+                                    .await
+                                {
+                                    error!("Failed to send Discord Identify: {}", e);
+                                    break;
+                                }
+                                identified = true;
+                            }
+                        }
+
+                        // Opcode 11: Heartbeat ACK
+                        11 => {
+                            debug!("Discord Gateway heartbeat ACK");
+                        }
+
+                        // Opcode 1: Server-requested heartbeat
+                        1 => {
+                            let hb = serde_json::json!({"op": 1, "d": sequence});
+                            if let Err(e) = write
+                                .send(tokio_tungstenite::tungstenite::Message::Text(
+                                    hb.to_string().into(),
+                                ))
+                                .await
+                            {
+                                warn!("Failed to send Discord heartbeat: {}", e);
+                                break;
+                            }
+                        }
+
+                        // Opcode 0: Dispatch
+                        0 => {
+                            let event_type = event.get("t").and_then(|v| v.as_str());
+
+                            if event_type == Some("INTERACTION_CREATE") {
+                                if let Some((action, req_id, interaction_id, interaction_token)) =
+                                    parse_interaction_event(&event)
+                                {
+                                    if let Err(e) =
+                                        ack_interaction(client, &interaction_id, &interaction_token).await
+                                    {
+                                        warn!("Failed to ACK Discord interaction: {}", e);
+                                    }
+
+                                    let allowed = action == "ask_allow";
+                                    info!("Discord interaction: {} req_id={}", action, req_id);
+
+                                    let pending_ask = {
+                                        let mut map = pending.lock().unwrap();
+                                        map.remove(&req_id)
+                                    };
+
+                                    if let Some(pa) = pending_ask {
+                                        let _ = pa.tx.send(allowed);
+                                    } else {
+                                        debug!("No pending ASK for req_id={} (already resolved)", req_id);
+                                    }
+                                }
+                            } else {
+                                debug!("Discord dispatch: {:?}", event_type.unwrap_or("unknown"));
+                            }
+                        }
+
+                        _ => {
+                            debug!("Discord Gateway opcode: {}", op);
+                        }
                     }
                 }
 
-                // Opcode 11: Heartbeat ACK
-                11 => {
-                    debug!("Discord Gateway heartbeat ACK");
-                }
-
-                // Opcode 1: Heartbeat request
-                1 => {
+                // Periodic heartbeat (opcode 1) at the interval from Hello
+                _ = heartbeat_timer.tick() => {
                     let hb = serde_json::json!({"op": 1, "d": sequence});
-                    if let Err(e) = ws
+                    if let Err(e) = write
                         .send(tokio_tungstenite::tungstenite::Message::Text(
                             hb.to_string().into(),
                         ))
                         .await
                     {
-                        warn!("Failed to send Discord heartbeat: {}", e);
+                        warn!("Heartbeat send error: {}", e);
                         break;
                     }
-                }
-
-                // Opcode 0: Dispatch
-                0 => {
-                    let event_type = event.get("t").and_then(|v| v.as_str());
-
-                    if event_type == Some("INTERACTION_CREATE") {
-                        if let Some((action, req_id, interaction_id, interaction_token)) =
-                            parse_interaction_event(&event)
-                        {
-                            // ACK the interaction immediately
-                            if let Err(e) =
-                                ack_interaction(client, &interaction_id, &interaction_token).await
-                            {
-                                warn!("Failed to ACK Discord interaction: {}", e);
-                            }
-
-                            let allowed = action == "ask_allow";
-                            info!("Discord interaction: {} req_id={}", action, req_id);
-
-                            let pending_ask = {
-                                let mut map = pending.lock().unwrap();
-                                map.remove(&req_id)
-                            };
-
-                            if let Some(pa) = pending_ask {
-                                let _ = pa.tx.send(allowed);
-                            } else {
-                                debug!("No pending ASK for req_id={} (already resolved)", req_id);
-                            }
-                        }
-                    } else {
-                        debug!("Discord dispatch: {:?}", event_type.unwrap_or("unknown"));
-                    }
-                }
-
-                _ => {
-                    debug!("Discord Gateway opcode: {}", op);
+                    debug!("Discord Gateway heartbeat sent (seq: {:?})", sequence);
                 }
             }
         }

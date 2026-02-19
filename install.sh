@@ -71,7 +71,11 @@ get_version() {
     fi
 
     info "Fetching latest version..."
-    VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+    AUTH_HEADER=""
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        AUTH_HEADER="Authorization: token $GITHUB_TOKEN"
+    fi
+    VERSION="$(curl -fsSL ${AUTH_HEADER:+-H "$AUTH_HEADER"} "https://api.github.com/repos/${REPO}/releases/latest" \
         | grep '"tag_name"' \
         | head -1 \
         | sed 's/.*"tag_name": *"//;s/".*//')"
