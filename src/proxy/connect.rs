@@ -158,16 +158,17 @@ fn should_audit(config: Option<&LoggingConfig>, action: &str) -> bool {
 
 /// Format DLP findings as a JSON string for storage.
 fn format_dlp_findings(findings: &[crate::dlp::DlpFinding]) -> String {
-    let entries: Vec<String> = findings
+    let entries: Vec<serde_json::Value> = findings
         .iter()
         .map(|f| {
-            format!(
-                r#"{{"pattern":"{}","severity":"{:?}","matched":"{}"}}"#,
-                f.pattern_name, f.severity, f.matched_text
-            )
+            serde_json::json!({
+                "pattern": f.pattern_name,
+                "severity": format!("{:?}", f.severity),
+                "matched": f.matched_text,
+            })
         })
         .collect();
-    format!("[{}]", entries.join(","))
+    serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string())
 }
 
 /// Log with optional audit body capture. Checks should_audit and truncates body.
@@ -188,10 +189,20 @@ fn log_to_db_audited(
             .as_ref()
             .map(|c| c.audit_max_body_size)
             .unwrap_or(65536);
-        let truncated_body = body.and_then(|b| {
-            let slice = &b[..b.len().min(max_size)];
-            String::from_utf8(slice.to_vec()).ok()
-        });
+        let redact_dlp = ctx
+            .logging_config
+            .as_ref()
+            .map(|c| c.audit_redact_dlp)
+            .unwrap_or(true);
+        // Redact body when DLP findings are present and redaction is enabled
+        let truncated_body = if redact_dlp && dlp_findings.is_some() {
+            Some("[BODY REDACTED: DLP sensitive data detected]".to_string())
+        } else {
+            body.and_then(|b| {
+                let slice = &b[..b.len().min(max_size)];
+                String::from_utf8(slice.to_vec()).ok()
+            })
+        };
         log_to_db_with_audit(
             ctx,
             method,
@@ -893,11 +904,13 @@ async fn handle_connect_mitm(
                     request_buf.extend_from_slice(&tmp[..n]);
                 }
                 // Decode chunked body and reconstruct request with Content-Length
-                let chunked_data = &request_buf[body_start..];
-                if let Ok(decoded) = decode_chunked_body(chunked_data, max_body) {
-                    // Replace chunked body with decoded body for DLP scanning
-                    request_buf.truncate(body_start);
-                    request_buf.extend_from_slice(&decoded);
+                let decoded = {
+                    let chunked_data = &request_buf[body_start..];
+                    decode_chunked_body(chunked_data, max_body)
+                };
+                if let Ok(decoded) = decoded {
+                    // Fix headers: remove Transfer-Encoding, add Content-Length, replace body
+                    fix_headers_after_chunked_decode(&mut request_buf, body_start, &decoded);
                 }
             }
             _ => {} // No body
@@ -1039,18 +1052,41 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 /// Parse Content-Length value from HTTP headers string.
 fn parse_content_length(headers: &str) -> Option<usize> {
     for line in headers.lines() {
-        if let Some(val) = line
-            .strip_prefix("Content-Length:")
-            .or_else(|| line.strip_prefix("content-length:"))
-        {
-            return val.trim().parse().ok();
-        }
-        // Case-insensitive check
-        if line.len() > 16 && line[..15].eq_ignore_ascii_case("content-length:") {
-            return line[15..].trim().parse().ok();
+        if let Some((key, val)) = line.split_once(':') {
+            if key.trim().eq_ignore_ascii_case("content-length") {
+                return val.trim().parse().ok();
+            }
         }
     }
     None
+}
+
+/// After decoding chunked body, fix headers: remove Transfer-Encoding and add Content-Length.
+fn fix_headers_after_chunked_decode(request_buf: &mut Vec<u8>, body_start: usize, decoded: &[u8]) {
+    let header_str = String::from_utf8_lossy(&request_buf[..body_start]).into_owned();
+    let fixed_lines: Vec<&str> = header_str
+        .split("\r\n")
+        .filter(|line| {
+            if line.is_empty() {
+                return false;
+            }
+            if let Some((key, _)) = line.split_once(':') {
+                if key.trim().eq_ignore_ascii_case("transfer-encoding") {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+
+    request_buf.clear();
+    for line in &fixed_lines {
+        request_buf.extend_from_slice(line.as_bytes());
+        request_buf.extend_from_slice(b"\r\n");
+    }
+    request_buf.extend_from_slice(format!("Content-Length: {}\r\n", decoded.len()).as_bytes());
+    request_buf.extend_from_slice(b"\r\n");
+    request_buf.extend_from_slice(decoded);
 }
 
 /// Check if a domain is in the system allowlist (bypass policy evaluation).
@@ -1110,12 +1146,14 @@ fn parse_path(uri: &str) -> String {
 
 /// Check if the request uses chunked transfer encoding.
 fn is_chunked(headers: &str) -> bool {
-    for line in headers.lines() {
-        if line.len() > 19 && line[..18].eq_ignore_ascii_case("transfer-encoding:") {
-            return line[18..].trim().eq_ignore_ascii_case("chunked");
-        }
-    }
-    false
+    headers.lines().any(|line| {
+        line.split_once(':')
+            .map(|(key, val)| {
+                key.trim().eq_ignore_ascii_case("transfer-encoding")
+                    && val.trim().eq_ignore_ascii_case("chunked")
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// Decode a chunked-encoded body from a byte slice.
@@ -1136,9 +1174,10 @@ fn decode_chunked_body(data: &[u8], max_size: usize) -> crate::error::Result<Vec
             None => break,
         };
 
-        // Parse chunk size (hex)
+        // Parse chunk size (hex), ignoring optional chunk extensions after ';'
         let size_str = std::str::from_utf8(&data[pos..size_end]).unwrap_or("0");
-        let chunk_size = usize::from_str_radix(size_str.trim(), 16).unwrap_or(0);
+        let size_part = size_str.split(';').next().unwrap_or("0");
+        let chunk_size = usize::from_str_radix(size_part.trim(), 16).unwrap_or(0);
 
         if chunk_size == 0 {
             break;
@@ -1467,6 +1506,7 @@ mod tests {
             audit: true,
             audit_max_body_size: 65536,
             audit_actions: vec![],
+            ..Default::default()
         };
         assert!(should_audit(Some(&config), "allow"));
         assert!(should_audit(Some(&config), "deny"));
@@ -1479,6 +1519,7 @@ mod tests {
             audit: true,
             audit_max_body_size: 65536,
             audit_actions: vec!["deny".to_string(), "allow".to_string()],
+            ..Default::default()
         };
         assert!(should_audit(Some(&config), "deny"));
         assert!(should_audit(Some(&config), "allow"));
@@ -1512,6 +1553,7 @@ mod tests {
             audit: true,
             audit_max_body_size: 65536,
             audit_actions: vec![],
+            ..Default::default()
         };
         let ctx = ConnectionContext {
             policy: None,
@@ -1589,6 +1631,7 @@ mod tests {
             audit: true,
             audit_max_body_size: 10, // Only 10 bytes
             audit_actions: vec![],
+            ..Default::default()
         };
         let ctx = ConnectionContext {
             policy: None,
@@ -1631,6 +1674,7 @@ mod tests {
             audit: true,
             audit_max_body_size: 65536,
             audit_actions: vec![],
+            ..Default::default()
         };
         let ctx = ConnectionContext {
             policy: None,
@@ -1662,6 +1706,52 @@ mod tests {
         let logs = crate::logging::query_recent(&conn, 1).unwrap();
         assert_eq!(logs.len(), 1);
         assert!(logs[0].dlp_findings.as_deref().unwrap().contains("openai"));
+        // Body should be redacted when audit_redact_dlp is true (default)
+        assert_eq!(
+            logs[0].request_body.as_deref(),
+            Some("[BODY REDACTED: DLP sensitive data detected]")
+        );
+    }
+
+    #[test]
+    fn log_to_db_audited_no_redact_when_disabled() {
+        let pool = crate::logging::open_memory_pool().unwrap();
+        let config = LoggingConfig {
+            audit: true,
+            audit_redact_dlp: false,
+            ..Default::default()
+        };
+        let ctx = ConnectionContext {
+            policy: None,
+            db: Some(pool.clone()),
+            ask_broadcaster: None,
+            dlp_scanner: None,
+            system_allowlist: None,
+            notifier: None,
+            event_tx: None,
+            rate_limiter: None,
+            mitm_enabled: false,
+            cert_cache: None,
+            upstream_tls_config: None,
+            logging_config: Some(config),
+        };
+
+        log_to_db_audited(
+            &ctx,
+            "POST",
+            "api.example.com",
+            "/v1/chat",
+            "deny",
+            "DLP: critical",
+            Some(b"sk-secret123"),
+            Some(r#"[{"pattern":"openai"}]"#),
+        );
+
+        let conn = pool.get().unwrap();
+        let logs = crate::logging::query_recent(&conn, 1).unwrap();
+        assert_eq!(logs.len(), 1);
+        // Body should NOT be redacted when audit_redact_dlp is false
+        assert_eq!(logs[0].request_body.as_deref(), Some("sk-secret123"));
     }
 
     #[test]
@@ -1669,5 +1759,53 @@ mod tests {
         let input = b"5\r\nhello\r\n0\r\n\r\n";
         let result = decode_chunked_body(input, 3);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn decode_chunked_body_with_extension() {
+        // RFC 7230: chunk-size can be followed by ";ext=value"
+        let input = b"5;ext=val\r\nhello\r\n0\r\n\r\n";
+        let result = decode_chunked_body(input, 1024).unwrap();
+        assert_eq!(result, b"hello");
+    }
+
+    #[test]
+    fn fix_headers_removes_transfer_encoding_adds_content_length() {
+        let mut buf =
+            b"POST /api HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n"
+                .to_vec();
+        let body_start = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let decoded = b"hello world";
+        fix_headers_after_chunked_decode(&mut buf, body_start, decoded);
+
+        let result = String::from_utf8_lossy(&buf);
+        assert!(!result.contains("Transfer-Encoding"));
+        assert!(result.contains("Content-Length: 11"));
+        assert!(result.contains("hello world"));
+    }
+
+    #[test]
+    fn format_dlp_findings_escapes_special_chars() {
+        let findings = vec![crate::dlp::DlpFinding {
+            pattern_name: "test".to_string(),
+            severity: crate::dlp::Severity::Critical,
+            matched_text: r#"has "quotes" and \backslash"#.to_string(),
+        }];
+        let result = format_dlp_findings(&findings);
+        // Should be valid JSON
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed[0]["matched"], r#"has "quotes" and \backslash"#);
+    }
+
+    #[test]
+    fn is_chunked_mixed_case() {
+        let headers = "POST / HTTP/1.1\r\nTRANSFER-ENCODING: CHUNKED\r\nHost: x";
+        assert!(is_chunked(headers));
+    }
+
+    #[test]
+    fn parse_content_length_mixed_case() {
+        let headers = "POST / HTTP/1.1\r\nCONTENT-LENGTH: 99\r\nHost: x";
+        assert_eq!(parse_content_length(headers), Some(99));
     }
 }

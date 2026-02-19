@@ -216,12 +216,13 @@ pub fn query_filtered(conn: &Connection, filter: &LogFilter) -> Result<Vec<Reque
         params.push(Box::new(until.clone()));
     }
     if let Some(ref search) = filter.search {
-        sql.push_str(" AND (domain LIKE ? OR path LIKE ? OR reason LIKE ? OR request_body LIKE ?)");
-        let pattern = format!("%{}%", search);
-        params.push(Box::new(pattern.clone()));
-        params.push(Box::new(pattern.clone()));
-        params.push(Box::new(pattern.clone()));
-        params.push(Box::new(pattern));
+        sql.push_str(
+            " AND (INSTR(domain, ?) > 0 OR INSTR(path, ?) > 0 OR INSTR(reason, ?) > 0 OR INSTR(COALESCE(request_body, ''), ?) > 0)",
+        );
+        params.push(Box::new(search.clone()));
+        params.push(Box::new(search.clone()));
+        params.push(Box::new(search.clone()));
+        params.push(Box::new(search.clone()));
     }
 
     sql.push_str(" ORDER BY id DESC LIMIT ?");

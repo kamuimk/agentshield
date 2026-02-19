@@ -187,7 +187,7 @@ fn default_web_listen() -> String {
 }
 
 /// Audit logging configuration (`[logging]` section).
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LoggingConfig {
     /// Enable audit logging (request body storage).
     #[serde(default)]
@@ -198,6 +198,24 @@ pub struct LoggingConfig {
     /// Action types to audit. Empty = all actions.
     #[serde(default)]
     pub audit_actions: Vec<String>,
+    /// Redact DLP-matched text in audit body (default: true).
+    #[serde(default = "default_true")]
+    pub audit_redact_dlp: bool,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            audit: false,
+            audit_max_body_size: default_audit_max_body_size(),
+            audit_actions: Vec::new(),
+            audit_redact_dlp: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_audit_max_body_size() -> usize {
