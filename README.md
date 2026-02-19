@@ -14,7 +14,7 @@ AgentShield is a transparent egress firewall for AI agents (OpenClaw, Claude Cod
 
 ```mermaid
 flowchart LR
-    A[AI Agent<br/>OpenClaw / Claude Code] -->|HTTPS_PROXY| B[AgentShield<br/>Proxy]
+    A[AI Agent<br/>Claude Code / OpenClaw<br/>Aider / Codex / Cursor] -->|HTTPS_PROXY| B[AgentShield<br/>Proxy]
     B --> C{Policy Engine}
     C -->|Allow| D[External API<br/>api.anthropic.com]
     C -->|Deny| E[403 Blocked]
@@ -22,36 +22,53 @@ flowchart LR
     F --> F1[Terminal]
     F --> F2[Telegram Bot]
     F --> F3[Web Dashboard]
+    F --> F4[Slack / Discord]
     F1 -->|Approve| D
     F1 -->|Deny| E
     B --> G[(SQLite Pool)]
     B --> H{DLP Scanner}
     H -->|Critical| E
     H -->|Clean| D
-    E -->|Notify| I[Telegram]
+    E -->|Notify| I[Telegram / Slack / Discord]
     H -->|Critical| I
     B -->|SSE| J[Web Dashboard<br/>:18081]
 ```
 
-## Quick Start
+## Installation
 
 ```bash
+# One-line install (macOS / Linux)
+curl -fsSL https://raw.githubusercontent.com/kamuimk/agentshield/main/install.sh | sh
+
+# Homebrew (macOS / Linux)
+brew install kamuimk/tap/agentshield
+
 # Build from source (requires Rust 1.85+)
-git clone https://github.com/kamuimk/agentshield.git
-cd agentshield
+git clone https://github.com/kamuimk/agentshield.git && cd agentshield
 cargo build --release
+```
 
-# Initialize
-./target/release/agentshield init
+## Quick Start
 
-# Apply a policy template
-./target/release/agentshield policy template openclaw-default
+The fastest way to get started — a single command that launches the proxy and wraps your agent:
 
-# Start the proxy
-./target/release/agentshield start
+```bash
+# Interactive setup wizard
+agentshield quickstart
 
-# Point your AI agent to the proxy
-export HTTPS_PROXY=http://127.0.0.1:18080
+# Or wrap any agent in one line
+agentshield wrap -- claude
+agentshield wrap -- aider
+agentshield wrap --mitm --dashboard -- codex
+```
+
+### Manual Setup
+
+```bash
+agentshield init                              # Initialize config + database
+agentshield policy template claude-code-default  # Apply a template
+agentshield start                              # Start the proxy
+export HTTPS_PROXY=http://127.0.0.1:18080      # Point your agent to the proxy
 ```
 
 ### Integrate with AI Agents
@@ -196,15 +213,26 @@ allowlist = ["api.telegram.org"]
 
 ### Notifications
 
-AgentShield can send alerts to Telegram when requests are denied or DLP findings occur. Notifications are fire-and-forget — failures never block the proxy.
+AgentShield sends alerts via Telegram, Slack, and/or Discord when requests are denied or DLP findings occur. Multiple backends can be enabled simultaneously. Notifications are fire-and-forget — failures never block the proxy.
 
 ```toml
 [notification]
 enabled = true
 
+# Telegram
 [notification.telegram]
 bot_token = "${AGENTSHIELD_TELEGRAM_TOKEN}"
 chat_id = "${AGENTSHIELD_TELEGRAM_CHAT_ID}"
+events = ["deny", "dlp"]
+
+# Slack (Incoming Webhook)
+[notification.slack]
+webhook_url = "${AGENTSHIELD_SLACK_WEBHOOK}"
+events = ["deny", "dlp"]
+
+# Discord (Webhook or Bot)
+[notification.discord]
+webhook_url = "${AGENTSHIELD_DISCORD_WEBHOOK}"
 events = ["deny", "dlp"]
 ```
 
@@ -221,18 +249,25 @@ The `events` field filters which event types trigger a notification:
 
 If `events` is empty or omitted, all event types are forwarded (backward compatible).
 
-#### Interactive Telegram ASK
+#### Interactive ASK via Telegram / Discord
 
-Enable bidirectional ASK approval via Telegram inline keyboard:
+Enable bidirectional ASK approval via inline buttons:
 
 ```toml
+# Telegram inline keyboard
 [notification.telegram]
 bot_token = "${AGENTSHIELD_TELEGRAM_TOKEN}"
 chat_id = "${AGENTSHIELD_TELEGRAM_CHAT_ID}"
-interactive = true  # Enable inline keyboard for ASK approval
+interactive = true
+
+# Discord interactive buttons (requires bot_token + channel_id)
+[notification.discord]
+bot_token = "${AGENTSHIELD_DISCORD_BOT_TOKEN}"
+channel_id = "${AGENTSHIELD_DISCORD_CHANNEL_ID}"
+interactive = true
 ```
 
-When `interactive = true`, ASK requests appear as Telegram messages with Allow/Deny buttons. The first response from any channel (Terminal, Telegram, or Web Dashboard) wins.
+When `interactive = true`, ASK requests appear as messages with Allow/Deny buttons. The first response from any channel (Terminal, Telegram, Discord, or Web Dashboard) wins.
 
 ### Web Dashboard
 
@@ -397,20 +432,38 @@ Checks include: listen address format, MITM CA directory existence, duplicate ru
 
 | Template | Description |
 |----------|-------------|
-| `openclaw-default` | OpenClaw Gateway defaults: LLM APIs, messaging, GitHub, npm |
-| `claude-code-default` | Claude Code defaults |
+| `claude-code-default` | Claude Code: Anthropic, GitHub, npm |
+| `openclaw-default` | OpenClaw Gateway: LLM APIs, messaging, GitHub, npm |
+| `aider-default` | Aider: LLM APIs + GitHub |
+| `codex-default` | OpenAI Codex: OpenAI APIs |
+| `cursor-default` | Cursor IDE: Anthropic, OpenAI, Cursor servers |
+| `development-general` | General development: LLM APIs + GitHub + package registries |
+| `minimal-llm` | Minimal: only Anthropic + OpenAI + Google AI |
 | `strict` | Deny all traffic (blank slate) |
 
 ```bash
-agentshield policy template openclaw-default
+agentshield policy template claude-code-default
+agentshield policy template --list             # List all available templates
+```
+
+### Community Templates
+
+Place custom `.toml` files in `~/.agentshield/templates/` to make them available as templates:
+
+```bash
+cp my-custom.toml ~/.agentshield/templates/
+agentshield policy template my-custom
 ```
 
 ## CLI Commands
 
 ```
+agentshield quickstart                # Interactive setup wizard
+agentshield wrap -- claude            # Wrap an agent with proxy (one-line)
+agentshield wrap --mitm --dashboard -- aider  # With MITM + dashboard
 agentshield init                      # Initialize config + database
 agentshield start [--daemon]          # Start the proxy
-agentshield stop                      # Stop the proxy
+agentshield stop                      # Stop the proxy (graceful shutdown)
 agentshield status                    # Show request statistics
 agentshield validate                  # Validate config file
 agentshield logs [--tail N]           # View recent logs
@@ -420,6 +473,7 @@ agentshield logs --show-body          # Show audit body/DLP findings
 agentshield logs --export --format json  # Export logs
 agentshield policy show               # Display current policy
 agentshield policy template <name>    # Apply a template
+agentshield policy template --list    # List available templates
 agentshield integrate openclaw        # Configure OpenClaw to use proxy
 agentshield integrate claude-code     # Configure Claude Code to use proxy
 agentshield integrate remove          # Remove OpenClaw proxy config
@@ -485,7 +539,7 @@ AgentShield complements tools like [PipeLock](https://github.com/nichochar/pipel
 - **MSRV:** Rust 1.85 (edition 2024)
 
 ```bash
-cargo test --all     # Run all tests (353 tests)
+cargo test --all     # Run all tests (464 tests)
 cargo clippy         # Lint
 cargo fmt            # Format
 ```

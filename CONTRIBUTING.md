@@ -28,7 +28,7 @@ We follow **TDD (Test-Driven Development)**:
 ```bash
 cargo fmt --check       # Formatting
 cargo clippy -- -D warnings  # Linting (zero warnings)
-cargo test --all        # All tests pass (145+)
+cargo test --all        # All tests pass (464+)
 ```
 
 All three must pass. CI enforces these checks on every PR.
@@ -39,15 +39,18 @@ All three must pass. CI enforces these checks on every PR.
 src/
   main.rs           # CLI entry point (anyhow for errors)
   lib.rs            # Library root (pub mod declarations)
-  cli/              # CLI commands, ASK prompt, OpenClaw integration
-  proxy/            # Proxy server, connection handling
+  cli/              # CLI commands, wrap, quickstart, ASK prompt, integrations
+  proxy/            # Proxy server, connection handling, MITM TLS
   policy/           # TOML config types, policy evaluator
   dlp/              # DLP scanner, regex patterns
-  logging/          # SQLite logging, JSON/CSV export
-  notification/     # Notifier trait, Telegram, FilteredNotifier
+  logging/          # SQLite logging, JSON/CSV export, audit
+  notification/     # Notifier trait, Telegram, Slack, Discord, FilteredNotifier
+  ask/              # AskResponder trait, Terminal, Telegram, Discord, Web
+  web/              # axum web server, dashboard, REST API
+  ratelimit/        # Per-domain sliding window rate limiter
   error.rs          # thiserror-based error types
-templates/          # Built-in TOML policy templates
-tests/              # Integration tests
+templates/          # Built-in TOML policy templates (8 templates)
+tests/              # Integration + E2E tests
 ```
 
 ## Code Conventions
@@ -77,10 +80,15 @@ tests/              # Integration tests
 
 ## Adding a Policy Template
 
+**Built-in template:**
 1. Create a new `.toml` file in `templates/`
 2. Follow the existing template format (see `openclaw-default.toml`)
-3. Register it in `src/main.rs` `cmd_policy_template()`
-4. Add a test in `tests/integration_test.rs` to verify it parses correctly
+3. Register it in `src/cli/wrap.rs` (`template_content()` and `BUILTIN_TEMPLATES`)
+4. Add a test to verify it parses correctly as `AppConfig`
+
+**Community template:**
+1. Place your `.toml` file in `~/.agentshield/templates/`
+2. It becomes available via `agentshield policy template <name>` automatically
 
 ## Submitting a Pull Request
 
