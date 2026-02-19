@@ -46,6 +46,7 @@ pub enum DetectedAgent {
     OpenClaw,
     Aider,
     Codex,
+    Cursor,
     Unknown,
 }
 
@@ -57,6 +58,7 @@ impl DetectedAgent {
             DetectedAgent::OpenClaw => "openclaw-default",
             DetectedAgent::Aider => "aider-default",
             DetectedAgent::Codex => "codex-default",
+            DetectedAgent::Cursor => "cursor-default",
             DetectedAgent::Unknown => "strict",
         }
     }
@@ -83,6 +85,7 @@ pub fn detect_agent(command: &[String]) -> DetectedAgent {
         "openclaw" => DetectedAgent::OpenClaw,
         "aider" => DetectedAgent::Aider,
         "codex" | "openai" => DetectedAgent::Codex,
+        "cursor" => DetectedAgent::Cursor,
         "npx" => {
             // Check second argument for npx subcommand
             if let Some(second) = command.get(1) {
@@ -112,6 +115,9 @@ pub fn template_content(name: &str) -> Option<&'static str> {
         "strict" => Some(include_str!("../../templates/strict.toml")),
         "aider-default" => Some(include_str!("../../templates/aider-default.toml")),
         "codex-default" => Some(include_str!("../../templates/codex-default.toml")),
+        "cursor-default" => Some(include_str!("../../templates/cursor-default.toml")),
+        "development-general" => Some(include_str!("../../templates/development-general.toml")),
+        "minimal-llm" => Some(include_str!("../../templates/minimal-llm.toml")),
         _ => None,
     }
 }
@@ -352,10 +358,103 @@ mod tests {
         assert!(template_content("strict").is_some());
         assert!(template_content("aider-default").is_some());
         assert!(template_content("codex-default").is_some());
+        assert!(template_content("cursor-default").is_some());
+        assert!(template_content("development-general").is_some());
+        assert!(template_content("minimal-llm").is_some());
     }
 
     #[test]
     fn template_content_unknown() {
         assert!(template_content("nonexistent").is_none());
+    }
+
+    // --- Cursor agent detection ---
+
+    #[test]
+    fn detect_agent_cursor() {
+        assert_eq!(detect_agent(&cmd(&["cursor"])), DetectedAgent::Cursor);
+    }
+
+    #[test]
+    fn template_name_cursor() {
+        assert_eq!(DetectedAgent::Cursor.template_name(), "cursor-default");
+    }
+
+    // --- New template content validation ---
+
+    #[test]
+    fn template_cursor_valid_config() {
+        let content = template_content("cursor-default").unwrap();
+        let config: toml::Value = toml::from_str(content).unwrap();
+        let policy = config.get("policy").unwrap();
+        assert_eq!(policy.get("default").unwrap().as_str().unwrap(), "deny");
+    }
+
+    #[test]
+    fn template_development_general_valid_config() {
+        let content = template_content("development-general").unwrap();
+        let config: toml::Value = toml::from_str(content).unwrap();
+        let policy = config.get("policy").unwrap();
+        assert_eq!(policy.get("default").unwrap().as_str().unwrap(), "deny");
+        // Should have many rules (LLM APIs + GitHub + package registries)
+        let rules = policy.get("rules").unwrap().as_array().unwrap();
+        assert!(rules.len() >= 7);
+    }
+
+    #[test]
+    fn template_minimal_llm_valid_config() {
+        let content = template_content("minimal-llm").unwrap();
+        let config: toml::Value = toml::from_str(content).unwrap();
+        let policy = config.get("policy").unwrap();
+        assert_eq!(policy.get("default").unwrap().as_str().unwrap(), "deny");
+        // Should have exactly 3 rules (Anthropic, OpenAI, Google)
+        let rules = policy.get("rules").unwrap().as_array().unwrap();
+        assert_eq!(rules.len(), 3);
+    }
+
+    #[test]
+    fn template_cursor_has_cursor_domain() {
+        let content = template_content("cursor-default").unwrap();
+        assert!(content.contains("*.cursor.sh"));
+    }
+
+    #[test]
+    fn template_development_general_has_package_registries() {
+        let content = template_content("development-general").unwrap();
+        assert!(content.contains("registry.npmjs.org"));
+        assert!(content.contains("pypi.org"));
+        assert!(content.contains("crates.io"));
+        assert!(content.contains("registry-1.docker.io"));
+    }
+
+    #[test]
+    fn template_minimal_llm_no_github() {
+        let content = template_content("minimal-llm").unwrap();
+        assert!(!content.contains("github.com"));
+    }
+
+    #[test]
+    fn all_templates_parse_as_app_config() {
+        use crate::policy::config::AppConfig;
+        let templates = [
+            "claude-code-default",
+            "openclaw-default",
+            "strict",
+            "aider-default",
+            "codex-default",
+            "cursor-default",
+            "development-general",
+            "minimal-llm",
+        ];
+        for name in &templates {
+            let content = template_content(name).unwrap();
+            let result: Result<AppConfig, _> = toml::from_str(content);
+            assert!(
+                result.is_ok(),
+                "Template {} failed to parse: {:?}",
+                name,
+                result.err()
+            );
+        }
     }
 }

@@ -105,7 +105,14 @@ pub fn run_quickstart_wizard<R: BufRead, W: Write>(
     writeln!(writer, "=== AgentShield Quickstart ===")?;
 
     // 1. Agent selection
-    let agent_options = ["Claude Code", "OpenClaw", "Aider", "Codex", "Other"];
+    let agent_options = [
+        "Claude Code",
+        "OpenClaw",
+        "Aider",
+        "Codex",
+        "Cursor",
+        "Other",
+    ];
     let agent_idx = prompt_choice(
         reader,
         writer,
@@ -118,6 +125,7 @@ pub fn run_quickstart_wizard<R: BufRead, W: Write>(
         1 => DetectedAgent::OpenClaw,
         2 => DetectedAgent::Aider,
         3 => DetectedAgent::Codex,
+        4 => DetectedAgent::Cursor,
         _ => DetectedAgent::Unknown,
     };
     let template_name = agent.template_name().to_string();
@@ -229,6 +237,7 @@ pub fn cmd_quickstart<R: BufRead, W: Write>(
         DetectedAgent::OpenClaw => "openclaw",
         DetectedAgent::Aider => "aider",
         DetectedAgent::Codex => "codex",
+        DetectedAgent::Cursor => "cursor",
         DetectedAgent::Unknown => "<your-agent>",
     };
     writeln!(writer, "\nDone! Next steps:")?;
@@ -350,8 +359,8 @@ mod tests {
 
     #[test]
     fn wizard_unknown_custom_port() {
-        // Agent=5(Other), MITM=n, Dashboard=n, Port=9090
-        let input = "5\nn\nn\n9090\n";
+        // Agent=6(Other), MITM=n, Dashboard=n, Port=9090
+        let input = "6\nn\nn\n9090\n";
         let (mut r, mut w) = mock_io(input);
         let qc = run_quickstart_wizard(&mut r, &mut w).unwrap();
         assert_eq!(qc.agent, DetectedAgent::Unknown);

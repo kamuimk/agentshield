@@ -1,0 +1,35 @@
+# Cursor IDE Default Policy Template
+# Cursor AI 코드 에디터 사용에 필요한 최소한의 허용 룰
+
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+# LLM Provider APIs
+[[policy.rules]]
+name = "anthropic-api"
+domains = ["api.anthropic.com"]
+action = "allow"
+
+[[policy.rules]]
+name = "openai-api"
+domains = ["api.openai.com"]
+action = "allow"
+
+# Cursor backend services
+[[policy.rules]]
+name = "cursor-services"
+domains = ["*.cursor.sh"]
+action = "allow"
+
+# DLP (Data Loss Prevention)
+[dlp]
+enabled = true
+
+# Web dashboard
+[web]
+enabled = true
+listen = "127.0.0.1:18081"

@@ -725,16 +725,12 @@ fn cmd_policy_add() -> anyhow::Result<()> {
 ///
 /// Available templates: `openclaw-default`, `claude-code-default`, `strict`.
 fn cmd_policy_template(config_path: &Path, name: &str) -> anyhow::Result<()> {
-    let template_content = match name {
-        "openclaw-default" => include_str!("../templates/openclaw-default.toml"),
-        "claude-code-default" => include_str!("../templates/claude-code-default.toml"),
-        "strict" => include_str!("../templates/strict.toml"),
-        "aider-default" => include_str!("../templates/aider-default.toml"),
-        "codex-default" => include_str!("../templates/codex-default.toml"),
-        _ => {
+    let template_content = match agentshield::cli::wrap::template_content(name) {
+        Some(content) => content,
+        None => {
             println!("Unknown template: {}", name);
             println!(
-                "Available templates: openclaw-default, claude-code-default, aider-default, codex-default, strict"
+                "Available templates: openclaw-default, claude-code-default, aider-default, codex-default, cursor-default, development-general, minimal-llm, strict"
             );
             return Ok(());
         }

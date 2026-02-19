@@ -1,0 +1,72 @@
+# Development General Policy Template
+# 범용 개발 환경을 위한 LLM API + 패키지 레지스트리 허용 룰
+
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+# LLM Provider APIs
+[[policy.rules]]
+name = "anthropic-api"
+domains = ["api.anthropic.com"]
+action = "allow"
+
+[[policy.rules]]
+name = "openai-api"
+domains = ["api.openai.com"]
+action = "allow"
+
+[[policy.rules]]
+name = "google-ai-api"
+domains = ["generativelanguage.googleapis.com"]
+action = "allow"
+
+# GitHub (read allowed, write requires approval)
+[[policy.rules]]
+name = "github-read"
+domains = ["api.github.com", "github.com"]
+methods = ["GET"]
+action = "allow"
+
+[[policy.rules]]
+name = "github-write"
+domains = ["api.github.com"]
+methods = ["POST", "PUT", "PATCH", "DELETE"]
+action = "ask"
+
+# Package registries (read-only)
+[[policy.rules]]
+name = "npm-registry"
+domains = ["registry.npmjs.org"]
+methods = ["GET"]
+action = "allow"
+
+[[policy.rules]]
+name = "pypi"
+domains = ["pypi.org"]
+methods = ["GET"]
+action = "allow"
+
+[[policy.rules]]
+name = "crates-io"
+domains = ["crates.io"]
+methods = ["GET"]
+action = "allow"
+
+[[policy.rules]]
+name = "docker-hub"
+domains = ["registry-1.docker.io", "hub.docker.com"]
+methods = ["GET"]
+action = "allow"
+
+# DLP (Data Loss Prevention)
+[dlp]
+enabled = true
+
+# Web dashboard
+[web]
+enabled = true
+listen = "127.0.0.1:18081"

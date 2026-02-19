@@ -1,0 +1,34 @@
+# Minimal LLM Policy Template
+# LLM API만 허용하는 최소 정책 (외부 서비스 접근 차단)
+
+[proxy]
+listen = "127.0.0.1:18080"
+mode = "transparent"
+
+[policy]
+default = "deny"
+
+# LLM Provider APIs only
+[[policy.rules]]
+name = "anthropic-api"
+domains = ["api.anthropic.com"]
+action = "allow"
+
+[[policy.rules]]
+name = "openai-api"
+domains = ["api.openai.com"]
+action = "allow"
+
+[[policy.rules]]
+name = "google-ai-api"
+domains = ["generativelanguage.googleapis.com"]
+action = "allow"
+
+# DLP (Data Loss Prevention)
+[dlp]
+enabled = true
+
+# Web dashboard
+[web]
+enabled = true
+listen = "127.0.0.1:18081"
