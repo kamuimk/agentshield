@@ -2,155 +2,195 @@
   "master": {
     "tasks": [
       {
-        "id": "85",
-        "title": "Fix flaky test system_allowlist_bypasses_dlp_for_http using mock server",
-        "description": "Replace external example.com dependency in tests/proxy_test.rs with local TCP mock server or wiremock crate to eliminate CI flakiness (R1-1)",
-        "details": "Add wiremock as dev-dependency to Cargo.toml. In tests/proxy_test.rs, replace example.com with MockServer::start().await; mock_server.mock(|when, then| { when.any_request(); then.status(200); }); Use mock_server.uri() in proxy config. Ensure test binds to localhost only.",
-        "testStrategy": "Run cargo test --lib proxy_test::system_allowlist_bypasses_dlp_for_http --exact 100회 반복 실행하여 100% pass 확인. CI에서 외부 네트워크 의존성 완전 제거 검증.",
+        "id": "95",
+        "title": "Implement `agentshield wrap` core command",
+        "description": "Create the main `wrap` subcommand that orchestrates proxy startup, env var injection, child process execution, and graceful shutdown per R1 requirements",
+        "details": "Add `wrap` clap subcommand. Implement flow: check/create agentshield.toml → spawn proxy tokio task → set HTTP_PROXY/HTTPS_PROXY env vars → spawn child process with std::process::Command.env() → wait for child or signal → shutdown proxy and exit with child code. Use tokio::spawn for proxy in same process. Handle --mitm flag by calling existing CA logic.",
+        "testStrategy": "Unit tests: config creation, child spawn/exit code propagation, proxy startup/shutdown. Integration test: `wrap -- echo hello` completes with exit code 0 and proxy logs show startup.",
         "priority": "high",
         "dependencies": [],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-18T23:22:17.042Z"
+        "updatedAt": "2026-02-19T02:00:47.406Z"
       },
       {
-        "id": "86",
-        "title": "Implement chunked transfer-encoding support in MITM mode",
-        "description": "Add chunked decoding logic for requests without Content-Length header in MITM proxy handler (R1-2)",
-        "details": "In src/proxy/mitm.rs read_request_body function: if Content-Length missing and Transfer-Encoding: chunked, implement decode_chunked(stream, MAX_BODY_SIZE=10MB) using h2::recv::RecvStream or manual chunk parsing. Fallback to connection close with 10MB cap. Use tokio::io::AsyncReadExt for streaming.",
-        "testStrategy": "3개 단위 테스트 추가: 1) chunked body 정상 디코딩, 2) oversized chunked truncation, 3) mixed Content-Length+chunked 에러 처리. Integration test with curl --http1.1 --header 'Transfer-Encoding: chunked'",
-        "priority": "high",
-        "dependencies": [],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-18T23:28:35.776Z"
-      },
-      {
-        "id": "87",
-        "title": "Improve expand_tilde() using dirs crate",
-        "description": "Replace custom tilde expansion with dirs::home_dir() for robust path handling (R1-3)",
-        "details": "Add dirs = '5.0' to Cargo.toml. Implement:\n```rust\nfn expand_tilde(path: &str) -> PathBuf {\n    if let Some(rest) = path.strip_prefix(\"~\") {\n        dirs::home_dir().map(|home| home.join(rest)).unwrap_or_else(|| PathBuf::from(path))\n    } else if path == \"~\" {\n        dirs::home_dir().unwrap_or_default()\n    } else {\n        PathBuf::from(path)\n    }\n}\n``` Update all path handling callsites.",
-        "testStrategy": "3개 단위 테스트: 1) ~/test → /home/user/test, 2) ~ → /home/user, 3) invalid ~nonexistent → 원본 반환. Cross-platform Windows/Linux/macOS 테스트.",
-        "priority": "high",
-        "dependencies": [],
-        "status": "done",
-        "subtasks": [],
-        "updatedAt": "2026-02-18T23:31:41.570Z"
-      },
-      {
-        "id": "88",
-        "title": "Add audit logging configuration and DB schema migration",
-        "description": "Implement opt-in audit logging with request_body and dlp_findings columns in SQLite (R3)",
-        "details": "1. Add LoggingConfig struct to src/config.rs with audit:bool, audit_max_body_size:usize=65536, audit_actions:Vec<String>. 2. In logging/mod.rs init_db(): check PRAGMA table_info(request_logs) for request_body column, if missing execute ALTER TABLE ADD COLUMN request_body TEXT; ADD COLUMN dlp_findings TEXT;. 3. Add audit_config:Option<LoggingConfig> to ConnectionContext.",
-        "testStrategy": "Test DB migration on fresh/legacy DBs. Verify audit=false → no columns used, audit=true → body 저장. Test truncation at 64KB.",
+        "id": "96",
+        "title": "Implement agent auto-detection and policy templates for wrap",
+        "description": "Add command pattern matching for agent detection (claude, openclaw, aider, codex) and automatic policy template application per R1-3 table",
+        "details": "Create AgentDetector struct with match patterns for known agents → map to template names. On wrap, if no --template, auto-detect and call policy template apply logic. Extend existing template system to include new templates: aider-default, codex-default. Store mapping in HashMap<&str, &str>.",
+        "testStrategy": "Unit tests for each pattern: `claude`→`claude-code-default`, `npx openclaw`→`openclaw-default`, unknown→`strict`. Verify generated TOML contains correct allowlist domains.",
         "priority": "high",
         "dependencies": [
-          "85",
-          "86",
-          "87"
+          "95"
         ],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-18T23:38:58.661Z"
+        "updatedAt": "2026-02-19T02:00:47.993Z"
       },
       {
-        "id": "89",
-        "title": "Implement Claude Code integration CLI command",
-        "description": "Add agentshield integrate claude-code command to configure ~/.claude/settings.json (R2)",
-        "details": "In src/cli/integrate.rs: implement integrate_claude_code() as per PRD pseudocode. Update clap IntegrateTarget enum to include ClaudeCode. Create templates/claude-code-default.toml. Handle MITM mode NODE_EXTRA_CA_CERTS. Add integrate remove cleanup. Use dirs::home_dir() and expand_tilde().",
-        "testStrategy": "8개 테스트: 1) settings.json 생성→integrate→HTTPS_PROXY 확인, 2) MITM→NODE_EXTRA_CA_CERTS 추가, 3) remove→env 키 삭제, 4) 파일 미존재→안내 메시지, 5) 기존 env 보존, 6) 권한 에러 처리, 7) JSON 파싱 실패 graceful, 8) cross-platform path.",
+        "id": "97",
+        "title": "Implement `agentshield quickstart` interactive setup",
+        "description": "Create guided interactive setup wizard that generates config, handles CA setup, and configures notifications per R2 requirements",
+        "details": "Use dialoguer crate for interactive prompts. Steps: agent selection menu → MITM yes/no → CA init if mitm → notification channel selection → save to agentshield.toml. Provide defaults for all prompts. Show final `wrap` command. Handle existing config overwrite prompt.",
+        "testStrategy": "Integration test with mocked stdin: simulate Claude+MITM+Slack flow → verify generated TOML content and CA cert creation. Test default path (Enter only).",
         "priority": "high",
         "dependencies": [
-          "87"
+          "95"
         ],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-18T23:44:26.151Z"
+        "updatedAt": "2026-02-19T02:36:55.398Z"
       },
       {
-        "id": "90",
-        "title": "Implement audit body capture in proxy handlers",
-        "description": "Capture and store request bodies in DB when audit enabled, with truncation and DLP findings (R3)",
-        "details": "In src/proxy/connect.rs: before log_to_db(), if should_audit(ctx, action): audit_body = truncate_body(&request_body, max_body_size). Update log_to_db_with_body(method, domain, path, action, reason, body, dlp_findings). CLI agentshield logs --show-body body 출력. Web /api/logs에 request_body, dlp_findings 추가.",
-        "testStrategy": "10개 테스트: audit on/off, truncation, action filter, MITM decrypted body, transparent HTTP only, DLP findings 저장, CLI --show-body, web API body 포함.",
+        "id": "98",
+        "title": "Implement Slack webhook notifications",
+        "description": "Add Slack Incoming Webhook support to existing Notifier trait for one-way notifications per R3-1",
+        "details": "Create SlackNotifier struct implementing Notifier trait. Parse [notification.slack] TOML section. Format Block Kit JSON payloads for deny/allow/ask events. Use reqwest::Client for POST to webhook_url. Support optional channel override. Graceful error handling (don't block proxy).",
+        "testStrategy": "Unit tests: format_slack_message() for each NotificationEvent type. Mock reqwest test: verify 200 response. Error case: network failure doesn't panic.",
         "priority": "high",
         "dependencies": [
-          "88"
+          "95"
         ],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-18T23:54:09.153Z"
+        "updatedAt": "2026-02-19T02:50:39.877Z"
       },
       {
-        "id": "91",
-        "title": "Implement log filtering for CLI and SQLite indexes",
-        "description": "Add domain/action/since/until/search filters to agentshield logs and create DB indexes (R4)",
-        "details": "1. Add DB indexes: CREATE INDEX idx_request_logs_domain, idx_action, idx_timestamp. 2. Implement LogFilter struct and query_logs_filtered() with dynamic SQL + parameterized queries. 3. Update clap LogsArgs with --domain, --action, --since, --until, --search, --show-body. 4. Support body 검색 when audit enabled.",
-        "testStrategy": "10개 테스트: 각 필터 단독/복합, search body/domain/path, SQL injection 방지(? params), 빈 결과, limit 적용.",
+        "id": "99",
+        "title": "Implement Slack interactive ASK responder (Socket Mode)",
+        "description": "Extend Slack support with Socket Mode for bidirectional ASK approval/deny buttons per R3-2",
+        "details": "Create SlackAskResponder implementing AskResponder trait. Parse app_token, bot_token from TOML. Use tokio-tungstenite for WebSocket connection to wss://wss-primary.slack.com. Handle events.api.interaction.callback for button clicks. Map Allow/Deny → AskResponse. Auto-reconnect on disconnect.",
+        "testStrategy": "Mock WebSocket server test: send ASK → receive button interaction → verify AskBroadcaster receives correct response. Test reconnection logic.",
+        "priority": "high",
+        "dependencies": [
+          "98"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-19T02:55:56.498Z"
+      },
+      {
+        "id": "100",
+        "title": "Add new policy templates (aider, codex, cursor, development-general, minimal-llm)",
+        "description": "Create 5 new policy templates per R6-1 table with specific allow domains for broader agent support",
+        "details": "Add templates/ directory with TOML files matching exact domain allowlists from PRD table. Ensure valid AppConfig parsing. Update auto-detection to map new agents. Validate all templates pass `agentshield validate`.",
+        "testStrategy": "Unit tests: each template TOML parses to valid AppConfig without errors. Policy evaluation test: known allowed domains pass, others correctly denied.",
         "priority": "medium",
         "dependencies": [
-          "90"
+          "96"
         ],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-18T23:56:26.756Z"
+        "updatedAt": "2026-02-19T03:07:25.075Z"
       },
       {
-        "id": "92",
-        "title": "Implement config validate CLI command",
-        "description": "Add agentshield config validate with TOML parsing, env vars, policy rules, CA dir validation (R6)",
-        "details": "Implement cmd_config_validate(): 1) AppConfig::load_from_path(), 2) validate_rules() 도메인/이름 중복, 3) validate_listen_address(), 4) MITM→validate_ca_dir(), 5) DLP 패턴 검증. Exit 1 on errors, print ✓/✗/⚠ summary.",
-        "testStrategy": "8개 테스트: valid config exit 0, invalid TOML exit 1, missing env exit 1, duplicate rules warning, MITM no CA error, catch-all warning.",
-        "priority": "medium",
+        "id": "101",
+        "title": "Implement graceful shutdown and signal handling",
+        "description": "Add proper SIGTERM/Ctrl+C handling with connection draining and child process cleanup for wrap mode per R10",
+        "details": "Use tokio::signal::ctrl_c() + signal-hook for SIGTERM. Set 5s drain timeout for active connections. In wrap mode: send SIGTERM to child → wait 10s → SIGKILL. Flush logs and send shutdown notification. Close DB connections cleanly.",
+        "testStrategy": "Integration test: start wrap proxy + child → send SIGTERM → verify child receives signal, proxy drains connections, exit code preserved.",
+        "priority": "high",
         "dependencies": [
-          "87"
+          "95"
         ],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-19T00:00:18.546Z"
+        "updatedAt": "2026-02-19T03:03:41.711Z"
       },
       {
-        "id": "93",
-        "title": "Implement dashboard UX improvements: themes and stats timeline",
-        "description": "Add dark/light theme toggle, /api/stats/timeline, canvas charts, log row coloring (R5)",
-        "details": "1. CSS variables for :root and [data-theme=dark]. 2. JS theme toggle with localStorage + prefers-color-scheme. 3. /api/stats/timeline?minutes=60 → bucketed JSON. 4. Canvas bar chart by minute with action colors. 5. Log row CSS: deny=red, ask=yellow 등. 6. Auto-scroll toggle.",
-        "testStrategy": "4개 테스트: /api/stats/timeline JSON, minutes param validation(1-1440), 빈 DB 빈 배열, theme toggle localStorage.",
+        "id": "102",
+        "title": "Create E2E integration tests for core proxy pipeline",
+        "description": "Add comprehensive E2E tests covering allow/deny, MITM DLP, rate limiting, ASK, hot-reload, and wrap per R7",
+        "details": "Create tests/e2e/ binary. Each test: spawn proxy on random port → start local TCP mock server → reqwest client with proxy → assert response codes. Cover all R7-1 scenarios. Use #[tokio::test]. Add to CI with cargo test --test e2e.",
+        "testStrategy": "Run all E2E tests locally and in CI. Verify 100% pass rate. Test failure logs include proxy output.",
         "priority": "medium",
         "dependencies": [
-          "91"
+          "95",
+          "96",
+          "97",
+          "100",
+          "101"
         ],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-19T00:07:17.728Z"
+        "updatedAt": "2026-02-19T03:18:49.143Z"
       },
       {
-        "id": "94",
-        "title": "Comprehensive testing and documentation for v0.9",
-        "description": "Add ≥58 tests to reach 350+, update README, Cargo.toml version, create GitHub release (R7)",
-        "details": "1. Add remaining tests for all R1-R6 features. 2. Update README.md: Claude Code integration, audit logging, log filtering sections. 3. docs/README.ko.md 동기화. 4. Cargo.toml version = \"0.9.0\". 5. Ensure CI green (fmt+clippy+test). 6. GitHub Release v0.9.0 + release notes.",
-        "testStrategy": "cargo test 전체 350개 이상 확인. cargo fmt, clippy zero warnings. README 내용 정확성 검증.",
-        "priority": "medium",
+        "id": "103",
+        "title": "Setup GitHub Actions for multi-platform binary releases",
+        "description": "Configure CI to build and upload binaries for 4 platforms on tag push per R5-1",
+        "details": "Create .github/workflows/release.yml. Use rust-action with matrix: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin. Strip binaries, create tar.gz/zip, upload to GitHub Release. Trigger on tags v*.*.*.",
+        "testStrategy": "Manual test: create v1.0.0-rc1 tag → verify 4 binaries appear in release assets. Test each binary extracts and runs `agentshield --version`.",
+        "priority": "high",
         "dependencies": [
-          "85",
-          "86",
-          "87",
-          "88",
-          "89",
-          "90",
-          "91",
-          "92",
-          "93"
+          "102"
         ],
         "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-02-19T00:10:52.720Z"
+        "updatedAt": "2026-02-19T03:19:35.117Z"
+      },
+      {
+        "id": "104",
+        "title": "Create install.sh one-liner and Homebrew formula",
+        "description": "Implement curl|sh installer and Homebrew tap for zero-friction installation per R5-2/5-3",
+        "details": "install.sh: detect OS/arch → download latest release asset → install to /usr/local/bin or ~/.local/bin → verify execution. Create homebrew-tap repo with agentshield.rb formula using GitHub release URL. Add shellcheck CI.",
+        "testStrategy": "Test install.sh on Ubuntu, macOS Intel/ARM: curl|sh → verify binary in PATH and `agentshield --version` works.",
+        "priority": "high",
+        "dependencies": [
+          "103"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-19T03:25:41.389Z"
+      },
+      {
+        "id": "105",
+        "title": "Implement Discord webhook and interactive ASK support",
+        "description": "Add Discord notifications and button-based ASK responder per R4 requirements",
+        "details": "Create DiscordNotifier (webhook embeds) and DiscordAskResponder (Gateway WS). Use reqwest for REST, tokio-tungstenite for wss://gateway.discord.gg. Parse bot_token, channel_id from TOML. Implement interaction handling for Allow/Deny buttons.",
+        "testStrategy": "Unit tests for embed formatting. Mock Discord gateway test: ASK → button click → response propagation.",
+        "priority": "medium",
+        "dependencies": [
+          "99"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-19T03:13:08.330Z"
+      },
+      {
+        "id": "106",
+        "title": "Implement community template loading and CLI commands",
+        "description": "Add `agentshield policy template --list` and custom template loading from ~/.agentshield/templates/ per R6-2",
+        "details": "Create TemplateManager: scan ~/.agentshield/templates/*.toml → validate → list/apply. Add clap subcommands. Ensure hot-reload watches template dir changes.",
+        "testStrategy": "Test: create custom template → list shows it → apply loads correctly → policy evaluation uses new rules.",
+        "priority": "medium",
+        "dependencies": [
+          "100"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-19T03:15:35.199Z"
+      },
+      {
+        "id": "107",
+        "title": "Update README, create CONTRIBUTING.md, CHANGELOG.md, and issue templates",
+        "description": "Complete documentation for v1.0 community release per R9 requirements",
+        "details": "Rewrite README with 30s demo GIF embed, Why AgentShield section, 3-line Quick Start, feature matrix. Create CONTRIBUTING.md (setup, PR rules), CHANGELOG.md (Keep a Changelog format), GitHub issue templates (bug, feature, template).",
+        "testStrategy": "Manual review: verify all sections present, links work, GIF displays correctly.",
+        "priority": "medium",
+        "dependencies": [
+          "104"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-02-19T04:44:45.591Z"
       }
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2026-02-19T00:10:52.726Z",
-      "taskCount": 10,
-      "completedCount": 10,
+      "lastModified": "2026-02-19T04:44:45.591Z",
+      "taskCount": 13,
+      "completedCount": 13,
       "tags": [
         "master"
       ]
