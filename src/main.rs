@@ -98,7 +98,13 @@ async fn main() -> anyhow::Result<()> {
         Commands::Policy { action } => match action {
             PolicyAction::Show => cmd_policy_show(&cli.config)?,
             PolicyAction::Add => cmd_policy_add()?,
-            PolicyAction::Template { name } => cmd_policy_template(&cli.config, &name)?,
+            PolicyAction::Template { name, list } => {
+                if list || name.is_none() {
+                    cmd_policy_template_list()?;
+                } else {
+                    cmd_policy_template(&cli.config, name.as_deref().unwrap())?;
+                }
+            }
         },
         Commands::Init => {
             cmd_init(&cli.config)?;
@@ -764,23 +770,52 @@ fn cmd_policy_add() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Apply a built-in policy template to the config file.
-///
-/// Available templates: `openclaw-default`, `claude-code-default`, `strict`.
+/// Apply a policy template (built-in or community) to the config file.
 fn cmd_policy_template(config_path: &Path, name: &str) -> anyhow::Result<()> {
-    let template_content = match agentshield::cli::wrap::template_content(name) {
-        Some(content) => content,
+    use agentshield::cli::wrap::resolve_template;
+
+    let content = match resolve_template(name) {
+        Some(c) => c,
         None => {
             println!("Unknown template: {}", name);
-            println!(
-                "Available templates: openclaw-default, claude-code-default, aider-default, codex-default, cursor-default, development-general, minimal-llm, strict"
-            );
+            println!("Run 'agentshield policy template --list' to see available templates.");
             return Ok(());
         }
     };
 
-    std::fs::write(config_path, template_content)?;
+    // Validate before applying
+    let _: agentshield::policy::config::AppConfig = toml::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("Template '{}' has invalid config: {}", name, e))?;
+
+    std::fs::write(config_path, &content)?;
     println!("Applied template '{}' to {}", name, config_path.display());
+    Ok(())
+}
+
+/// List all available templates (built-in + community).
+fn cmd_policy_template_list() -> anyhow::Result<()> {
+    use agentshield::cli::wrap::{
+        BUILTIN_TEMPLATES, community_templates_dir, list_community_templates,
+    };
+
+    println!("Built-in templates:");
+    for name in BUILTIN_TEMPLATES {
+        println!("  {}", name);
+    }
+
+    let community = list_community_templates();
+    if !community.is_empty() {
+        println!("\nCommunity templates (~/.agentshield/templates/):");
+        for name in &community {
+            println!("  {}", name);
+        }
+    } else if let Some(dir) = community_templates_dir() {
+        println!(
+            "\nNo community templates found. Place .toml files in {}",
+            dir.display()
+        );
+    }
+
     Ok(())
 }
 

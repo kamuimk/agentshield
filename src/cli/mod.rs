@@ -141,9 +141,12 @@ pub enum PolicyAction {
     Show,
     /// Add a new policy rule (interactive)
     Add,
-    /// Apply a policy template
+    /// Apply a policy template or list available templates
     Template {
-        /// Template name (e.g., openclaw-default, claude-code-default, strict)
-        name: String,
+        /// Template name to apply (omit to list available templates)
+        name: Option<String>,
+        /// List all available templates (built-in + community)
+        #[arg(long)]
+        list: bool,
     },
 }

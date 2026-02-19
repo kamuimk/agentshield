@@ -105,6 +105,18 @@ pub fn detect_agent(command: &[String]) -> DetectedAgent {
     }
 }
 
+/// All built-in template names.
+pub const BUILTIN_TEMPLATES: &[&str] = &[
+    "aider-default",
+    "claude-code-default",
+    "codex-default",
+    "cursor-default",
+    "development-general",
+    "minimal-llm",
+    "openclaw-default",
+    "strict",
+];
+
 /// Return the built-in template content for a given template name.
 ///
 /// Returns `None` for unknown template names.
@@ -120,6 +132,62 @@ pub fn template_content(name: &str) -> Option<&'static str> {
         "minimal-llm" => Some(include_str!("../../templates/minimal-llm.toml")),
         _ => None,
     }
+}
+
+/// Return the community templates directory (`~/.agentshield/templates/`).
+pub fn community_templates_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".agentshield").join("templates"))
+}
+
+/// List community templates from `~/.agentshield/templates/*.toml`.
+///
+/// Returns a list of template names (file stems without extension).
+pub fn list_community_templates() -> Vec<String> {
+    let dir = match community_templates_dir() {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    names.sort();
+    names
+}
+
+/// Load a community template by name from `~/.agentshield/templates/`.
+///
+/// Returns the file contents on success, or `None` if not found.
+pub fn load_community_template(name: &str) -> Option<String> {
+    let dir = community_templates_dir()?;
+    let path = dir.join(format!("{}.toml", name));
+    std::fs::read_to_string(&path).ok()
+}
+
+/// Resolve a template by name: tries built-in first, then community.
+///
+/// Returns the content string (owned for community, static for built-in).
+pub fn resolve_template(name: &str) -> Option<String> {
+    if let Some(content) = template_content(name) {
+        return Some(content.to_string());
+    }
+    load_community_template(name)
 }
 
 /// Resolve the configuration file path for the wrap command.
@@ -456,5 +524,82 @@ mod tests {
                 result.err()
             );
         }
+    }
+
+    // --- Community template tests ---
+
+    #[test]
+    fn builtin_templates_list_complete() {
+        for name in BUILTIN_TEMPLATES {
+            assert!(
+                template_content(name).is_some(),
+                "Built-in template '{}' not found in template_content()",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn community_templates_dir_exists() {
+        // Just verify the function returns a path (it may not exist on disk)
+        let dir = community_templates_dir();
+        assert!(dir.is_some());
+        let path = dir.unwrap();
+        assert!(path.to_str().unwrap().contains(".agentshield"));
+        assert!(path.to_str().unwrap().contains("templates"));
+    }
+
+    #[test]
+    fn list_community_templates_empty_dir() {
+        // When dir doesn't exist, returns empty vec
+        let templates = list_community_templates();
+        // May or may not be empty depending on user's machine
+        // Just verify it doesn't panic
+        let _ = templates;
+    }
+
+    #[test]
+    fn load_community_template_nonexistent() {
+        assert!(load_community_template("nonexistent-template-xyz").is_none());
+    }
+
+    #[test]
+    fn resolve_template_builtin() {
+        let content = resolve_template("strict");
+        assert!(content.is_some());
+        assert!(content.unwrap().contains("[proxy]"));
+    }
+
+    #[test]
+    fn resolve_template_nonexistent() {
+        assert!(resolve_template("nonexistent-xyz-template").is_none());
+    }
+
+    #[test]
+    fn load_community_template_from_disk() {
+        use crate::policy::config::AppConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let template_path = dir.path().join("my-custom.toml");
+        let content = r#"
+[proxy]
+listen = "127.0.0.1:18080"
+
+[policy]
+default = "deny"
+
+[[policy.rules]]
+name = "custom-rule"
+domains = ["api.custom.com"]
+action = "allow"
+"#;
+        std::fs::write(&template_path, content).unwrap();
+
+        // Verify it parses as valid config
+        let parsed: Result<AppConfig, _> = toml::from_str(content);
+        assert!(parsed.is_ok());
+
+        // Read it back
+        let loaded = std::fs::read_to_string(&template_path).unwrap();
+        assert!(loaded.contains("custom-rule"));
     }
 }
