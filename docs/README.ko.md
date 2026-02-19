@@ -54,15 +54,21 @@ cargo build --release
 export HTTPS_PROXY=http://127.0.0.1:18080
 ```
 
-### OpenClaw 연동 (Node.js)
+### AI 에이전트 연동
 
 ```bash
-# OpenClaw이 AgentShield 프록시를 사용하도록 자동 설정
+# OpenClaw (Node.js)
 agentshield integrate openclaw
-
-# 프록시 설정 제거
 agentshield integrate remove
+
+# Claude Code
+agentshield integrate claude-code
+agentshield integrate claude-code --ca-cert ~/.agentshield/ca/cert.pem  # MITM 모드
+agentshield integrate remove-claude-code
 ```
+
+- **OpenClaw**: `~/.openclaw/openclaw.json`에 `channels.telegram.proxy` 설정
+- **Claude Code**: `~/.claude/settings.json`에 `HTTPS_PROXY`/`HTTP_PROXY` (선택적으로 `NODE_EXTRA_CA_CERTS`) 설정
 
 ## 정책 설정
 
@@ -234,10 +240,12 @@ auth_token = "${AGENTSHIELD_WEB_TOKEN}"  # 선택사항: API 인증용 Bearer �
 
 브라우저에서 `http://127.0.0.1:18081`을 열거나 `agentshield dashboard`를 실행하여 접근:
 
-- **실시간 로그** — SSE(Server-Sent Events)를 통한 실시간 요청 스트림
+- **실시간 로그** — SSE를 통한 실시간 요청 스트림, 도메인/액션 필터링 및 자동 스크롤
 - **통계** — 총 요청, 허용, 거부, ASK, 시스템 허용, 속도 제한 카운트
+- **타임라인 차트** — 최근 60분간 분 단위 요청 볼륨 (허용 vs 거부)
 - **정책 편집기** — JSON으로 정책 규칙 보기 및 편집
 - **ASK 승인** — 브라우저에서 대기 중인 ASK 요청 승인 또는 거부
+- **테마 토글** — `localStorage` 저장 기반 다크/라이트 테마
 
 #### 인증
 
@@ -258,6 +266,7 @@ curl http://127.0.0.1:18081/api/logs/stream?token=<토큰>
 | `GET` | `/api/logs?limit=50` | 최근 요청 로그 |
 | `GET` | `/api/logs/stream` | SSE 실시간 로그 스트림 |
 | `GET` | `/api/status` | 요청 통계 |
+| `GET` | `/api/stats/timeline?minutes=60` | 분 단위 요청 타임라인 |
 | `GET` | `/api/policy` | 현재 정책 (JSON) |
 | `PUT` | `/api/policy` | 정책 규칙 업데이트 |
 | `GET` | `/api/ask/pending` | 대기 중인 ASK 요청 |
@@ -341,6 +350,40 @@ window_secs = 60      # 시간 윈도우 (초)
 
 > **참고:** transparent 모드에서 CONNECT 터널(HTTPS)은 암호화되어 DLP 스캔이 불가합니다. HTTPS 트래픽에 DLP를 활성화하려면 MITM 모드를 사용하세요.
 
+### 감사 로깅
+
+포렌식 분석을 위한 요청 본문 캡처:
+
+```toml
+[logging]
+audit = true
+audit_max_body_size = 65536    # 최대 본문 크기 (바이트, 기본: 64KB)
+audit_actions = ["deny", "dlp"]  # 감사할 액션 (빈 값 = 전체)
+```
+
+감사 로그는 SQLite에 저장되며 요청 본문과 DLP 탐지 결과를 포함합니다. `agentshield logs --show-body`로 확인할 수 있습니다.
+
+### 로그 필터링
+
+도메인, 액션, 시간 범위 또는 자유 텍스트로 로그를 필터링합니다:
+
+```bash
+agentshield logs --domain api.github.com
+agentshield logs --action deny --since 2025-01-01 --until 2025-01-31
+agentshield logs --search "api-key"
+```
+
+### 설정 검증
+
+시작 전에 `agentshield.toml`의 오류와 경고를 검증합니다:
+
+```bash
+agentshield validate
+agentshield validate --config /path/to/agentshield.toml
+```
+
+검사 항목: listen 주소 형식, MITM CA 디렉터리 존재 여부, 중복 규칙 이름, 빈 domains, catch-all 와일드카드, non-allow 액션의 rate limit.
+
 ### 내장 템플릿
 
 | 템플릿 | 설명 |
@@ -360,12 +403,18 @@ agentshield init                      # 설정 + 데이터베이스 초기화
 agentshield start [--daemon]          # 프록시 시작
 agentshield stop                      # 프록시 중지
 agentshield status                    # 요청 통계 표시
+agentshield validate                  # 설정 파일 검증
 agentshield logs [--tail N]           # 최근 로그 보기
+agentshield logs --domain example.com # 도메인으로 필터링
+agentshield logs --action deny        # 액션으로 필터링
+agentshield logs --show-body          # 감사 본문/DLP 결과 표시
 agentshield logs --export --format json  # 로그 내보내기
 agentshield policy show               # 현재 정책 표시
 agentshield policy template <이름>    # 템플릿 적용
 agentshield integrate openclaw        # OpenClaw 프록시 설정
-agentshield integrate remove          # 프록시 설정 제거
+agentshield integrate claude-code     # Claude Code 프록시 설정
+agentshield integrate remove          # OpenClaw 프록시 설정 제거
+agentshield integrate remove-claude-code  # Claude Code 프록시 설정 제거
 agentshield dashboard                 # 웹 대시보드 열기
 agentshield ca init                   # MITM용 Root CA 생성
 agentshield ca trust                  # 시스템 신뢰 저장소 설치 안내
@@ -427,7 +476,7 @@ AgentShield는 [PipeLock](https://github.com/nichochar/pipelock) (코드 실행 
 - **MSRV:** Rust 1.85 (edition 2024)
 
 ```bash
-cargo test --all     # 전체 테스트 실행 (292개)
+cargo test --all     # 전체 테스트 실행 (353개)
 cargo clippy         # 린트
 cargo fmt            # 포맷
 ```

@@ -54,19 +54,23 @@ cargo build --release
 export HTTPS_PROXY=http://127.0.0.1:18080
 ```
 
-### Integrate with OpenClaw (Node.js)
+### Integrate with AI Agents
 
-For OpenClaw or other Node.js-based agents, use the built-in integration command:
+Use built-in integration commands to configure your agent:
 
 ```bash
-# Auto-configure OpenClaw to use AgentShield proxy
+# OpenClaw (Node.js)
 agentshield integrate openclaw
-
-# Remove the proxy configuration
 agentshield integrate remove
+
+# Claude Code
+agentshield integrate claude-code
+agentshield integrate claude-code --ca-cert ~/.agentshield/ca/cert.pem  # MITM mode
+agentshield integrate remove-claude-code
 ```
 
-This sets `channels.telegram.proxy` in `~/.openclaw/openclaw.json` to route traffic through AgentShield.
+- **OpenClaw**: Sets `channels.telegram.proxy` in `~/.openclaw/openclaw.json`
+- **Claude Code**: Sets `HTTPS_PROXY`/`HTTP_PROXY` (and optionally `NODE_EXTRA_CA_CERTS`) in `~/.claude/settings.json`
 
 ## Policy Configuration
 
@@ -243,10 +247,12 @@ auth_token = "${AGENTSHIELD_WEB_TOKEN}"  # optional: Bearer token for API auth
 
 Open `http://127.0.0.1:18081` in your browser (or run `agentshield dashboard`) to access:
 
-- **Live Logs** — real-time request stream via Server-Sent Events (SSE)
+- **Live Logs** — real-time request stream via SSE, with domain/action filtering and auto-scroll
 - **Statistics** — total, allowed, denied, asked, system-allowed, rate-limited counts
+- **Timeline Chart** — per-minute request volume (allowed vs denied) over the last 60 minutes
 - **Policy Editor** — view and edit policy rules as JSON
 - **ASK Approval** — approve or deny pending ASK requests from the browser
+- **Theme Toggle** — dark/light theme with `localStorage` persistence
 
 #### Authentication
 
@@ -269,6 +275,7 @@ The web frontend shows a token input modal on first visit. The token is stored i
 | `GET` | `/api/logs?limit=50` | Recent request logs |
 | `GET` | `/api/logs/stream` | SSE real-time log stream |
 | `GET` | `/api/status` | Request statistics |
+| `GET` | `/api/stats/timeline?minutes=60` | Per-minute request timeline |
 | `GET` | `/api/policy` | Current policy (JSON) |
 | `PUT` | `/api/policy` | Update policy rules |
 | `GET` | `/api/ask/pending` | Pending ASK requests |
@@ -352,6 +359,40 @@ When `[dlp] enabled = true`, AgentShield scans HTTP request bodies for sensitive
 
 > **Note:** In transparent mode, CONNECT tunnels (HTTPS) are encrypted and cannot be scanned by DLP. Use MITM mode to enable DLP on HTTPS traffic.
 
+### Audit Logging
+
+Enable request body capture for forensic analysis:
+
+```toml
+[logging]
+audit = true
+audit_max_body_size = 65536    # max body size in bytes (default: 64KB)
+audit_actions = ["deny", "dlp"]  # which actions to audit (empty = all)
+```
+
+Audit logs are stored in SQLite and include the request body and DLP findings. Use `agentshield logs --show-body` to view them.
+
+### Log Filtering
+
+Filter logs by domain, action, time range, or free-text search:
+
+```bash
+agentshield logs --domain api.github.com
+agentshield logs --action deny --since 2025-01-01 --until 2025-01-31
+agentshield logs --search "api-key"
+```
+
+### Config Validation
+
+Validate your `agentshield.toml` for errors and warnings before starting:
+
+```bash
+agentshield validate
+agentshield validate --config /path/to/agentshield.toml
+```
+
+Checks include: listen address format, MITM CA directory existence, duplicate rule names, empty domains, catch-all wildcards, rate limits on non-allow actions.
+
 ### Built-in Templates
 
 | Template | Description |
@@ -371,12 +412,18 @@ agentshield init                      # Initialize config + database
 agentshield start [--daemon]          # Start the proxy
 agentshield stop                      # Stop the proxy
 agentshield status                    # Show request statistics
+agentshield validate                  # Validate config file
 agentshield logs [--tail N]           # View recent logs
+agentshield logs --domain example.com # Filter by domain
+agentshield logs --action deny        # Filter by action
+agentshield logs --show-body          # Show audit body/DLP findings
 agentshield logs --export --format json  # Export logs
 agentshield policy show               # Display current policy
 agentshield policy template <name>    # Apply a template
 agentshield integrate openclaw        # Configure OpenClaw to use proxy
-agentshield integrate remove          # Remove proxy configuration
+agentshield integrate claude-code     # Configure Claude Code to use proxy
+agentshield integrate remove          # Remove OpenClaw proxy config
+agentshield integrate remove-claude-code  # Remove Claude Code proxy config
 agentshield dashboard                 # Open web dashboard in browser
 agentshield ca init                   # Generate Root CA for MITM mode
 agentshield ca trust                  # Show system trust store instructions
@@ -438,7 +485,7 @@ AgentShield complements tools like [PipeLock](https://github.com/nichochar/pipel
 - **MSRV:** Rust 1.85 (edition 2024)
 
 ```bash
-cargo test --all     # Run all tests (292 tests)
+cargo test --all     # Run all tests (353 tests)
 cargo clippy         # Lint
 cargo fmt            # Format
 ```
