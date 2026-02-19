@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Cross-compilation toolchain for aarch64-linux
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Strip binary
+        if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64-unknown-linux-gnu'
+        run: strip target/${{ matrix.target }}/release/agentshield
+
+      - name: Strip binary (aarch64-linux)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: aarch64-linux-gnu-strip target/${{ matrix.target }}/release/agentshield
+
+      - name: Strip binary (macOS)
+        if: matrix.os == 'macos-latest'
+        run: strip target/${{ matrix.target }}/release/agentshield
+
+      - name: Package (tar.gz)
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../agentshield-${{ matrix.target }}.tar.gz agentshield
+          cd ../../..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentshield-${{ matrix.target }}
+          path: agentshield-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/agentshield-x86_64-unknown-linux-gnu/agentshield-x86_64-unknown-linux-gnu.tar.gz
+            artifacts/agentshield-aarch64-unknown-linux-gnu/agentshield-aarch64-unknown-linux-gnu.tar.gz
+            artifacts/agentshield-x86_64-apple-darwin/agentshield-x86_64-apple-darwin.tar.gz
+            artifacts/agentshield-aarch64-apple-darwin/agentshield-aarch64-apple-darwin.tar.gz
