@@ -839,8 +839,8 @@ events = ["deny", "dlp"]
     let notif = config.notification.unwrap();
     let slack = notif.slack.unwrap();
     assert_eq!(
-        slack.webhook_url,
-        "https://hooks.slack.com/services/T123/B456/abcdef"
+        slack.webhook_url.as_deref(),
+        Some("https://hooks.slack.com/services/T123/B456/abcdef")
     );
     assert_eq!(slack.events, vec!["deny", "dlp"]);
 }
@@ -848,13 +848,25 @@ events = ["deny", "dlp"]
 #[test]
 fn slack_config_debug_masks_url() {
     let slack = SlackConfig {
-        webhook_url: "https://hooks.slack.com/services/T123/B456/secret".to_string(),
+        webhook_url: Some("https://hooks.slack.com/services/T123/B456/secret".to_string()),
+        bot_token: Some("xoxb-secret-bot-token".to_string()),
+        app_token: Some("xapp-secret-app-token".to_string()),
+        channel: Some("#general".to_string()),
         events: vec![],
+        interactive: false,
     };
     let debug_output = format!("{:?}", slack);
     assert!(
         !debug_output.contains("secret"),
         "Debug output must not contain the actual webhook_url"
+    );
+    assert!(
+        !debug_output.contains("xoxb"),
+        "Debug output must not contain the actual bot_token"
+    );
+    assert!(
+        !debug_output.contains("xapp"),
+        "Debug output must not contain the actual app_token"
     );
     assert!(debug_output.contains("***"));
 }

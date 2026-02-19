@@ -146,21 +146,38 @@ impl std::fmt::Debug for TelegramConfig {
     }
 }
 
-/// Slack Incoming Webhook configuration (`[notification.slack]`).
+/// Slack configuration (`[notification.slack]`).
 #[derive(Clone, Deserialize, Serialize)]
 pub struct SlackConfig {
-    /// Incoming Webhook URL (e.g., `https://hooks.slack.com/services/T.../B.../xxx`).
-    pub webhook_url: String,
+    /// Incoming Webhook URL for one-way notifications.
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    /// Bot token (xoxb-...) for interactive ASK via Web API.
+    #[serde(default)]
+    pub bot_token: Option<String>,
+    /// App-level token (xapp-...) for Socket Mode WebSocket.
+    #[serde(default)]
+    pub app_token: Option<String>,
+    /// Channel ID to post ASK messages to (required for interactive mode).
+    #[serde(default)]
+    pub channel: Option<String>,
     /// Event types to send (empty = all).
     #[serde(default)]
     pub events: Vec<String>,
+    /// Enable bidirectional ASK approval via interactive buttons.
+    #[serde(default)]
+    pub interactive: bool,
 }
 
 impl std::fmt::Debug for SlackConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SlackConfig")
-            .field("webhook_url", &"***")
+            .field("webhook_url", &self.webhook_url.as_ref().map(|_| "***"))
+            .field("bot_token", &self.bot_token.as_ref().map(|_| "***"))
+            .field("app_token", &self.app_token.as_ref().map(|_| "***"))
+            .field("channel", &self.channel)
             .field("events", &self.events)
+            .field("interactive", &self.interactive)
             .finish()
     }
 }

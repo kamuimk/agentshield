@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use agentshield::ask::AskBroadcaster;
+use agentshield::ask::slack::SlackAskResponder;
 use agentshield::ask::telegram::TelegramResponder;
 use agentshield::ask::terminal::TerminalResponder;
 use agentshield::cli::ca;
@@ -198,6 +199,29 @@ async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::R
         }
     }
 
+    // Add SlackAskResponder if interactive mode is enabled
+    if let Some(ref notif_config) = config.notification {
+        if notif_config.enabled {
+            if let Some(ref slack) = notif_config.slack {
+                if slack.interactive {
+                    if let (Some(bot_token), Some(app_token), Some(channel)) =
+                        (&slack.bot_token, &slack.app_token, &slack.channel)
+                    {
+                        let slack_responder = Arc::new(SlackAskResponder::new(
+                            bot_token.clone(),
+                            app_token.clone(),
+                            channel.clone(),
+                        ));
+                        broadcaster.add_responder(slack_responder);
+                        info!("Slack ASK responder enabled (interactive mode)");
+                    } else {
+                        warn!("Slack interactive mode requires bot_token, app_token, and channel");
+                    }
+                }
+            }
+        }
+    }
+
     // Add WebDashboardResponder if web is enabled
     if let Some(ref web_config) = config.web {
         if web_config.enabled {
@@ -314,16 +338,18 @@ async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::R
             }
 
             if let Some(ref slack) = notif_config.slack {
-                let inner: Arc<dyn Notifier> =
-                    Arc::new(SlackNotifier::new(slack.webhook_url.clone()));
-                let notifier: Arc<dyn Notifier> = if slack.events.is_empty() {
-                    info!("Slack notification enabled (events: all)");
-                    inner
-                } else {
-                    info!("Slack notification enabled (events: {:?})", slack.events);
-                    Arc::new(FilteredNotifier::new(inner, slack.events.clone()))
-                };
-                notifiers.push(notifier);
+                if let Some(ref webhook_url) = slack.webhook_url {
+                    let inner: Arc<dyn Notifier> =
+                        Arc::new(SlackNotifier::new(webhook_url.clone()));
+                    let notifier: Arc<dyn Notifier> = if slack.events.is_empty() {
+                        info!("Slack notification enabled (events: all)");
+                        inner
+                    } else {
+                        info!("Slack notification enabled (events: {:?})", slack.events);
+                        Arc::new(FilteredNotifier::new(inner, slack.events.clone()))
+                    };
+                    notifiers.push(notifier);
+                }
             }
 
             match notifiers.len() {
