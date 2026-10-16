@@ -13,13 +13,23 @@ pub mod discord;
 pub mod slack;
 pub mod telegram;
 pub mod terminal;
+pub mod workos;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 /// Information about an ASK request, broadcast to all responders.
 #[derive(Debug, Clone)]
+pub struct SensitiveApprovalMetadata {
+    pub request_sha256: String,
+    pub request_bytes: usize,
+    pub categories: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct AskRequestInfo {
+    /// Safe metadata generated from the exact held bytes, never a payload preview.
+    pub approval: Option<SensitiveApprovalMetadata>,
     /// Unique request ID (UUID v4).
     pub req_id: String,
     /// Target domain (e.g., `"api.github.com"`).
@@ -86,6 +96,36 @@ impl AskBroadcaster {
         path: String,
         body: Option<String>,
     ) -> bool {
+        self.ask_with_metadata(domain, method, path, body, None)
+            .await
+    }
+
+    /// Dedicated approval notice containing no URL path, account value or raw body.
+    pub async fn ask_sensitive(
+        &self,
+        domain: String,
+        method: String,
+        request: &[u8],
+        categories: Vec<String>,
+    ) -> bool {
+        use sha2::{Digest, Sha256};
+        let metadata = SensitiveApprovalMetadata {
+            request_sha256: format!("{:x}", Sha256::digest(request)),
+            request_bytes: request.len(),
+            categories,
+        };
+        self.ask_with_metadata(domain, method, "[withheld]".into(), None, Some(metadata))
+            .await
+    }
+
+    async fn ask_with_metadata(
+        &self,
+        domain: String,
+        method: String,
+        path: String,
+        body: Option<String>,
+        approval: Option<SensitiveApprovalMetadata>,
+    ) -> bool {
         if self.responders.is_empty() {
             return false;
         }
@@ -94,6 +134,7 @@ impl AskBroadcaster {
 
         let info = AskRequestInfo {
             req_id: req_id.clone(),
+            approval,
             domain,
             method,
             path,
@@ -104,11 +145,12 @@ impl AskBroadcaster {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<bool>(self.responders.len());
 
         // Spawn a task for each responder
+        let mut tasks = tokio::task::JoinSet::new();
         for responder in &self.responders {
             let r = responder.clone();
             let info = info.clone();
             let tx = tx.clone();
-            tokio::spawn(async move {
+            tasks.spawn(async move {
                 if let Some(decision) = r.prompt(&info).await {
                     let _ = tx.send(decision).await;
                 }
@@ -122,6 +164,7 @@ impl AskBroadcaster {
             _ => false, // timeout, all None, or channel closed → deny
         };
 
+        tasks.abort_all();
         // Notify all responders of the result
         for r in &self.responders {
             r.notify_resolved(&req_id, allowed).await;

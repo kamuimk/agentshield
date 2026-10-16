@@ -15,6 +15,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "http-body-util",
+ "httparse",
  "hyper",
  "hyper-util",
  "libc",

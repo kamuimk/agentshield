@@ -112,7 +112,12 @@ async fn proxy_starts_and_accepts_connections() {
 
 #[tokio::test]
 async fn proxy_responds_to_connect_request() {
-    let server = ProxyServer::new("127.0.0.1:0".to_string());
+    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_network_policy(
+        agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        },
+    );
     let (addr, _shutdown) = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -131,7 +136,12 @@ async fn proxy_responds_to_connect_request() {
 
 #[tokio::test]
 async fn proxy_handles_http_request() {
-    let server = ProxyServer::new("127.0.0.1:0".to_string());
+    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_network_policy(
+        agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        },
+    );
     let (addr, _shutdown) = server.start().await.unwrap();
 
     let request = "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n";
@@ -149,6 +159,10 @@ async fn proxy_handles_http_request() {
 #[tokio::test]
 async fn policy_deny_all_blocks_connect() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(deny_all_policy())));
     let (addr, _shutdown) = server.start().await.unwrap();
 
@@ -174,6 +188,10 @@ async fn policy_deny_all_blocks_connect() {
 #[tokio::test]
 async fn policy_deny_all_blocks_http() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(deny_all_policy())));
     let (addr, _shutdown) = server.start().await.unwrap();
 
@@ -190,6 +208,10 @@ async fn policy_deny_all_blocks_http() {
 #[tokio::test]
 async fn policy_allows_whitelisted_domain_connect() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(allow_example_policy())));
     let (addr, _shutdown) = server.start().await.unwrap();
 
@@ -207,6 +229,10 @@ async fn policy_allows_whitelisted_domain_connect() {
 #[tokio::test]
 async fn policy_blocks_non_whitelisted_domain() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(allow_example_policy())));
     let (addr, _shutdown) = server.start().await.unwrap();
 
@@ -230,6 +256,10 @@ async fn openclaw_policy_allows_anthropic() {
     let config: AppConfig = toml::from_str(template).unwrap();
 
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(config.policy.clone())));
     let (addr, _shutdown) = server.start().await.unwrap();
 
@@ -254,6 +284,10 @@ async fn openclaw_policy_allows_anthropic() {
 #[tokio::test]
 async fn system_allowlist_bypasses_deny_all_connect() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_system_allowlist(vec!["example.com".to_string()]);
     let (addr, _shutdown) = server.start().await.unwrap();
@@ -277,6 +311,10 @@ async fn system_allowlist_bypasses_deny_all_connect() {
 #[tokio::test]
 async fn system_allowlist_does_not_affect_unlisted_domain() {
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_system_allowlist(vec!["api.telegram.org".to_string()]);
     let (addr, _shutdown) = server.start().await.unwrap();
@@ -303,12 +341,16 @@ async fn system_allowlist_does_not_affect_unlisted_domain() {
 async fn dlp_blocks_http_request_with_critical_finding() {
     let scanner: Arc<dyn DlpScanner> = Arc::new(RegexScanner::new());
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(allow_example_policy())))
         .with_dlp(scanner);
     let (addr, _shutdown) = server.start().await.unwrap();
 
     // HTTP POST with OpenAI API key in body (Critical severity)
-    let request = "POST http://example.com/api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 50\r\n\r\nAuthorization: Bearer sk-abcdefghijklmnopqrstuvwxyz1234567890";
+    let request = "POST http://example.com/api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 61\r\n\r\nAuthorization: Bearer sk-abcdefghijklmnopqrstuvwxyz1234567890";
     let response = send_raw_request(addr, request).await;
     assert!(
         response.contains("403"),
@@ -321,6 +363,10 @@ async fn dlp_blocks_http_request_with_critical_finding() {
 async fn dlp_allows_clean_http_request() {
     let scanner: Arc<dyn DlpScanner> = Arc::new(RegexScanner::new());
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(allow_example_policy())))
         .with_dlp(scanner);
     let (addr, _shutdown) = server.start().await.unwrap();
@@ -339,6 +385,10 @@ async fn dlp_allows_clean_http_request() {
 async fn dlp_does_not_scan_connect_tunnels() {
     let scanner: Arc<dyn DlpScanner> = Arc::new(RegexScanner::new());
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(allow_example_policy())))
         .with_dlp(scanner);
     let (addr, _shutdown) = server.start().await.unwrap();
@@ -369,6 +419,10 @@ async fn system_allowlist_bypasses_dlp_for_http() {
 
     let scanner: Arc<dyn DlpScanner> = Arc::new(RegexScanner::new());
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_dlp(scanner)
         .with_system_allowlist(vec!["127.0.0.1".to_string()]);
@@ -376,7 +430,7 @@ async fn system_allowlist_bypasses_dlp_for_http() {
 
     // HTTP POST with API key in body to allowlisted domain → should pass (not 403)
     let request = format!(
-        "POST http://{}/api HTTP/1.1\r\nHost: {}\r\nContent-Length: 50\r\n\r\nAuthorization: Bearer sk-abcdefghijklmnopqrstuvwxyz1234567890",
+        "POST http://{}/api HTTP/1.1\r\nHost: {}\r\nContent-Length: 61\r\n\r\nAuthorization: Bearer sk-abcdefghijklmnopqrstuvwxyz1234567890",
         mock_host_port, mock_host_port
     );
     let response = send_raw_request(addr, &request).await;
@@ -396,6 +450,10 @@ async fn non_allowlist_domain_still_blocked_by_dlp() {
 
     let scanner: Arc<dyn DlpScanner> = Arc::new(RegexScanner::new());
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(allow_localhost_policy())))
         .with_dlp(scanner)
         .with_system_allowlist(vec!["api.telegram.org".to_string()]);
@@ -403,7 +461,7 @@ async fn non_allowlist_domain_still_blocked_by_dlp() {
 
     // HTTP POST with API key to NON-allowlisted domain → should be blocked by DLP
     let request = format!(
-        "POST http://{}/api HTTP/1.1\r\nHost: {}\r\nContent-Length: 50\r\n\r\nAuthorization: Bearer sk-abcdefghijklmnopqrstuvwxyz1234567890",
+        "POST http://{}/api HTTP/1.1\r\nHost: {}\r\nContent-Length: 61\r\n\r\nAuthorization: Bearer sk-abcdefghijklmnopqrstuvwxyz1234567890",
         mock_host_port, mock_host_port
     );
     let response = send_raw_request(addr, &request).await;
@@ -420,6 +478,10 @@ async fn non_allowlist_domain_still_blocked_by_dlp() {
 async fn notification_fires_on_deny() {
     let (notifier, events) = TestNotifier::new();
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_notifier(notifier);
     let (addr, _shutdown) = server.start().await.unwrap();
@@ -438,7 +500,7 @@ async fn notification_fires_on_deny() {
 
     let collected = events.lock().unwrap();
     assert!(
-        collected.len() >= 1,
+        !collected.is_empty(),
         "Expected at least 1 notification event, got {}",
         collected.len()
     );
@@ -453,19 +515,23 @@ async fn notification_fires_on_dlp_critical() {
     let (notifier, events) = TestNotifier::new();
     let scanner: Arc<dyn DlpScanner> = Arc::new(RegexScanner::new());
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(allow_example_policy())))
         .with_dlp(scanner)
         .with_notifier(notifier);
     let (addr, _shutdown) = server.start().await.unwrap();
 
-    let request = "POST http://example.com/api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 50\r\n\r\nAuthorization: Bearer sk-abcdefghijklmnopqrstuvwxyz1234567890";
+    let request = "POST http://example.com/api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 61\r\n\r\nAuthorization: Bearer sk-abcdefghijklmnopqrstuvwxyz1234567890";
     send_raw_request(addr, request).await;
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     let collected = events.lock().unwrap();
     assert!(
-        collected.len() >= 1,
+        !collected.is_empty(),
         "Expected DLP notification event, got {}",
         collected.len()
     );
@@ -479,6 +545,10 @@ async fn notification_fires_on_dlp_critical() {
 async fn notification_does_not_fire_on_allow() {
     let (notifier, events) = TestNotifier::new();
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(allow_example_policy())))
         .with_notifier(notifier);
     let (addr, _shutdown) = server.start().await.unwrap();
@@ -521,6 +591,10 @@ async fn notification_failure_does_not_crash_proxy() {
 
     let notifier: Arc<dyn Notifier> = Arc::new(FailNotifier);
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_notifier(notifier);
     let (addr, _shutdown) = server.start().await.unwrap();
@@ -557,6 +631,10 @@ async fn mitm_mode_responds_200_then_tls() {
     // MITM proxy should respond with 200, then start TLS negotiation
     let (_dir, cert_cache) = setup_cert_cache();
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(allow_example_policy())))
         .with_cert_cache(cert_cache);
     let (addr, _shutdown) = server.start().await.unwrap();
@@ -583,6 +661,10 @@ async fn mitm_system_allowlist_bypasses_to_tunnel() {
     // System-allowlisted domains should use plain tunnel (no MITM)
     let (_dir, cert_cache) = setup_cert_cache();
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_system_allowlist(vec!["example.com".to_string()])
         .with_cert_cache(cert_cache);
@@ -610,6 +692,10 @@ async fn mitm_denied_domain_still_blocked() {
     // Policy-denied domains should still be blocked (before MITM is attempted)
     let (_dir, cert_cache) = setup_cert_cache();
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(deny_all_policy())))
         .with_cert_cache(cert_cache);
     let (addr, _shutdown) = server.start().await.unwrap();
@@ -634,6 +720,10 @@ async fn mitm_denied_domain_still_blocked() {
 async fn mitm_transparent_mode_unchanged() {
     // Without cert_cache, MITM should not activate (plain tunnel)
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(allow_example_policy())));
     let (addr, _shutdown) = server.start().await.unwrap();
 

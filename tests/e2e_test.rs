@@ -59,8 +59,12 @@ async fn e2e_deny_blocks_http_request() {
         rules: vec![],
     };
 
-    let server =
-        ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
+        .with_policy(Arc::new(RwLock::new(policy)));
     let (addr, _shutdown) = server.start().await.unwrap();
 
     let client = proxy_client(addr);
@@ -87,8 +91,12 @@ async fn e2e_allow_passes_http_request() {
         }],
     };
 
-    let server =
-        ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
+        .with_policy(Arc::new(RwLock::new(policy)));
     let (addr, _shutdown) = server.start().await.unwrap();
 
     let client = proxy_client(addr);
@@ -117,8 +125,12 @@ async fn e2e_method_filtering() {
         }],
     };
 
-    let server =
-        ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
+        .with_policy(Arc::new(RwLock::new(policy)));
     let (addr, _shutdown) = server.start().await.unwrap();
 
     let client = proxy_client(addr);
@@ -160,6 +172,10 @@ async fn e2e_rate_limiting_blocks_after_limit() {
     let rate_limiter = Arc::new(RateLimiter::new());
 
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(policy)))
         .with_rate_limiter(rate_limiter);
     let (addr, _shutdown) = server.start().await.unwrap();
@@ -211,7 +227,12 @@ async fn e2e_policy_hot_reload() {
         rules: vec![],
     }));
 
-    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_policy(policy.clone());
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
+        .with_policy(policy.clone());
     let (addr, _shutdown) = server.start().await.unwrap();
 
     let client = proxy_client(addr);
@@ -267,6 +288,10 @@ async fn e2e_dlp_blocks_request_with_api_key() {
     let dlp = Arc::new(agentshield::dlp::patterns::RegexScanner::default());
 
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(policy)))
         .with_dlp(dlp);
     let (addr, _shutdown) = server.start().await.unwrap();
@@ -304,6 +329,10 @@ async fn e2e_dlp_allows_clean_request() {
     let dlp = Arc::new(agentshield::dlp::patterns::RegexScanner::default());
 
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(policy)))
         .with_dlp(dlp);
     let (addr, _shutdown) = server.start().await.unwrap();
@@ -338,6 +367,10 @@ async fn e2e_system_allowlist_bypasses_deny() {
     let allowlist = vec![mock_addr.ip().to_string()];
 
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(policy)))
         .with_system_allowlist(allowlist);
     let (addr, _shutdown) = server.start().await.unwrap();
@@ -384,8 +417,12 @@ async fn e2e_multiple_rules_first_match_wins() {
         ],
     };
 
-    let server =
-        ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
+        .with_policy(Arc::new(RwLock::new(policy)));
     let (addr, _shutdown) = server.start().await.unwrap();
 
     let client = proxy_client(addr);
@@ -421,8 +458,12 @@ async fn e2e_catch_all_wildcard_domain() {
         }],
     };
 
-    let server =
-        ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
+        .with_policy(Arc::new(RwLock::new(policy)));
     let (addr, _shutdown) = server.start().await.unwrap();
 
     let client = proxy_client(addr);
@@ -469,6 +510,10 @@ async fn e2e_notification_on_deny() {
     };
 
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(policy)))
         .with_notifier(notifier);
     let (addr, _shutdown) = server.start().await.unwrap();
@@ -497,7 +542,12 @@ async fn e2e_notification_on_deny() {
 
 #[tokio::test]
 async fn e2e_shutdown_stops_accepting() {
-    let server = ProxyServer::new("127.0.0.1:0".to_string());
+    let server = ProxyServer::new("127.0.0.1:0".to_string()).with_network_policy(
+        agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        },
+    );
     let (addr, shutdown_tx) = server.start().await.unwrap();
 
     // Verify proxy is accepting connections

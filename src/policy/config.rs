@@ -105,6 +105,10 @@ pub struct PolicyConfig {
 /// Data Loss Prevention configuration (`[dlp]` section).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DlpConfig {
+    /// Hold any finding (including account/PII patterns) for an exact Slack DM approval.
+    /// Without an authenticated Slack responder, held requests are denied.
+    #[serde(default)]
+    pub require_slack_approval: bool,
     /// Whether DLP scanning is active.
     pub enabled: bool,
     /// Optional subset of built-in pattern names to use. If `None`, all patterns are active.
@@ -161,6 +165,9 @@ pub struct SlackConfig {
     /// Channel ID to post ASK messages to (required for interactive mode).
     #[serde(default)]
     pub channel: Option<String>,
+    /// Exact Slack member id allowed to approve; interactive delivery requires a DM.
+    #[serde(default)]
+    pub approver_user: Option<String>,
     /// Event types to send (empty = all).
     #[serde(default)]
     pub events: Vec<String>,
@@ -244,6 +251,9 @@ pub struct WebConfig {
     /// If set, all `/api/*` endpoints require `Authorization: Bearer <token>`.
     #[serde(default)]
     pub auth_token: Option<String>,
+    /// Optional trusted-host dashboard integration.
+    #[serde(default)]
+    pub integration: Option<crate::web::integration::IntegrationConfig>,
 }
 
 impl std::fmt::Debug for WebConfig {
@@ -252,6 +262,7 @@ impl std::fmt::Debug for WebConfig {
             .field("enabled", &self.enabled)
             .field("listen", &self.listen)
             .field("auth_token", &self.auth_token.as_ref().map(|_| "***"))
+            .field("integration", &self.integration)
             .finish()
     }
 }
@@ -299,8 +310,14 @@ fn default_audit_max_body_size() -> usize {
 /// Top-level application configuration deserialized from `agentshield.toml`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
+    /// Optional local WorkOS bridge; no service Slack credentials on the device.
+    #[serde(default)]
+    pub workos_approval: Option<crate::ask::workos::WorkosApprovalConfig>,
     /// Proxy server settings.
     pub proxy: ProxyConfig,
+    /// Destination constraints; LAN access requires an explicit override.
+    #[serde(default)]
+    pub network: crate::proxy::network::NetworkConfig,
     /// Policy rules and default action.
     pub policy: PolicyConfig,
     /// Optional DLP scanner configuration.
@@ -379,6 +396,20 @@ impl ValidationResult {
 /// Validate an AppConfig and return all errors/warnings found.
 pub fn validate_config(config: &AppConfig) -> ValidationResult {
     let mut result = ValidationResult::default();
+
+    if config.network.connect_ports.contains(&0) {
+        result.error("network.connect_ports must not contain port zero");
+    }
+    if let Some(web) = &config.web {
+        if let Some(integration) = &web.integration {
+            if !web.enabled {
+                result.error("dashboard integration requires web.enabled");
+            }
+            if let Err(error) = integration.validate(&web.listen, web.auth_token.as_deref()) {
+                result.error(error);
+            }
+        }
+    }
 
     // 1. Validate listen address
     if config.proxy.listen.parse::<std::net::SocketAddr>().is_err() {

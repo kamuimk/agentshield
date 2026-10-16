@@ -8,8 +8,10 @@ use std::path::Path;
 /// Return the default CA directory path (`~/.agentshield/ca/`).
 pub fn ca_dir() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home)
-        .join(".agentshield")
+    std::env::var_os("AGENTSHIELD_DATA_DIR")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(home).join(".agentshield"))
         .join("ca")
 }
 
@@ -41,7 +43,19 @@ pub fn generate_ca(ca_dir: &Path) -> anyhow::Result<()> {
     let key_path = ca_dir.join("key.pem");
     let cert_path = ca_dir.join("cert.pem");
 
-    std::fs::write(&key_path, key_pair.serialize_pem())?;
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(ca_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    options
+        .open(&key_path)?
+        .write_all(key_pair.serialize_pem().as_bytes())?;
     std::fs::write(&cert_path, cert.pem())?;
 
     Ok(())

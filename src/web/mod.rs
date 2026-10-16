@@ -10,6 +10,7 @@
 //! - `PUT  /api/policy`      — replace policy configuration
 
 pub mod ask;
+pub mod integration;
 
 use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
@@ -51,13 +52,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(dashboard_handler))
         .with_state(state.clone());
 
-    let api = Router::new()
-        .route("/api/logs", get(get_logs))
-        .route("/api/logs/stream", get(get_logs_stream))
-        .route("/api/status", get(get_status))
-        .route("/api/policy", get(get_policy).put(put_policy))
-        .route("/api/stats/timeline", get(get_stats_timeline))
-        .with_state(state.clone());
+    let api = api_router(state.clone());
 
     let api = if let Some(ref token) = state.auth_token {
         let token = token.clone();
@@ -79,12 +74,7 @@ pub fn full_router(state: Arc<AppState>, ask_state: ask::AskState) -> Router {
         .route("/", get(dashboard_handler))
         .with_state(state.clone());
 
-    let api = Router::new()
-        .route("/api/logs", get(get_logs))
-        .route("/api/logs/stream", get(get_logs_stream))
-        .route("/api/status", get(get_status))
-        .route("/api/policy", get(get_policy).put(put_policy))
-        .with_state(state.clone());
+    let api = api_router(state.clone());
 
     let ask_router = ask::ask_router(ask_state);
     let protected = api.merge(ask_router);
@@ -99,6 +89,16 @@ pub fn full_router(state: Arc<AppState>, ask_state: ask::AskState) -> Router {
     };
 
     public.merge(protected)
+}
+
+fn api_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/api/logs", get(get_logs))
+        .route("/api/logs/stream", get(get_logs_stream))
+        .route("/api/status", get(get_status))
+        .route("/api/policy", get(get_policy).put(put_policy))
+        .route("/api/stats/timeline", get(get_stats_timeline))
+        .with_state(state)
 }
 
 /// Constant-time token comparison to prevent timing attacks.
@@ -224,6 +224,7 @@ impl From<RequestStats> for StatusResponse {
 /// `GET /api/logs` — return recent log entries as JSON.
 async fn get_logs(
     State(state): State<Arc<AppState>>,
+    access: Option<axum::Extension<integration::Access>>,
     Query(params): Query<LogsQuery>,
 ) -> impl IntoResponse {
     let Some(ref pool) = state.db else {
@@ -257,7 +258,11 @@ async fn get_logs(
                     path: l.path,
                     action: l.action,
                     reason: l.reason,
-                    request_body: l.request_body,
+                    request_body: if access.as_ref().is_some_and(|a| a.0.embedded) {
+                        None
+                    } else {
+                        l.request_body
+                    },
                     dlp_findings: l.dlp_findings,
                 })
                 .collect();

@@ -607,6 +607,8 @@ mod tests {
     fn build_ask_components_contains_buttons() {
         let req = AskRequestInfo {
             req_id: "test-123".to_string(),
+            approval: None,
+
             domain: "api.openai.com".to_string(),
             method: "POST".to_string(),
             path: "/v1/chat".to_string(),
@@ -636,6 +638,8 @@ mod tests {
     fn build_ask_embed_basic() {
         let req = AskRequestInfo {
             req_id: "test-456".to_string(),
+            approval: None,
+
             domain: "api.anthropic.com".to_string(),
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
@@ -653,6 +657,8 @@ mod tests {
     fn build_ask_embed_with_body() {
         let req = AskRequestInfo {
             req_id: "test-789".to_string(),
+            approval: None,
+
             domain: "api.example.com".to_string(),
             method: "POST".to_string(),
             path: "/data".to_string(),
@@ -667,6 +673,8 @@ mod tests {
     fn build_ask_embed_truncates_long_body() {
         let req = AskRequestInfo {
             req_id: "test-abc".to_string(),
+            approval: None,
+
             domain: "api.example.com".to_string(),
             method: "POST".to_string(),
             path: "/data".to_string(),
@@ -682,6 +690,8 @@ mod tests {
     fn format_ask_content_basic() {
         let req = AskRequestInfo {
             req_id: "r1".to_string(),
+            approval: None,
+
             domain: "api.openai.com".to_string(),
             method: "POST".to_string(),
             path: "/v1/chat".to_string(),

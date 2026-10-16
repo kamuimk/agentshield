@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AgentShield Dashboard</title>
     <style>
+        body[data-embedded] nav h1, body[data-embedded] #themeToggle { display: none; }
+        body[data-embedded] main { max-width: none; }
         /* Reset & Base */
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; line-height: 1.5; -webkit-font-smoothing: antialiased; }
@@ -281,7 +283,7 @@
         <section id="panelPolicy" class="hidden">
             <div class="flex items-center justify-between mb-3">
                 <h2 class="text-lg font-semibold">Policy Configuration</h2>
-                <button onclick="savePolicy()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded text-sm">Save Policy</button>
+                <button id="policySaveButton" onclick="savePolicy()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded text-sm">Save Policy</button>
             </div>
             <textarea id="policyEditor" class="w-full h-96 bg-gray-800 text-gray-100 border border-gray-600 rounded-lg p-4 font-mono text-sm focus:outline-none focus:border-blue-500" spellcheck="false"></textarea>
             <div id="policySaveStatus" class="mt-2 text-sm hidden"></div>
@@ -294,9 +296,84 @@
     const MAX_LOGS = 500;
 
     // ─── Token Auth ──────────────────────────────────────────
-    let authToken = sessionStorage.getItem('agentshield_token') || '';
+    const embedConfig = window.AGENTSHIELD_EMBED || null;
+    const PROTOCOL = 'agentshield.dashboard.v1';
+    let authToken = embedConfig ? '' : sessionStorage.getItem('agentshield_token') || '';
+    let capabilities = ['observe', 'policy:write', 'ask:resolve'];
+    let dashboardStarted = false;
+    let connectionGeneration = 0;
+    const streamControllers = new Set();
+    const retryTimers = new Set();
+    let timelineTimer;
+    let parentOrigin;
+    const nonce = embedConfig ? crypto.randomUUID() : null;
+    if (embedConfig) document.body.dataset.embedded = 'true';
+
+    function stopDashboard() {
+        connectionGeneration += 1;
+        dashboardStarted = false;
+        for (const controller of streamControllers) controller.abort();
+        streamControllers.clear();
+        for (const timer of retryTimers) clearTimeout(timer);
+        retryTimers.clear();
+        clearInterval(timelineTimer);
+        authToken = '';
+        allLogs = [];
+        renderLogs();
+        document.getElementById('askList').replaceChildren();
+        document.getElementById('askSection').classList.add('hidden');
+        document.getElementById('policyEditor').value = '';
+        for (const id of ['statTotal', 'statAllowed', 'statDenied', 'statAsked']) document.getElementById(id).textContent = '—';
+        document.getElementById('timelineChart').replaceChildren();
+        document.getElementById('connectionStatus').textContent = 'Disconnected';
+        document.getElementById('connectionStatus').className = 'text-sm text-red-400';
+    }
+
+    function reportToHost(type, details = {}) {
+        if (embedConfig && parentOrigin) window.parent.postMessage({ protocol: PROTOCOL, type, nonce, ...details }, parentOrigin);
+    }
+
+    function setCapabilities(next) {
+        capabilities = next;
+        const writable = capabilities.includes('policy:write');
+        document.getElementById('policyEditor').readOnly = !writable;
+        document.getElementById('policySaveButton').classList.toggle('hidden', !writable);
+    }
+
+    window.addEventListener('pagehide', stopDashboard);
+    if (embedConfig) {
+        window.addEventListener('message', async (event) => {
+            const data = event.data;
+            if (event.source !== window.parent || !embedConfig.origins.includes(event.origin)
+                || !data || data.protocol !== PROTOCOL || data.nonce !== nonce) return;
+            if (data.type === 'theme' && event.origin === parentOrigin && ['light', 'dark'].includes(data.theme)) {
+                applyTheme(data.theme); return;
+            }
+            if (data.type === 'disconnect' && event.origin === parentOrigin) { stopDashboard(); return; }
+            if (data.type !== 'connect' || parentOrigin || typeof data.token !== 'string' || data.token.length > 256) return;
+            parentOrigin = event.origin;
+            const generation = connectionGeneration;
+            authToken = data.token;
+            try {
+                const response = await apiFetch(`${API_BASE}/api/integration`);
+                if (!response.ok) throw new Error('connection rejected');
+                const manifest = await response.json();
+                if (generation !== connectionGeneration) return;
+                if (manifest.protocol !== PROTOCOL) throw new Error('incompatible protocol');
+                setCapabilities(manifest.capabilities);
+                if (['light', 'dark'].includes(data.theme)) applyTheme(data.theme);
+                hideTokenModal();
+                initDashboard();
+                reportToHost('connected', { capabilities, protection: manifest.protection });
+            } catch {
+                stopDashboard(); reportToHost('error', { code: 'connection_failed' });
+            }
+        });
+        for (const origin of embedConfig.origins) window.parent.postMessage({ protocol: PROTOCOL, type: 'ready', nonce }, origin);
+    }
 
     function showTokenModal() {
+        if (embedConfig) return;
         const modal = document.getElementById('tokenModal');
         modal.classList.remove('hidden');
         modal.style.display = 'flex';
@@ -315,7 +392,7 @@
         const input = document.getElementById('tokenInput').value.trim();
         if (!input) return;
         authToken = input;
-        sessionStorage.setItem('agentshield_token', authToken);
+        if (!embedConfig) sessionStorage.setItem('agentshield_token', authToken);
         // Verify token by calling status endpoint
         try {
             const res = await apiFetch(`${API_BASE}/api/status`);
@@ -342,18 +419,69 @@
         if (authToken) {
             opts.headers = { ...opts.headers, 'Authorization': `Bearer ${authToken}` };
         }
+        const generation = connectionGeneration;
         const res = await fetch(url, opts);
+        if (generation !== connectionGeneration) throw new Error('Connection ended');
         if (res.status === 401) {
-            sessionStorage.removeItem('agentshield_token');
-            authToken = '';
+            if (!embedConfig) sessionStorage.removeItem('agentshield_token');
+            stopDashboard();
             showTokenModal();
+            reportToHost('error', { code: 'authentication_required' });
         }
         return res;
     }
 
-    function sseUrl(path) {
-        const url = `${API_BASE}${path}`;
-        return authToken ? `${url}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(authToken)}` : url;
+    // Fetch-based SSE keeps credentials in headers, including in embedded mode.
+    function openStream(path, onMessage, onOpen = () => {}) {
+        const controller = new AbortController();
+        streamControllers.add(controller);
+        (async () => {
+            try {
+                const response = await apiFetch(`${API_BASE}${path}`, { signal: controller.signal });
+                if (!response.ok || !response.body) throw new Error('stream unavailable');
+                if (!dashboardStarted) return;
+                onOpen();
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '', dataLines = [], eventBytes = 0;
+                while (dashboardStarted) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+                    if (buffer.length > 1024 * 1024) throw new Error('stream event too large');
+                    let newline;
+                    while ((newline = buffer.indexOf('\n')) >= 0) {
+                        const line = buffer.slice(0, newline).replace(/\r$/, '');
+                        buffer = buffer.slice(newline + 1);
+                        if (line === '') {
+                            if (dataLines.length) onMessage({ data: dataLines.join('\n') });
+                            dataLines = []; eventBytes = 0;
+                        } else if (line.startsWith('data:')) {
+                            eventBytes += line.length;
+                            if (eventBytes > 1024 * 1024) throw new Error('stream event too large');
+                            dataLines.push(line.slice(5).replace(/^ /, ''));
+                        }
+                    }
+                }
+            } catch (error) {
+                if (controller.signal.aborted) return;
+            } finally {
+                streamControllers.delete(controller);
+                if (dashboardStarted && !controller.signal.aborted) {
+                    document.getElementById('connectionStatus').textContent = 'Disconnected';
+                    document.getElementById('connectionStatus').className = 'text-sm text-red-400';
+                    const timer = setTimeout(() => {
+                        retryTimers.delete(timer);
+                        if (dashboardStarted) openStream(path, onMessage, onOpen);
+                    }, 3000);
+                    retryTimers.add(timer);
+                }
+            }
+        })();
+    }
+
+    function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
     }
 
     // ─── Stats ──────────────────────────────────────────────
@@ -362,6 +490,7 @@
             const res = await apiFetch(`${API_BASE}/api/status`);
             if (!res.ok) return;
             const data = await res.json();
+            if (!dashboardStarted) return;
             document.getElementById('statTotal').textContent = data.total;
             document.getElementById('statAllowed').textContent = data.allowed;
             document.getElementById('statDenied').textContent = data.denied;
@@ -377,6 +506,7 @@
             const res = await apiFetch(`${API_BASE}/api/logs?limit=100`);
             if (!res.ok) return;
             const data = await res.json();
+            if (!dashboardStarted) return;
             allLogs = data.reverse();
             renderLogs();
         } catch (e) { console.error('Logs error:', e); }
@@ -402,13 +532,13 @@
 
         empty.classList.add('hidden');
         tbody.innerHTML = filtered.slice(-200).reverse().map(l => `
-            <tr data-action="${l.action}" class="border-t border-gray-700 hover:bg-gray-750 fade-in">
-                <td class="px-4 py-2 text-gray-400 whitespace-nowrap">${formatTime(l.timestamp)}</td>
-                <td class="px-4 py-2 font-mono">${l.method}</td>
-                <td class="px-4 py-2">${l.domain}</td>
-                <td class="px-4 py-2 text-gray-400 max-w-xs truncate">${l.path}</td>
+            <tr data-action="${escapeHtml(l.action)}" class="border-t border-gray-700 hover:bg-gray-750 fade-in">
+                <td class="px-4 py-2 text-gray-400 whitespace-nowrap">${escapeHtml(formatTime(l.timestamp))}</td>
+                <td class="px-4 py-2 font-mono">${escapeHtml(l.method)}</td>
+                <td class="px-4 py-2">${escapeHtml(l.domain)}</td>
+                <td class="px-4 py-2 text-gray-400 max-w-xs truncate">${escapeHtml(l.path)}</td>
                 <td class="px-4 py-2">${actionBadge(l.action)}</td>
-                <td class="px-4 py-2 text-gray-400 max-w-xs truncate">${l.reason}</td>
+                <td class="px-4 py-2 text-gray-400 max-w-xs truncate">${escapeHtml(l.reason)}</td>
             </tr>
         `).join('');
     }
@@ -427,44 +557,31 @@
             'rate-limited': 'bg-gray-700 text-gray-300',
         };
         const cls = colors[action] || 'bg-gray-700 text-gray-300';
-        return `<span class="px-2 py-0.5 rounded text-xs font-medium ${cls}">${action}</span>`;
+        return `<span class="px-2 py-0.5 rounded text-xs font-medium ${cls}">${escapeHtml(action)}</span>`;
     }
 
     // ─── SSE Log Stream ─────────────────────────────────────
     function connectLogStream() {
-        const es = new EventSource(sseUrl('/api/logs/stream'));
-        es.onopen = () => {
+        openStream('/api/logs/stream', (event) => {
+            try {
+                allLogs.push(JSON.parse(event.data));
+                if (allLogs.length > MAX_LOGS) allLogs.shift();
+                renderLogs(); scrollToBottom(); loadStats();
+            } catch { /* Malformed stream events are ignored. */ }
+        }, () => {
             document.getElementById('connectionStatus').textContent = 'Connected';
             document.getElementById('connectionStatus').className = 'text-sm text-green-400';
-        };
-        es.onmessage = (e) => {
-            try {
-                const log = JSON.parse(e.data);
-                allLogs.push(log);
-                if (allLogs.length > MAX_LOGS) allLogs.shift();
-                renderLogs();
-                scrollToBottom();
-                loadStats();
-            } catch (err) { console.error('SSE parse error:', err); }
-        };
-        es.onerror = () => {
-            document.getElementById('connectionStatus').textContent = 'Disconnected';
-            document.getElementById('connectionStatus').className = 'text-sm text-red-400';
-            setTimeout(connectLogStream, 3000);
-        };
+        });
     }
 
-    // ─── ASK ────────────────────────────────────────────────
     function connectAskStream() {
-        const es = new EventSource(sseUrl('/api/ask/stream'));
-        es.onmessage = (e) => {
+        openStream('/api/ask/stream', (event) => {
             try {
-                const event = JSON.parse(e.data);
-                if (event.type === 'new_ask') addAskCard(event);
-                else if (event.type === 'resolved') removeAskCard(event.req_id);
-            } catch (err) { console.error('ASK SSE error:', err); }
-        };
-        es.onerror = () => setTimeout(connectAskStream, 3000);
+                const data = JSON.parse(event.data);
+                if (data.type === 'new_ask') addAskCard(data);
+                else if (data.type === 'resolved') removeAskCard(data.req_id);
+            } catch { /* Malformed stream events are ignored. */ }
+        });
     }
 
     async function loadPendingAsks() {
@@ -472,6 +589,7 @@
             const res = await apiFetch(`${API_BASE}/api/ask/pending`);
             if (!res.ok) return;
             const data = await res.json();
+            if (!dashboardStarted) return;
             data.forEach(addAskCard);
         } catch (e) { console.error('Pending ASK error:', e); }
     }
@@ -486,17 +604,21 @@
         const card = document.createElement('div');
         card.id = `ask-${ask.req_id}`;
         card.className = 'bg-yellow-900/30 border border-yellow-700 rounded-lg p-4 flex items-center justify-between fade-in';
-        card.innerHTML = `
-            <div>
-                <span class="font-mono text-yellow-300">${ask.method}</span>
-                <span class="text-white ml-2">${ask.domain}</span>
-                <span class="text-gray-400 ml-2">${ask.path}</span>
-            </div>
-            <div class="flex space-x-2">
-                <button onclick="resolveAsk('${ask.req_id}', 'allow')" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm">Allow</button>
-                <button onclick="resolveAsk('${ask.req_id}', 'deny')" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-sm">Deny</button>
-            </div>
-        `;
+        const details = document.createElement('div');
+        for (const key of ['method', 'domain', 'path']) {
+            const value = document.createElement('span');
+            value.className = 'ml-2'; value.textContent = ask[key]; details.append(value);
+        }
+        const actions = document.createElement('div');
+        actions.className = 'flex space-x-2';
+        for (const action of ['allow', 'deny']) {
+            const button = document.createElement('button');
+            button.className = `${action === 'allow' ? 'bg-green-600' : 'bg-red-600'} text-white px-3 py-1 rounded text-sm`;
+            button.textContent = action === 'allow' ? 'Allow' : 'Deny';
+            button.addEventListener('click', () => resolveAsk(ask.req_id, action));
+            actions.append(button);
+        }
+        card.append(details, actions);
         list.prepend(card);
     }
 
@@ -511,18 +633,22 @@
 
     async function resolveAsk(reqId, action) {
         try {
-            await apiFetch(`${API_BASE}/api/ask/${reqId}/${action}`, { method: 'POST' });
+            const response = await apiFetch(`${API_BASE}/api/ask/${encodeURIComponent(reqId)}/${action}`, { method: 'POST' });
+            if (!response.ok) throw new Error('Decision rejected');
             removeAskCard(reqId);
         } catch (e) { console.error('Resolve ASK error:', e); }
     }
 
     // ─── Policy ─────────────────────────────────────────────
     async function loadPolicy() {
+        const editor = document.getElementById('policyEditor');
+        const previous = editor.value;
         try {
             const res = await apiFetch(`${API_BASE}/api/policy`);
             if (!res.ok) return;
             const data = await res.json();
-            document.getElementById('policyEditor').value = JSON.stringify(data, null, 2);
+            if (!dashboardStarted) return;
+            if (editor.value === previous) editor.value = JSON.stringify(data, null, 2);
         } catch (e) { console.error('Policy error:', e); }
     }
 
@@ -536,6 +662,7 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: body,
             });
+            if (!res.ok) throw new Error('Policy update rejected');
             const data = await res.json();
             status.textContent = `Saved (${data.rules} rules)`;
             status.className = 'mt-2 text-sm text-green-400';
@@ -564,7 +691,7 @@
 
     // ─── Theme Toggle ────────────────────────────────────────
     function initTheme() {
-        const saved = localStorage.getItem('agentshield_theme');
+        const saved = embedConfig ? null : localStorage.getItem('agentshield_theme');
         const theme = saved || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
         applyTheme(theme);
     }
@@ -573,7 +700,7 @@
         document.documentElement.setAttribute('data-theme', theme);
         const btn = document.getElementById('themeToggle');
         btn.textContent = theme === 'dark' ? 'Light' : 'Dark';
-        localStorage.setItem('agentshield_theme', theme);
+        if (!embedConfig) localStorage.setItem('agentshield_theme', theme);
     }
 
     function toggleTheme() {
@@ -587,6 +714,7 @@
             const res = await apiFetch(`${API_BASE}/api/stats/timeline?minutes=60`);
             if (!res.ok) return;
             const data = await res.json();
+            if (!dashboardStarted) return;
             renderTimeline(data);
         } catch (e) { console.error('Timeline error:', e); }
     }
@@ -626,14 +754,15 @@
 
     // ─── Init ───────────────────────────────────────────────
     function initDashboard() {
+        if (dashboardStarted) return;
+        dashboardStarted = true;
         loadStats();
         loadLogs();
         loadTimeline();
-        loadPendingAsks();
         connectLogStream();
-        connectAskStream();
+        if (capabilities.includes('ask:resolve')) { loadPendingAsks(); connectAskStream(); }
         // Refresh timeline every 60 seconds
-        setInterval(loadTimeline, 60000);
+        timelineTimer = setInterval(loadTimeline, 60000);
     }
 
     // Apply saved theme immediately
@@ -641,6 +770,11 @@
 
     // Check if auth is required by probing the status endpoint
     (async function boot() {
+        if (embedConfig) {
+            document.getElementById('connectionStatus').textContent = 'Waiting for host';
+            setCapabilities(['observe']);
+            return;
+        }
         try {
             const res = await apiFetch(`${API_BASE}/api/status`);
             if (res.ok) {
@@ -649,8 +783,7 @@
             }
             // if 401, apiFetch already showed the modal
         } catch (e) {
-            // No auth required or server error — try loading anyway
-            initDashboard();
+            document.getElementById('connectionStatus').textContent = 'Disconnected';
         }
     })();
     </script>

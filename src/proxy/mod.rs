@@ -6,6 +6,8 @@
 //! system allowlist before being forwarded to the upstream server.
 
 pub mod connect;
+mod http;
+pub mod network;
 pub mod tls;
 
 use std::net::SocketAddr;
@@ -40,6 +42,7 @@ pub struct ProxyServer {
     policy: Option<Arc<RwLock<PolicyConfig>>>,
     db: Option<DbPool>,
     ask_broadcaster: Option<Arc<AskBroadcaster>>,
+    sensitive_approval: Option<Arc<AskBroadcaster>>,
     dlp_scanner: Option<Arc<dyn DlpScanner>>,
     system_allowlist: Option<Arc<Vec<String>>>,
     notifier: Option<Arc<dyn Notifier>>,
@@ -48,6 +51,7 @@ pub struct ProxyServer {
     cert_cache: Option<Arc<CertCache>>,
     mitm_enabled: bool,
     logging_config: Option<LoggingConfig>,
+    network: network::NetworkConfig,
 }
 
 impl ProxyServer {
@@ -58,6 +62,7 @@ impl ProxyServer {
             policy: None,
             db: None,
             ask_broadcaster: None,
+            sensitive_approval: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -66,6 +71,7 @@ impl ProxyServer {
             cert_cache: None,
             mitm_enabled: false,
             logging_config: None,
+            network: network::NetworkConfig::default(),
         }
     }
 
@@ -87,6 +93,13 @@ impl ProxyServer {
     /// Attach an ASK broadcaster for multi-channel interactive approval.
     pub fn with_ask_broadcaster(mut self, broadcaster: Arc<AskBroadcaster>) -> Self {
         self.ask_broadcaster = Some(broadcaster);
+        self
+    }
+
+    /// Use a dedicated authenticated responder for sensitive data, never the general
+    /// terminal/web ASK channel. Approval applies only to this buffered request.
+    pub fn with_sensitive_approval(mut self, broadcaster: Arc<AskBroadcaster>) -> Self {
+        self.sensitive_approval = Some(broadcaster);
         self
     }
 
@@ -135,6 +148,12 @@ impl ProxyServer {
         self
     }
 
+    /// Set destination constraints. Private networks are blocked by default.
+    pub fn with_network_policy(mut self, config: network::NetworkConfig) -> Self {
+        self.network = config;
+        self
+    }
+
     /// Start the proxy server and return the actual bound address plus a
     /// shutdown sender. Sending `true` on the sender stops the accept loop.
     pub async fn start(&self) -> Result<(SocketAddr, tokio::sync::watch::Sender<bool>)> {
@@ -162,6 +181,7 @@ impl ProxyServer {
             policy: self.policy.clone(),
             db: self.db.clone(),
             ask_broadcaster: self.ask_broadcaster.clone(),
+            sensitive_approval: self.sensitive_approval.clone(),
             dlp_scanner: self.dlp_scanner.clone(),
             system_allowlist: self.system_allowlist.clone(),
             notifier: self.notifier.clone(),
@@ -171,6 +191,7 @@ impl ProxyServer {
             cert_cache: self.cert_cache.clone(),
             upstream_tls_config,
             logging_config: self.logging_config.clone(),
+            network: self.network.clone(),
         });
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
