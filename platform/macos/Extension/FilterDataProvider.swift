@@ -41,7 +41,7 @@ final class FilterDataProvider: NEFilterDataProvider {
         guard let policy else { return .drop() }
         guard let socket = flow as? NEFilterSocketFlow else { return .allow() }
         let endpoint = socket.remoteEndpoint as? NWHostEndpoint
-        let identity = Self.codeHash(flow.sourceAppAuditToken)
+        let identity = Self.codeHash(flow.sourceProcessAuditToken ?? flow.sourceAppAuditToken)
         let verdict = policy.decide(codeHash: identity, host: endpoint?.hostname,
                                     port: endpoint.flatMap { UInt16($0.port) },
                                     isTCP: socket.socketProtocol == IPPROTO_TCP,
