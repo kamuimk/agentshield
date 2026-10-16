@@ -16,12 +16,15 @@ func runtimeEvidence(instance: String) -> Bool {
     process.arguments = ["show", "--last", "30s", "--style", "ndjson", "--predicate", "subsystem == 'com.nation-a.agentshield.network' AND category == 'flow'"]
     process.standardOutput = output; process.standardError = FileHandle.nullDevice
     do { try process.run() } catch { return false }
+    let deadline = DispatchWorkItem { if process.isRunning { process.terminate() } }
+    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5, execute: deadline)
+    defer { deadline.cancel() }
     var bytes = Data()
     while true {
         let chunk = output.fileHandleForReading.readData(ofLength: 4096)
         if chunk.isEmpty { break }
         bytes.append(chunk)
-        if bytes.count > 262144 { process.terminate(); return false }
+        if bytes.count > 262144 { process.terminate(); process.waitUntilExit(); return false }
     }
     process.waitUntilExit()
     guard process.terminationStatus == 0 else { return false }
