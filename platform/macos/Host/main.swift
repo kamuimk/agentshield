@@ -126,7 +126,7 @@ public func agentShieldNetworkMain() {
                 guard let data = try? JSONEncoder().encode(event) else { return nil }
                 return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             }
-            output(["ok": true, "configured": ours, "enabled": ours && manager.isEnabled, "runtime_verified": evidence.0, "events": events])
+            output(["ok": true, "configured": ours, "enabled": ours && manager.isEnabled, "runtime_verified": evidence.0, "controller_authorized": trustedControllerParent(), "events": events])
         }
     case "enable":
         guard args.count == 3,
