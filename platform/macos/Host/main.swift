@@ -74,7 +74,10 @@ final class Activation: NSObject, OSSystemExtensionRequestDelegate {
         FileHandle.standardError.write(Data("system_approval_required\n".utf8))
     }
     func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
-        output(["ok": false, "code": "system_extension_activation_failed"], exitCode: 1)
+        let native = error as NSError
+        // Domain/code diagnose OS refusal without logging localized paths or payloads.
+        output(["ok": false, "code": "system_extension_activation_failed",
+                "os_error_domain": native.domain, "os_error_code": native.code], exitCode: 1)
     }
     func request(_ request: OSSystemExtensionRequest, didFinishWithResult result: OSSystemExtensionRequest.Result) {
         if result == .willCompleteAfterReboot { output(["ok": true, "state": "reboot_required"]) }
@@ -112,6 +115,9 @@ public func agentShieldNetworkMain() {
     if ["enable", "disable"].contains(args[1]) && !trustedControllerParent() {
         output(["ok": false, "code": "unauthorized_controller_parent"], exitCode: 1)
     }
+    let providerURL = Bundle.main.bundleURL.appendingPathComponent("Contents/Library/SystemExtensions/" + identifier + ".systemextension")
+    let providerPresent = Bundle(url: providerURL)?.bundleIdentifier == identifier
+    let installedLocation = Bundle.main.bundleURL.resolvingSymlinksInPath().path.hasPrefix("/Applications/")
     var activation: Activation?
     switch args[1] {
     case "status":
@@ -126,9 +132,11 @@ public func agentShieldNetworkMain() {
                 guard let data = try? JSONEncoder().encode(event) else { return nil }
                 return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             }
-            output(["ok": true, "configured": ours, "enabled": ours && manager.isEnabled, "runtime_verified": evidence.0, "controller_authorized": trustedControllerParent(), "events": events])
+            output(["ok": true, "configured": ours, "enabled": ours && manager.isEnabled, "runtime_verified": evidence.0, "controller_authorized": trustedControllerParent(), "provider_present": providerPresent, "host_in_applications": installedLocation, "events": events])
         }
     case "enable":
+        guard providerPresent else { output(["ok": false, "code": "packaged_provider_not_discoverable"], exitCode: 1) }
+        guard installedLocation else { output(["ok": false, "code": "host_not_installed_in_applications"], exitCode: 1) }
         guard args.count == 3,
               let data = try? Data(contentsOf: URL(fileURLWithPath: args[2])), data.count <= 65536,
               (try? NetworkPolicy.parse(data)) != nil else { output(["ok": false, "code": "invalid_policy"], exitCode: 1) }
