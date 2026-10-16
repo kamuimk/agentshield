@@ -19,6 +19,7 @@ python3 - "$EXT" "$IDENTIFIER" <<'PY'
 import pathlib, plistlib, sys
 extension, identifier = pathlib.Path(sys.argv[1]), sys.argv[2]
 info = {'CFBundleIdentifier':identifier,'CFBundleExecutable':'AgentShieldNetwork',
+        'NSSystemExtensionUsageDescription':'WorkOS uses this extension to observe network connections for service protection.',
         'CFBundleName':'AgentShield Network','CFBundlePackageType':'SYSX',
         'CFBundleVersion':'1','CFBundleShortVersionString':'0.1.0',
         'LSMinimumSystemVersion':'14.0',
