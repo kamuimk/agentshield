@@ -1,6 +1,7 @@
 import Foundation
 import NetworkExtension
 import SystemExtensions
+import Security
 
 // Installed inside WorkOS.app/Contents/MacOS. Only explicit enable/disable commands
 // mutate OS preferences; status never triggers a system consent prompt.
@@ -39,6 +40,27 @@ func runtimeEvidence(instance: String) -> (Bool, [FlowObservation]) {
         if let event = FlowObservation.parse(message: message, processPath: path, instance: instance) { events.append(event) }
     }
     return (alive, Array(events.suffix(20)))
+}
+
+// A prompt-injected CLI must not toggle a previously approved filter by simply
+// launching the signed host. Mutations require our signed, bundled daemon parent.
+func trustedControllerParent() -> Bool {
+    guard let team = Bundle.main.object(forInfoDictionaryKey: "AgentShieldSigningTeamIdentifier") as? String,
+          team.count == 10, team.allSatisfy({ $0.isASCII && ($0.isUppercase || $0.isNumber) }) else { return false }
+    var code: SecCode?
+    guard SecCodeCopyGuestWithAttributes(nil, [kSecGuestAttributePid as String: getppid()] as CFDictionary, [], &code) == errSecSuccess,
+          let code else { return false }
+    var staticCode: SecStaticCode?
+    guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode else { return false }
+    var path: CFURL?
+    guard SecCodeCopyPath(staticCode, [], &path) == errSecSuccess, let path else { return false }
+    let expected = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/binaries/workos-agent-daemon").resolvingSymlinksInPath()
+    guard (path as URL).resolvingSymlinksInPath() == expected else { return false }
+    var requirement: SecRequirement?
+    let text = "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
+    guard SecRequirementCreateWithString(text as CFString, [], &requirement) == errSecSuccess,
+          let requirement else { return false }
+    return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
 }
 
 final class Activation: NSObject, OSSystemExtensionRequestDelegate {
@@ -87,6 +109,9 @@ public func agentShieldNetworkMain() {
     let identifier = Bundle.main.object(forInfoDictionaryKey: "AgentShieldNetworkExtensionIdentifier") as? String
         ?? "com.nation-a.workos.agentshield.network"
     guard args.count >= 2 else { output(["ok": false, "code": "command_required"], exitCode: 1) }
+    if ["enable", "disable"].contains(args[1]) && !trustedControllerParent() {
+        output(["ok": false, "code": "unauthorized_controller_parent"], exitCode: 1)
+    }
     var activation: Activation?
     switch args[1] {
     case "status":
