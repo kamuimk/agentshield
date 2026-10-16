@@ -13,8 +13,8 @@ mkdir -p "$EXT/Contents/MacOS"
 xcrun swiftc -O -target arm64-apple-macos14.0 -module-name AgentShieldNetwork \
   Sources/FlowPolicy/*.swift Extension/FilterDataProvider.swift Extension/main.swift \
   -o "$EXT/Contents/MacOS/AgentShieldNetwork"
-xcrun swiftc -O -target arm64-apple-macos14.0 Sources/FlowPolicy/*.swift Host/main.swift \
-  -o "$OUT/agentshield-network"
+xcrun swiftc -O -emit-library -module-name AgentShieldNetworkHost -target arm64-apple-macos14.0 Sources/FlowPolicy/*.swift Host/main.swift \
+  -o "$OUT/libAgentShieldNetwork.dylib"
 python3 - "$EXT" "$IDENTIFIER" <<'PY'
 import pathlib, plistlib, sys
 extension, identifier = pathlib.Path(sys.argv[1]), sys.argv[2]

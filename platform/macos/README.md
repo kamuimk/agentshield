@@ -7,7 +7,7 @@ it is not an operating system.
 - `swift test --package-path platform/macos` verifies the pure flow decision policy.
 - `bash platform/macos/typecheck.sh` checks both native entry points with Apple's SDK.
 - `bash platform/macos/build.sh /absolute/output com.example.workos.agentshield.network`
-  produces an arm64 macOS 14+ system extension and host helper. It does not install,
+  produces an arm64 macOS 14+ system extension and host library. It does not install,
   activate, modify trust stores, or silently use a signing identity.
 - The extension observes outbound flows. In `enforceManaged` mode, exact configured
   executable code hashes can reach only the configured loopback proxy TCP port.
@@ -33,6 +33,8 @@ entitlements. Sign inside out and notarize the final app. macOS user/MDM approva
 is still required. A successful build or saved filter preference is not proof of
 activation or bypass prevention on a device.
 
+The host library executes inside the signed WorkOS main executable so its
+restricted entitlements use the app's embedded profile; it is not a loose helper.
 The controller's `status` is read-only. `enable POLICY_JSON` requests activation
 and configures the filter after system consent. It refuses to take over another
 provider's configuration. `disable` affects only this provider. `configured` and

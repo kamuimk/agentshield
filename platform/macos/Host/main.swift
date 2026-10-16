@@ -79,44 +79,49 @@ final class Activation: NSObject, OSSystemExtensionRequestDelegate {
         }
     }
 }
-let args = CommandLine.arguments
-let identifier = Bundle.main.object(forInfoDictionaryKey: "AgentShieldNetworkExtensionIdentifier") as? String
-    ?? "com.nation-a.workos.agentshield.network"
-guard args.count >= 2 else { output(["ok": false, "code": "command_required"], exitCode: 1) }
-var activation: Activation?
-switch args[1] {
-case "status":
-    let manager = NEFilterManager.shared()
-    manager.loadFromPreferences { error in
-        guard error == nil else { output(["ok": false, "code": "filter_load_failed"], exitCode: 1) }
-        let ours = manager.providerConfiguration?.filterDataProviderBundleIdentifier == identifier
-        // Preferences alone are not evidence that the extension is running.
-        let instance = manager.providerConfiguration?.vendorConfiguration?["instance"] as? String ?? ""
-        let evidence = ours && manager.isEnabled ? runtimeEvidence(instance: instance) : (false, [])
-        let events = evidence.1.compactMap { event -> [String: Any]? in
-            guard let data = try? JSONEncoder().encode(event) else { return nil }
-            return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+// Called only by the signed WorkOS main executable, which owns the embedded
+// provisioning profile. Restricted entitlements cannot run in a loose helper.
+@_cdecl("agentshield_network_main")
+public func agentShieldNetworkMain() {
+    let args = Array(CommandLine.arguments.dropFirst())
+    let identifier = Bundle.main.object(forInfoDictionaryKey: "AgentShieldNetworkExtensionIdentifier") as? String
+        ?? "com.nation-a.workos.agentshield.network"
+    guard args.count >= 2 else { output(["ok": false, "code": "command_required"], exitCode: 1) }
+    var activation: Activation?
+    switch args[1] {
+    case "status":
+        let manager = NEFilterManager.shared()
+        manager.loadFromPreferences { error in
+            guard error == nil else { output(["ok": false, "code": "filter_load_failed"], exitCode: 1) }
+            let ours = manager.providerConfiguration?.filterDataProviderBundleIdentifier == identifier
+            // Preferences alone are not evidence that the extension is running.
+            let instance = manager.providerConfiguration?.vendorConfiguration?["instance"] as? String ?? ""
+            let evidence = ours && manager.isEnabled ? runtimeEvidence(instance: instance) : (false, [])
+            let events = evidence.1.compactMap { event -> [String: Any]? in
+                guard let data = try? JSONEncoder().encode(event) else { return nil }
+                return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            }
+            output(["ok": true, "configured": ours, "enabled": ours && manager.isEnabled, "runtime_verified": evidence.0, "events": events])
         }
-        output(["ok": true, "configured": ours, "enabled": ours && manager.isEnabled, "runtime_verified": evidence.0, "events": events])
-    }
-case "enable":
-    guard args.count == 3,
-          let data = try? Data(contentsOf: URL(fileURLWithPath: args[2])), data.count <= 65536,
-          (try? NetworkPolicy.parse(data)) != nil else { output(["ok": false, "code": "invalid_policy"], exitCode: 1) }
-    activation = Activation(identifier: identifier, policy: data)
-    let request = OSSystemExtensionRequest.activationRequest(forExtensionWithIdentifier: identifier, queue: .main)
-    request.delegate = activation
-    OSSystemExtensionManager.shared.submitRequest(request)
-case "disable":
-    let manager = NEFilterManager.shared()
-    manager.loadFromPreferences { error in
-        guard error == nil, manager.providerConfiguration?.filterDataProviderBundleIdentifier == identifier else {
-            output(["ok": false, "code": "filter_not_owned"], exitCode: 1)
+    case "enable":
+        guard args.count == 3,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: args[2])), data.count <= 65536,
+              (try? NetworkPolicy.parse(data)) != nil else { output(["ok": false, "code": "invalid_policy"], exitCode: 1) }
+        activation = Activation(identifier: identifier, policy: data)
+        let request = OSSystemExtensionRequest.activationRequest(forExtensionWithIdentifier: identifier, queue: .main)
+        request.delegate = activation
+        OSSystemExtensionManager.shared.submitRequest(request)
+    case "disable":
+        let manager = NEFilterManager.shared()
+        manager.loadFromPreferences { error in
+            guard error == nil, manager.providerConfiguration?.filterDataProviderBundleIdentifier == identifier else {
+                output(["ok": false, "code": "filter_not_owned"], exitCode: 1)
+            }
+            manager.isEnabled = false
+            manager.saveToPreferences { error in output(["ok": error == nil, "state": error == nil ? "disabled" : "disable_failed"]) }
         }
-        manager.isEnabled = false
-        manager.saveToPreferences { error in output(["ok": error == nil, "state": error == nil ? "disabled" : "disable_failed"]) }
+    default: output(["ok": false, "code": "unknown_command"], exitCode: 1)
     }
-default: output(["ok": false, "code": "unknown_command"], exitCode: 1)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 55) { output(["ok": false, "code": "approval_or_operation_timeout"], exitCode: 1) }
+    withExtendedLifetime(activation) { RunLoop.main.run() }
 }
-DispatchQueue.main.asyncAfter(deadline: .now() + 55) { output(["ok": false, "code": "approval_or_operation_timeout"], exitCode: 1) }
-RunLoop.main.run()
