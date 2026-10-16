@@ -53,3 +53,14 @@ rollback on that device. Code updates change their hashes and must be re-enrolle
 Apple references: [TN3134](https://developer.apple.com/documentation/technotes/tn3134-network-extension-provider-deployment),
 [filter provider](https://developer.apple.com/documentation/networkextension/nefilterdataprovider),
 [source audit token](https://developer.apple.com/documentation/networkextension/nefilterflow/sourceappaudittoken).
+
+Remote administration availability is a deployment requirement. The WorkOS
+activation policy uses monitor mode, not a device-wide block. Missing policy
+permits new flows and installs an allow default rather than blocking unrelated
+applications. Managed agent proxy/sandbox denial remains a separate boundary.
+The installed Jump Desktop Connect identity (`com.p5sys.jump.connect`, Apple Team
+`2HCKV38EEC`) is exempt from managed enforcement only after Security.framework
+validates its Apple-anchored signature against the kernel audit token. Names,
+paths, ports and caller-provided policy cannot grant the exemption. An explicit
+managed-hash rule cannot override it. This is not a guarantee against OS/network
+failures; original remote-session continuity must be verified on the signed build.

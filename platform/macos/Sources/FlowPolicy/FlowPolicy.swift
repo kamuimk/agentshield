@@ -14,7 +14,8 @@ public struct NetworkPolicy: Codable, Equatable {
     }
     public enum PolicyError: Error { case invalid }
     public enum Verdict: String { case observe, allowProxy, blockBypass, unmanaged }
-    public func decide(codeHash: String?, host: String?, port: UInt16?, isTCP: Bool, outbound: Bool) -> Verdict {
+    public func decide(codeHash: String?, host: String?, port: UInt16?, isTCP: Bool, outbound: Bool, protectedRemote: Bool = false) -> Verdict {
+        guard !protectedRemote else { return .unmanaged }
         guard outbound else { return .unmanaged }
         guard mode == .enforceManaged else { return .observe }
         // Unknown attribution cannot be claimed as a managed process. The provider

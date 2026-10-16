@@ -29,7 +29,13 @@ final class FilterDataProvider: NEFilterDataProvider {
                 }
                 completionHandler(error)
             }
-        } catch { completionHandler(error) }
+        } catch {
+            // OS observation must not cut off remote administration when its
+            // configuration is unavailable. Managed agent proxy guards remain separate.
+            policy = nil
+            audit.error("monitor_policy_unavailable")
+            apply(NEFilterSettings(rules: [], defaultAction: .allow), completionHandler: completionHandler)
+        }
     }
 
     override func stopFilter(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
@@ -40,14 +46,15 @@ final class FilterDataProvider: NEFilterDataProvider {
     }
 
     override func handleNewFlow(_ flow: NEFilterFlow) -> NEFilterNewFlowVerdict {
-        guard let policy else { return .drop() }
+        guard let policy else { return .allow() }
         guard let socket = flow as? NEFilterSocketFlow else { return .allow() }
         let endpoint = socket.remoteEndpoint as? NWHostEndpoint
-        let identity = Self.codeHash(flow.sourceProcessAuditToken ?? flow.sourceAppAuditToken)
+        let token = flow.sourceProcessAuditToken ?? flow.sourceAppAuditToken
+        let identity = Self.codeHash(token)
         let verdict = policy.decide(codeHash: identity, host: endpoint?.hostname,
                                     port: endpoint.flatMap { UInt16($0.port) },
                                     isTCP: socket.socketProtocol == IPPROTO_TCP,
-                                    outbound: flow.direction == .outbound)
+                                    outbound: flow.direction == .outbound, protectedRemote: Self.protectedRemote(token))
         // No URL path, payload, account identifier or token is inspected or logged
         // at this layer. TLS body inspection belongs to the explicit proxy/hook.
         if flow.direction == .outbound && auditLimiter.accept() {
@@ -62,6 +69,21 @@ final class FilterDataProvider: NEFilterDataProvider {
             }
         }
         return verdict == .blockBypass ? .drop() : .allow()
+    }
+
+    static func protectedRemote(_ token: Data?) -> Bool {
+        guard let token else { return false }
+        var code: SecCode?
+        let attributes = [kSecGuestAttributeAudit as String: token] as CFDictionary
+        guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess,
+              let code else { return false }
+        // Pinned to the installed Jump Desktop Connect's validated Apple signature;
+        // process names, paths, destination ports and user supplied policy cannot grant this exemption.
+        var requirement: SecRequirement?
+        let text = "anchor apple generic and identifier \"com.p5sys.jump.connect\" and certificate leaf[subject.OU] = \"2HCKV38EEC\""
+        guard SecRequirementCreateWithString(text as CFString, [], &requirement) == errSecSuccess,
+              let requirement else { return false }
+        return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
     }
 
     static func codeHash(_ token: Data?) -> String? {

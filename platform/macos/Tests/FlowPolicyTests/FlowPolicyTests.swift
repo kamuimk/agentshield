@@ -15,6 +15,21 @@ final class FlowPolicyTests: XCTestCase {
         let policy = try NetworkPolicy(mode: .monitor, managedCodeHashes: [], proxyPort: 18080)
         XCTAssertEqual(policy.decide(codeHash: fixtureHash, host: "1.1.1.1", port: 443, isTCP: true, outbound: true), .observe)
     }
+    func testVerifiedRemoteAdministrationCannotBecomeManagedTraffic() throws {
+        let policy = try NetworkPolicy(mode: .enforceManaged, managedCodeHashes: [fixtureHash], proxyPort: 18080)
+        for tcp in [true, false] {
+            for outbound in [true, false] {
+                for port: UInt16 in [53, 443, 3389, 24327, 65535] {
+                    XCTAssertEqual(policy.decide(codeHash: fixtureHash, host: "203.0.113.7", port: port,
+                        isTCP: tcp, outbound: outbound, protectedRemote: true), .unmanaged)
+                }
+            }
+        }
+        // The exemption does not weaken the same policy for a managed agent.
+        XCTAssertEqual(policy.decide(codeHash: fixtureHash, host: "203.0.113.7", port: 443,
+            isTCP: true, outbound: true), .blockBypass)
+    }
+
     func testMalformedAndEmptyEnforcementRejected() {
         XCTAssertThrowsError(try NetworkPolicy(mode: .enforceManaged, managedCodeHashes: [], proxyPort: 18080))
         XCTAssertThrowsError(try NetworkPolicy(mode: .enforceManaged, managedCodeHashes: ["attacker"], proxyPort: 18080))
