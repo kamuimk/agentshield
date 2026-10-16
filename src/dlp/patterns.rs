@@ -186,6 +186,26 @@ impl RegexScanner {
             },
         );
 
+        for (name, expression) in [
+            (
+                "password",
+                r#"(?i)(?:password|passwd|client_secret|secret_access_key|session_token)\s*["']?\s*[:=]\s*["']?[^\s"'&,;]{4,}"#,
+            ),
+            (
+                "authorization",
+                r"(?im)^authorization:\s*(?:bearer|basic)\s+[^\r\n]{8,}",
+            ),
+            ("session-cookie", r"(?im)^cookie:\s*[^\r\n]{4,}"),
+        ] {
+            patterns.insert(
+                name.into(),
+                PatternDef {
+                    regex: Regex::new(expression).unwrap(),
+                    severity: Severity::Critical,
+                },
+            );
+        }
+
         Self { patterns }
     }
 
@@ -211,14 +231,28 @@ impl Default for RegexScanner {
 
 impl DlpScanner for RegexScanner {
     fn scan(&self, payload: &[u8]) -> Vec<DlpFinding> {
-        let text = match std::str::from_utf8(payload) {
-            Ok(t) => t,
-            Err(_) => return Vec::new(),
-        };
+        // Binary multipart data must not disable inspection of adjacent ASCII keys.
+        let mut text = String::from_utf8_lossy(payload).into_owned();
+        let decoded = percent_decode(payload);
+        if decoded != payload {
+            text.push('\n');
+            text.push_str(&String::from_utf8_lossy(&decoded));
+        }
+        // Decode JSON string escapes using the parser, never by executing content.
+        let body = payload
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map_or(payload, |offset| &payload[offset + 4..]);
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
+            if let Ok(json) = serde_json::to_string(&value) {
+                text.push('\n');
+                text.push_str(&json);
+            }
+        }
 
         let mut findings = Vec::new();
         for (name, def) in &self.patterns {
-            for mat in def.regex.find_iter(text) {
+            for mat in def.regex.find_iter(&text).take(32) {
                 let matched = mat.as_str();
 
                 // Exclude sk-ant- matches from the OpenAI pattern (Anthropic keys).
@@ -227,12 +261,8 @@ impl DlpScanner for RegexScanner {
                     continue;
                 }
 
-                // Redact the matched text: show first 4 and last 4 chars
-                let redacted = if matched.len() > 12 {
-                    format!("{}...{}", &matched[..4], &matched[matched.len() - 4..])
-                } else {
-                    matched.to_string()
-                };
+                // Even a short account value must never become an audit snippet.
+                let redacted = "[REDACTED...]".to_string();
                 findings.push(DlpFinding {
                     pattern_name: name.clone(),
                     matched_text: redacted,
@@ -244,9 +274,53 @@ impl DlpScanner for RegexScanner {
     }
 }
 
+fn percent_decode(bytes: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = |byte: u8| (byte as char).to_digit(16).map(|value| value as u8);
+            if let (Some(a), Some(b)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) {
+                output.push(a * 16 + b);
+                index += 3;
+                continue;
+            }
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_percent_encoded_and_json_escaped_credentials_are_inspected() {
+        let scanner = RegexScanner::new();
+        for payload in [
+            b"\xff\0sk-abcdefghijklmnopqrstuvwxyz1234567890".as_slice(),
+            b"key=sk%2Dabcdefghijklmnopqrstuvwxyz1234567890".as_slice(),
+            br#"{"value":"sk\u002dabcdefghijklmnopqrstuvwxyz1234567890"}"#.as_slice(),
+        ] {
+            assert!(
+                scanner
+                    .scan(payload)
+                    .iter()
+                    .any(|finding| finding.pattern_name == "openai-api-key")
+            );
+        }
+        let findings = scanner.scan(b"password=shortsecret\r\nAuthorization: Bearer synthetic-access-value\r\nCookie: session=synthetic-value");
+        for name in ["password", "authorization", "session-cookie"] {
+            assert!(findings.iter().any(|finding| finding.pattern_name == name));
+        }
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.matched_text == "[REDACTED...]")
+        );
+    }
 
     #[test]
     fn detects_openai_api_key() {
