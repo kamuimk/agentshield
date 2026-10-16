@@ -90,8 +90,8 @@ pub async fn accept_loop(
                         let ctx = ctx.clone();
                         tokio::spawn(async move {
                             let _permit = permit;
-                            if let Err(e) = handle_connection(stream, &ctx).await {
-                                error!("Error handling connection from {}: {}", peer_addr, e);
+                            if handle_connection(stream, &ctx).await.is_err() {
+                                error!("Error handling connection from (request details withheld)");
                             }
                         });
                     }
@@ -151,6 +151,15 @@ fn log_to_db_with_audit(
         "[PATH REDACTED]"
     } else {
         path
+    };
+    let reason = if ctx
+        .dlp_scanner
+        .as_ref()
+        .is_some_and(|scanner| !scanner.scan(reason.as_bytes()).is_empty())
+    {
+        "[REASON REDACTED]"
+    } else {
+        reason
     };
     let timestamp = chrono::Utc::now().to_rfc3339();
 
@@ -276,11 +285,30 @@ fn log_to_db_audited(
 fn notify_event(ctx: &ConnectionContext, mut event: NotificationEvent) {
     // Remote notifications must never copy request paths or query credentials.
     match &mut event {
-        NotificationEvent::RequestDenied { path, .. }
-        | NotificationEvent::AskPending { path, .. } => {
+        NotificationEvent::RequestDenied { path, reason, .. } => {
+            *path = "[path withheld]".into();
+            *reason = "[policy details withheld]".into();
+        }
+        NotificationEvent::AskPending { path, .. } => {
             *path = "[path withheld]".into();
         }
         _ => {}
+    }
+    let destination = match &mut event {
+        NotificationEvent::RequestDenied { domain, .. }
+        | NotificationEvent::AskPending { domain, .. }
+        | NotificationEvent::DlpFinding { domain, .. }
+        | NotificationEvent::RateLimited { domain, .. } => Some(domain),
+        _ => None,
+    };
+    if let Some(domain) = destination {
+        if ctx
+            .dlp_scanner
+            .as_ref()
+            .is_some_and(|scanner| !scanner.scan(domain.as_bytes()).is_empty())
+        {
+            *domain = "redacted.invalid".into();
+        }
     }
     if let Some(ref n) = ctx.notifier {
         let n = n.clone();
@@ -590,7 +618,7 @@ async fn handle_connect(
     // System allowlist bypass: skip policy evaluation for internal services
     let allowlist_slice = ctx.system_allowlist.as_ref().map(|v| v.as_slice());
     if is_system_allowed(domain, allowlist_slice) {
-        info!("SYSTEM-ALLOW CONNECT to {} (allowlist)", target);
+        info!("SYSTEM-ALLOW CONNECT to (request details withheld)");
         log_to_db(
             ctx,
             "CONNECT",
@@ -613,7 +641,7 @@ async fn handle_connect(
         };
         match result.action {
             Action::Deny => {
-                warn!("BLOCKED CONNECT to {} - {}", target, result.reason);
+                warn!("BLOCKED CONNECT to (request details withheld)");
                 log_to_db(ctx, "CONNECT", domain, "/", "deny", &result.reason);
                 notify_event(
                     ctx,
@@ -632,7 +660,7 @@ async fn handle_connect(
                 return Ok(());
             }
             Action::Ask => {
-                info!("ASK CONNECT to {} - {}", target, result.reason);
+                info!("ASK CONNECT to (request details withheld)");
                 notify_event(
                     ctx,
                     NotificationEvent::AskPending {
@@ -676,7 +704,7 @@ async fn handle_connect(
                                 "Rate limit exceeded ({}/ {}s for {})",
                                 rl_config.max_requests, rl_config.window_secs, domain
                             );
-                            warn!("RATE-LIMITED CONNECT to {} - {}", target, reason);
+                            warn!("RATE-LIMITED CONNECT to (request details withheld)");
                             log_to_db(ctx, "CONNECT", domain, "/", "rate-limited", &reason);
                             notify_event(
                                 ctx,
@@ -696,13 +724,13 @@ async fn handle_connect(
                         }
                     }
                 }
-                info!("ALLOWED CONNECT to {} - {}", target, result.reason);
+                info!("ALLOWED CONNECT to (request details withheld)");
                 log_to_db(ctx, "CONNECT", domain, "/", "allow", &result.reason);
             }
         }
     }
 
-    info!("CONNECT tunnel to {}", target);
+    info!("CONNECT tunnel to (request details withheld)");
 
     match super::network::connect(target, &ctx.network).await {
         Ok(mut remote) => {
@@ -734,7 +762,7 @@ async fn handle_connect(
             reject_request(client, ctx, 403, "destination address denied").await?;
         }
         Err(_) => {
-            warn!("Failed to connect to {}", target);
+            warn!("Failed to connect to (request details withheld)");
             let response = "HTTP/1.1 502 Bad Gateway\r\n\r\n";
             client.write_all(response.as_bytes()).await?;
         }
@@ -781,7 +809,7 @@ async fn handle_http_request(
 
     // Validate domain to prevent header injection
     if !validate_domain(&host) {
-        warn!("Invalid domain in HTTP request: {}", host);
+        warn!("Invalid domain in HTTP request: (request details withheld)");
         log_to_db_audited(
             ctx,
             method,
@@ -823,14 +851,7 @@ async fn handle_http_request(
                 };
                 if (has_critical || needs_approval) && !approved {
                     for f in &findings {
-                        warn!(
-                            "DLP {} finding in {} {}: pattern={}, match={}",
-                            format!("{:?}", f.severity),
-                            method,
-                            uri,
-                            f.pattern_name,
-                            f.matched_text
-                        );
+                        warn!(severity = ?f.severity, pattern = %f.pattern_name, "DLP finding (request details withheld)");
                     }
                     let dlp_str = format_dlp_findings(&findings);
                     log_to_db_audited(
@@ -871,20 +892,14 @@ async fn handle_http_request(
                 }
                 // Non-critical findings: log warning but allow request through
                 for f in &findings {
-                    warn!(
-                        "DLP {:?} finding in {} {}: pattern={}, match={}",
-                        f.severity, method, uri, f.pattern_name, f.matched_text
-                    );
+                    warn!(severity = ?f.severity, pattern = %f.pattern_name, "DLP finding (request details withheld)");
                 }
             }
         }
     } // end if !system_allowed (DLP bypass)
 
     if system_allowed {
-        info!(
-            "SYSTEM-ALLOW {} {} (allowlist, policy+dlp bypass)",
-            method, uri
-        );
+        info!("SYSTEM-ALLOW (request details withheld)");
         log_to_db_audited(
             ctx,
             method,
@@ -909,7 +924,7 @@ async fn handle_http_request(
         };
         match result.action {
             Action::Deny => {
-                warn!("BLOCKED {} {} - {}", method, uri, result.reason);
+                warn!("BLOCKED (request details withheld)");
                 log_to_db_audited(
                     ctx,
                     method,
@@ -937,7 +952,7 @@ async fn handle_http_request(
                 return Ok(());
             }
             Action::Ask => {
-                info!("ASK {} {} - {}", method, uri, result.reason);
+                info!("ASK (request details withheld)");
                 notify_event(
                     ctx,
                     NotificationEvent::AskPending {
@@ -996,7 +1011,7 @@ async fn handle_http_request(
                                 "Rate limit exceeded ({}/{}s for {})",
                                 rl_config.max_requests, rl_config.window_secs, host
                             );
-                            warn!("RATE-LIMITED {} {} - {}", method, uri, reason);
+                            warn!("RATE-LIMITED (request details withheld)");
                             log_to_db_audited(
                                 ctx,
                                 method,
@@ -1025,7 +1040,7 @@ async fn handle_http_request(
                         }
                     }
                 }
-                info!("ALLOWED {} {} - {}", method, uri, result.reason);
+                info!("ALLOWED (request details withheld)");
                 log_to_db_audited(
                     ctx,
                     method,
@@ -1040,7 +1055,7 @@ async fn handle_http_request(
         }
     }
 
-    info!("HTTP {} to {}", method, uri);
+    info!("HTTP (request details withheld)");
     let target = format!("{}:{}", host, port);
 
     match super::network::connect(&target, &ctx.network).await {
@@ -1055,13 +1070,13 @@ async fn handle_http_request(
             .await;
             match copy_result {
                 Ok(Ok(bytes)) => {
-                    info!("Streamed {} bytes from {}", bytes, target);
+                    info!(bytes, "Response streamed (request details withheld)");
                 }
-                Ok(Err(e)) => {
-                    warn!("Error streaming response from {}: {}", target, e);
+                Ok(Err(_)) => {
+                    warn!("Error streaming response from (request details withheld)");
                 }
                 Err(_) => {
-                    warn!("Timeout streaming response from {}", target);
+                    warn!("Timeout streaming response from (request details withheld)");
                 }
             }
         }
@@ -1069,7 +1084,7 @@ async fn handle_http_request(
             reject_request(client, ctx, 403, "destination address denied").await?;
         }
         Err(_) => {
-            warn!("Failed to connect to {}", target);
+            warn!("Failed to connect to (request details withheld)");
             let response = "HTTP/1.1 502 Bad Gateway\r\n\r\n";
             client.write_all(response.as_bytes()).await?;
         }
@@ -1113,8 +1128,8 @@ async fn handle_connect_mitm(
     // Step 2: TLS-accept the client using our CA-signed cert for this domain
     let server_config = match cert_cache.get_or_create(domain) {
         Ok(cfg) => cfg,
-        Err(e) => {
-            error!("Failed to generate cert for {}: {}", domain, e);
+        Err(_) => {
+            error!("Failed to generate cert for (request details withheld)");
             return Ok(());
         }
     };
@@ -1126,8 +1141,8 @@ async fn handle_connect_mitm(
             Err(_) => return Ok(()),
             Ok(result) => match result {
                 Ok(stream) => stream,
-                Err(e) => {
-                    warn!("TLS handshake with client failed for {}: {}", domain, e);
+                Err(_) => {
+                    warn!("TLS handshake with client failed for (request details withheld)");
                     return Ok(());
                 }
             },
@@ -1190,10 +1205,7 @@ async fn handle_connect_mitm(
             };
             if (has_critical || needs_approval) && !approved {
                 for f in &findings {
-                    warn!(
-                        "MITM DLP {:?} finding in {} https://{}{}: pattern={}, match={}",
-                        f.severity, method, domain, path, f.pattern_name, f.matched_text
-                    );
+                    warn!(severity = ?f.severity, pattern = %f.pattern_name, "DLP finding (request details withheld)");
                 }
                 let dlp_str = format_dlp_findings(&findings);
                 log_to_db_audited(
@@ -1234,10 +1246,7 @@ async fn handle_connect_mitm(
             }
             // Non-critical findings: log but allow
             for f in &findings {
-                warn!(
-                    "MITM DLP {:?} finding in {} https://{}{}: pattern={}, match={}",
-                    f.severity, method, domain, path, f.pattern_name, f.matched_text
-                );
+                warn!(severity = ?f.severity, pattern = %f.pattern_name, "DLP finding (request details withheld)");
             }
         }
     }
@@ -1270,7 +1279,7 @@ async fn handle_connect_mitm(
             return Ok(());
         }
         Err(_) => {
-            warn!("Failed to connect to upstream {}", target);
+            warn!("Failed to connect to upstream (request details withheld)");
             let response = "HTTP/1.1 502 Bad Gateway\r\n\r\n";
             let _ = client_tls.write_all(response.as_bytes()).await;
             let _ = client_tls.shutdown().await;
@@ -1291,8 +1300,8 @@ async fn handle_connect_mitm(
         Err(_) => return Ok(()),
         Ok(result) => match result {
             Ok(s) => s,
-            Err(e) => {
-                warn!("TLS handshake with upstream {} failed: {}", target, e);
+            Err(_) => {
+                warn!("TLS handshake with upstream (request details withheld)");
                 let response = "HTTP/1.1 502 Bad Gateway\r\n\r\n";
                 let _ = client_tls.write_all(response.as_bytes()).await;
                 let _ = client_tls.shutdown().await;
@@ -1302,8 +1311,11 @@ async fn handle_connect_mitm(
     };
 
     // Step 6: Forward decrypted request to upstream
-    if let Err(e) = write_bounded(&mut remote_tls, &super::http::origin_form(raw_request)).await {
-        warn!("Failed to forward request to {}: {}", target, e);
+    if write_bounded(&mut remote_tls, &super::http::origin_form(raw_request))
+        .await
+        .is_err()
+    {
+        warn!("Failed to forward request to (request details withheld)");
         let _ = client_tls.shutdown().await;
         return Ok(());
     }
@@ -1316,7 +1328,7 @@ async fn handle_connect_mitm(
     // Drain any remaining client data (keep-alive cleanup)
     let _ = client_read.read(&mut [0u8; 0]).await;
 
-    info!("MITM {} https://{}{}", method, domain, path);
+    info!("MITM (request details withheld)");
     log_to_db_audited(
         ctx,
         method,
@@ -1359,6 +1371,68 @@ fn parse_path(uri: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn denied_query_credentials_never_enter_diagnostic_output() {
+        use tracing::instrument::WithSubscriber;
+        #[derive(Clone)]
+        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = Capture(output.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let ctx = ConnectionContext {
+            policy: None,
+            db: None,
+            ask_broadcaster: None,
+            sensitive_approval: None,
+            dlp_scanner: Some(Arc::new(crate::dlp::patterns::RegexScanner::new())),
+            system_allowlist: None,
+            notifier: None,
+            event_tx: None,
+            rate_limiter: None,
+            mitm_enabled: false,
+            cert_cache: None,
+            upstream_tls_config: None,
+            logging_config: None,
+            network: super::super::network::NetworkConfig::default(),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        handle_http_request(&mut server,
+            b"GET http://example.test/private-path?password=fixture-sensitive-value HTTP/1.1\r\nHost: example.test\r\n\r\n", &ctx)
+            .with_subscriber(subscriber).await.unwrap();
+        let mut response = [0; 1024];
+        let size = client.read(&mut response).await.unwrap();
+        assert!(response[..size].starts_with(b"HTTP/1.1 403"));
+        let text = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.contains("DLP finding"),
+            "diagnostic event should remain useful"
+        );
+        for value in [
+            "fixture-sensitive-value",
+            "private-path",
+            "example.test",
+            "password=",
+        ] {
+            assert!(!text.contains(value), "diagnostic leaked request data");
+        }
+    }
 
     #[test]
     fn test_parse_path() {
