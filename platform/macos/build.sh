@@ -11,9 +11,9 @@ OUT="$(cd "$OUT" && pwd)"
 EXT="$OUT/$IDENTIFIER.systemextension"
 mkdir -p "$EXT/Contents/MacOS"
 xcrun swiftc -O -target arm64-apple-macos14.0 -module-name AgentShieldNetwork \
-  Sources/FlowPolicy/FlowPolicy.swift Extension/FilterDataProvider.swift Extension/main.swift \
+  Sources/FlowPolicy/*.swift Extension/FilterDataProvider.swift Extension/main.swift \
   -o "$EXT/Contents/MacOS/AgentShieldNetwork"
-xcrun swiftc -O -target arm64-apple-macos14.0 Sources/FlowPolicy/FlowPolicy.swift Host/main.swift \
+xcrun swiftc -O -target arm64-apple-macos14.0 Sources/FlowPolicy/*.swift Host/main.swift \
   -o "$OUT/agentshield-network"
 python3 - "$EXT" "$IDENTIFIER" <<'PY'
 import pathlib, plistlib, sys

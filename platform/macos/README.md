@@ -17,8 +17,11 @@ it is not an operating system.
   validity. PID strings, executable names and a user-supplied bundle id are not
   trusted process identities. Unknown attribution remains unmanaged and must not
   be represented as universal enforcement.
-- Unified logging contains verdict, code hash and port. Endpoint text uses private
-  logging. The provider does not decrypt TLS or collect payloads.
+- Unified logging contains verdict, code hash, numeric destination IP and port.
+  Hostnames are redacted. Telemetry is sampled at at most four events per second;
+  every flow still receives a policy decision. Status returns up to 20 recent
+  samples from the current activation, not a complete connection history.
+  The provider does not decrypt TLS or collect payloads.
 
 Distribution requires a matching Developer ID signing identity, Network Extension
 provisioning profile, entitlement and app bundle. The system extension belongs in

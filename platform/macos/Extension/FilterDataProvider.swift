@@ -1,5 +1,6 @@
 import Foundation
 import NetworkExtension
+import Network
 import Security
 import OSLog
 
@@ -7,6 +8,7 @@ import OSLog
 final class FilterDataProvider: NEFilterDataProvider {
     private let audit = Logger(subsystem: "com.nation-a.agentshield.network", category: "flow")
     private var policy: NetworkPolicy?
+    private let auditLimiter = FlowAuditLimiter()
     private var heartbeat: DispatchSourceTimer?
 
     override func startFilter(completionHandler: @escaping (Error?) -> Void) {
@@ -48,7 +50,17 @@ final class FilterDataProvider: NEFilterDataProvider {
                                     outbound: flow.direction == .outbound)
         // No URL path, payload, account identifier or token is inspected or logged
         // at this layer. TLS body inspection belongs to the explicit proxy/hook.
-        audit.notice("verdict=\(verdict.rawValue, privacy: .public) identity=\(identity ?? "unknown", privacy: .public) host=\(endpoint?.hostname ?? "unknown", privacy: .private) port=\(endpoint?.port ?? "unknown", privacy: .public)")
+        if flow.direction == .outbound && auditLimiter.accept() {
+            let host = endpoint?.hostname ?? ""
+            let destination = IPv4Address(host) != nil || IPv6Address(host) != nil ? host : "hostname-redacted"
+            let event: [String: Any] = ["instance": filterConfiguration.vendorConfiguration?["instance"] as? String ?? "unknown",
+                "at": ISO8601DateFormatter().string(from: Date()),
+                "verdict": verdict.rawValue, "codeHash": identity ?? "unknown",
+                "destination": destination, "port": Int(endpoint?.port ?? "") ?? 0]
+            if let data = try? JSONSerialization.data(withJSONObject: event), let text = String(data: data, encoding: .utf8) {
+                audit.notice("flow \(text, privacy: .public)")
+            }
+        }
         return verdict == .blockBypass ? .drop() : .allow()
     }
 

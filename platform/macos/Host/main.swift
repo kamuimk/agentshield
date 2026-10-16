@@ -9,13 +9,13 @@ func output(_ value: [String: Any], exitCode: Int32 = 0) -> Never {
     FileHandle.standardOutput.write(data + Data([10]))
     exit(exitCode)
 }
-func runtimeEvidence(instance: String) -> Bool {
-    guard UUID(uuidString: instance) != nil else { return false }
+func runtimeEvidence(instance: String) -> (Bool, [FlowObservation]) {
+    guard UUID(uuidString: instance) != nil else { return (false, []) }
     let process = Process(), output = Pipe()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/log")
-    process.arguments = ["show", "--last", "30s", "--style", "ndjson", "--predicate", "subsystem == 'com.nation-a.agentshield.network' AND category == 'flow'"]
+    process.arguments = ["show", "--last", "30s", "--style", "ndjson", "--predicate", "subsystem == 'com.nation-a.agentshield.network' AND category == 'flow' AND eventMessage CONTAINS '\(instance)'"]
     process.standardOutput = output; process.standardError = FileHandle.nullDevice
-    do { try process.run() } catch { return false }
+    do { try process.run() } catch { return (false, []) }
     let deadline = DispatchWorkItem { if process.isRunning { process.terminate() } }
     DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5, execute: deadline)
     defer { deadline.cancel() }
@@ -24,19 +24,21 @@ func runtimeEvidence(instance: String) -> Bool {
         let chunk = output.fileHandleForReading.readData(ofLength: 4096)
         if chunk.isEmpty { break }
         bytes.append(chunk)
-        if bytes.count > 262144 { process.terminate(); process.waitUntilExit(); return false }
+        if bytes.count > 262144 { process.terminate(); process.waitUntilExit(); return (false, []) }
     }
     process.waitUntilExit()
-    guard process.terminationStatus == 0 else { return false }
+    guard process.terminationStatus == 0 else { return (false, []) }
+    var alive = false
+    var events: [FlowObservation] = []
     for line in bytes.split(separator: 10) {
         guard let row = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any],
               let path = row["processImagePath"] as? String,
               path.hasPrefix("/Library/SystemExtensions/"), path.hasSuffix("/AgentShieldNetwork"),
-              let message = row["eventMessage"] as? String,
-              message == "heartbeat instance=" + instance else { continue }
-        return true
+              let message = row["eventMessage"] as? String else { continue }
+        if message == "heartbeat instance=" + instance { alive = true }
+        if let event = FlowObservation.parse(message: message, processPath: path, instance: instance) { events.append(event) }
     }
-    return false
+    return (alive, Array(events.suffix(20)))
 }
 
 final class Activation: NSObject, OSSystemExtensionRequestDelegate {
@@ -90,8 +92,12 @@ case "status":
         let ours = manager.providerConfiguration?.filterDataProviderBundleIdentifier == identifier
         // Preferences alone are not evidence that the extension is running.
         let instance = manager.providerConfiguration?.vendorConfiguration?["instance"] as? String ?? ""
-        let verified = ours && manager.isEnabled && runtimeEvidence(instance: instance)
-        output(["ok": true, "configured": ours, "enabled": ours && manager.isEnabled, "runtime_verified": verified])
+        let evidence = ours && manager.isEnabled ? runtimeEvidence(instance: instance) : (false, [])
+        let events = evidence.1.compactMap { event -> [String: Any]? in
+            guard let data = try? JSONEncoder().encode(event) else { return nil }
+            return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        }
+        output(["ok": true, "configured": ours, "enabled": ours && manager.isEnabled, "runtime_verified": evidence.0, "events": events])
     }
 case "enable":
     guard args.count == 3,
