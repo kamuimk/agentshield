@@ -544,13 +544,33 @@ async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::R
     })
 }
 
+/// A supervised Windows process can intentionally have no console. In that
+/// case its owning Job Object controls lifetime; installing a console handler
+/// must not make an otherwise-ready inspection engine exit immediately.
+async fn shutdown_requested() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetConsoleWindow() -> *mut std::ffi::c_void;
+        }
+        // Safety: the Win32 function has no arguments and returns a borrowed
+        // window handle; it neither creates nor changes console state.
+        if unsafe { GetConsoleWindow() }.is_null() {
+            std::future::pending::<()>().await;
+        }
+    }
+    tokio::signal::ctrl_c().await?;
+    Ok(())
+}
+
 /// Start the proxy and block until Ctrl-C, then shut down gracefully.
 async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
     let config = AppConfig::load_from_path(config_path)?;
     let handle = start_proxy_server(&config, config_path).await?;
 
     // Keep running until interrupted
-    tokio::signal::ctrl_c().await?;
+    shutdown_requested().await?;
     info!("Shutting down gracefully...");
 
     // Stop accepting new connections
