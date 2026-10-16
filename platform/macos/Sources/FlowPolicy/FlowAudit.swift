@@ -1,5 +1,7 @@
 import Foundation
 import Network
+import CryptoKit
+import Darwin
 
 public struct FlowObservation: Codable, Equatable {
     public let instance: String
@@ -37,5 +39,32 @@ public final class FlowAuditLimiter {
         guard count < 4 else { return false }
         count += 1
         return true
+    }
+}
+
+
+/// A running older provider must not attest to a newly installed security build.
+public enum ProviderImage {
+    public static func matches(actual: URL, bundled: URL) -> Bool {
+        func digest(_ url: URL) -> SHA256.Digest? {
+            do {
+                let descriptor = url.withUnsafeFileSystemRepresentation { path in
+                    guard let path else { return Int32(-1) }
+                    return Darwin.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+                }
+                guard descriptor >= 0 else { return nil }
+                defer { _ = Darwin.close(descriptor) }
+                var metadata = stat()
+                let limit = 32 * 1024 * 1024
+                guard fstat(descriptor, &metadata) == 0, (metadata.st_mode & S_IFMT) == S_IFREG,
+                      metadata.st_size > 0, metadata.st_size <= limit else { return nil }
+                let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+                guard let data = try handle.read(upToCount: limit + 1), data.count == metadata.st_size,
+                      data.count <= limit else { return nil }
+                return SHA256.hash(data: data)
+            } catch { return nil }
+        }
+        guard let expected = digest(bundled), let observed = digest(actual) else { return false }
+        return expected == observed
     }
 }

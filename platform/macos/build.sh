@@ -16,12 +16,18 @@ xcrun swiftc -O -target arm64-apple-macos14.0 -module-name AgentShieldNetwork \
 xcrun swiftc -O -emit-library -module-name AgentShieldNetworkHost -target arm64-apple-macos14.0 Sources/FlowPolicy/*.swift Host/main.swift \
   -o "$OUT/libAgentShieldNetwork.dylib"
 python3 - "$EXT" "$IDENTIFIER" <<'PY'
-import pathlib, plistlib, sys
+import os, pathlib, plistlib, re, sys, time
 extension, identifier = pathlib.Path(sys.argv[1]), sys.argv[2]
+build = os.environ.get('AGENTSHIELD_BUILD_VERSION')
+if not build:
+    build = (os.environ['GITHUB_RUN_ID'] + '.' + os.environ.get('GITHUB_RUN_ATTEMPT', '1')
+             if os.environ.get('GITHUB_RUN_ID') else str(time.time_ns()))
+if not re.fullmatch(r'[0-9]+(?:\.[0-9]+){0,2}', build) or len(build) > 64:
+    raise ValueError('invalid native build version')
 info = {'CFBundleIdentifier':identifier,'CFBundleExecutable':'AgentShieldNetwork',
         'NSSystemExtensionUsageDescription':'WorkOS uses this extension to observe network connections for service protection.',
         'CFBundleName':'AgentShield Network','CFBundlePackageType':'SYSX',
-        'CFBundleVersion':'1','CFBundleShortVersionString':'0.1.0',
+        'CFBundleVersion':build,'CFBundleShortVersionString':'0.1.0',
         'LSMinimumSystemVersion':'14.0',
         'NetworkExtension':{'NEProviderClasses':{'com.apple.networkextension.filter-data':'AgentShieldFilterDataProvider'},
                             'NEMachServiceName':'$(TeamIdentifierPrefix)'+identifier}}

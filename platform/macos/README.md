@@ -64,3 +64,11 @@ validates its Apple-anchored signature against the kernel audit token. Names,
 paths, ports and caller-provided policy cannot grant the exemption. An explicit
 managed-hash rule cannot override it. This is not a guarantee against OS/network
 failures; original remote-session continuity must be verified on the signed build.
+
+Each distributed extension build needs a distinct CFBundleVersion. The builder
+uses AGENTSHIELD_BUILD_VERSION when supplied, otherwise GITHUB_RUN_ID plus
+GITHUB_RUN_ATTEMPT in CI, or a local nanosecond build identity. Reusing a fixed
+version can leave the older installed provider running despite a new app bundle.
+The controller accepts heartbeat/flow evidence only when the system extension's
+on-disk executable matches the current app's bundled provider bytes; an older
+provider cannot attest that a newly installed security fix is active.

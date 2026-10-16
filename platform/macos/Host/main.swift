@@ -29,6 +29,9 @@ func runtimeEvidence(instance: String) -> (Bool, [FlowObservation]) {
     }
     process.waitUntilExit()
     guard process.terminationStatus == 0 else { return (false, []) }
+    guard let identifier = Bundle.main.object(forInfoDictionaryKey: "AgentShieldNetworkExtensionIdentifier") as? String else { return (false, []) }
+    let bundledImage = Bundle.main.bundleURL.appendingPathComponent("Contents/Library/SystemExtensions/" + identifier + ".systemextension/Contents/MacOS/AgentShieldNetwork")
+    var images: [String: Bool] = [:]
     var alive = false
     var events: [FlowObservation] = []
     for line in bytes.split(separator: 10) {
@@ -36,6 +39,8 @@ func runtimeEvidence(instance: String) -> (Bool, [FlowObservation]) {
               let path = row["processImagePath"] as? String,
               path.hasPrefix("/Library/SystemExtensions/"), path.hasSuffix("/AgentShieldNetwork"),
               let message = row["eventMessage"] as? String else { continue }
+        if images[path] == nil { images[path] = ProviderImage.matches(actual: URL(fileURLWithPath: path), bundled: bundledImage) }
+        guard images[path] == true else { continue }
         if message == "heartbeat instance=" + instance { alive = true }
         if let event = FlowObservation.parse(message: message, processPath: path, instance: instance) { events.append(event) }
     }

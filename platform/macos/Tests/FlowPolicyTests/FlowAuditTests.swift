@@ -20,4 +20,20 @@ final class FlowAuditTests: XCTestCase {
         XCTAssertNil(FlowObservation.parse(message: event.replacingOccurrences(of: "127.0.0.1", with: "secret.example.test"), processPath: path, instance: instance))
         XCTAssertNil(FlowObservation.parse(message: event.replacingOccurrences(of: "observe", with: "<script>"), processPath: path, instance: instance))
     }
+    func testOlderProviderCannotAttestToUpdatedBundle() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let actual = directory.appendingPathComponent("running")
+        let bundled = directory.appendingPathComponent("bundled")
+        try Data("old-provider".utf8).write(to: actual)
+        try Data("new-provider".utf8).write(to: bundled)
+        XCTAssertFalse(ProviderImage.matches(actual: actual, bundled: bundled))
+        try Data("new-provider".utf8).write(to: actual)
+        XCTAssertTrue(ProviderImage.matches(actual: actual, bundled: bundled))
+        try FileManager.default.removeItem(at: actual)
+        try FileManager.default.createSymbolicLink(at: actual, withDestinationURL: bundled)
+        XCTAssertFalse(ProviderImage.matches(actual: actual, bundled: bundled))
+    }
+
 }
