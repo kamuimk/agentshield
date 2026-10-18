@@ -250,6 +250,10 @@ impl DlpScanner for RegexScanner {
             }
         }
 
+        // Inspect common transport encodings without executing payload content.
+        // Two layers and fixed work/output budgets bound adversarial expansion.
+        append_base64_views(&mut text);
+
         let mut findings = Vec::new();
         for (name, def) in &self.patterns {
             for mat in def.regex.find_iter(&text).take(32) {
@@ -274,6 +278,74 @@ impl DlpScanner for RegexScanner {
     }
 }
 
+const MAX_ENCODED_TOKEN: usize = 65_536;
+const MAX_DECODED_BYTES: usize = 1_048_576;
+const MAX_ENCODED_CANDIDATES: usize = 2_048;
+
+fn base64_views(input: &[u8], budget: &mut usize, candidates: &mut usize) -> Vec<u8> {
+    use base64::{Engine as _, engine::general_purpose};
+    let mut output = Vec::new();
+    let alphabet = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'-' | b'_');
+    let mut index = 0;
+    while index < input.len() && *budget > 0 && *candidates > 0 {
+        if !alphabet(input[index]) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < input.len() && alphabet(input[index]) {
+            index += 1;
+        }
+        while index < input.len() && input[index] == b'=' {
+            index += 1;
+        }
+        let token = &input[start..index];
+        if !(16..=MAX_ENCODED_TOKEN).contains(&token.len()) {
+            continue;
+        }
+        *candidates -= 1;
+        for engine in [
+            general_purpose::STANDARD,
+            general_purpose::STANDARD_NO_PAD,
+            general_purpose::URL_SAFE,
+            general_purpose::URL_SAFE_NO_PAD,
+        ] {
+            if let Ok(decoded) = engine.decode(token) {
+                if decoded.len() + 1 > *budget {
+                    break;
+                }
+                *budget -= decoded.len() + 1;
+                output.extend_from_slice(&decoded);
+                output.push(b'\n');
+                break;
+            }
+        }
+    }
+    output
+}
+
+fn append_base64_views(text: &mut String) {
+    let mut budget = MAX_DECODED_BYTES;
+    let mut candidates = MAX_ENCODED_CANDIDATES;
+    let mut layer = base64_views(text.as_bytes(), &mut budget, &mut candidates);
+    for depth in 0..2 {
+        if layer.is_empty() {
+            break;
+        }
+        text.push('\n');
+        text.push_str(&String::from_utf8_lossy(&layer));
+        let percent = percent_decode(&layer);
+        if percent != layer && percent.len() + 1 <= budget {
+            budget -= percent.len() + 1;
+            text.push('\n');
+            text.push_str(&String::from_utf8_lossy(&percent));
+        }
+        if depth == 0 {
+            layer = base64_views(&percent, &mut budget, &mut candidates);
+        }
+    }
+}
+
 fn percent_decode(bytes: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -295,6 +367,64 @@ fn percent_decode(bytes: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_base64_transport_views_detect_secrets_without_leaking_values() {
+        use base64::{Engine as _, engine::general_purpose};
+        let scanner = RegexScanner::new();
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz1234567890";
+        for engine in [
+            general_purpose::STANDARD,
+            general_purpose::STANDARD_NO_PAD,
+            general_purpose::URL_SAFE,
+            general_purpose::URL_SAFE_NO_PAD,
+        ] {
+            let mut binary_secret = vec![0xfb, 0xff];
+            binary_secret.extend_from_slice(secret.as_bytes());
+            let binary_encoded = engine.encode(&binary_secret);
+            assert!(
+                scanner
+                    .scan(binary_encoded.as_bytes())
+                    .iter()
+                    .any(|f| f.pattern_name == "openai-api-key")
+            );
+            let encoded = engine.encode(secret);
+            for payload in [
+                format!("value={encoded}"),
+                format!(r#"{{"file":"{encoded}"}}"#),
+                engine.encode(encoded),
+            ] {
+                let findings = scanner.scan(payload.as_bytes());
+                assert!(findings.iter().any(|f| f.pattern_name == "openai-api-key"));
+                assert!(findings.iter().all(|f| f.matched_text == "[REDACTED...]"));
+            }
+        }
+        let encoded = general_purpose::STANDARD.encode("sk%2Dabcdefghijklmnopqrstuvwxyz1234567890");
+        assert!(
+            scanner
+                .scan(encoded.as_bytes())
+                .iter()
+                .any(|f| f.pattern_name == "openai-api-key")
+        );
+        assert!(
+            scanner
+                .scan(b"ordinary prose and harmless file metadata")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn encoded_view_work_and_output_are_bounded() {
+        use base64::{Engine as _, engine::general_purpose};
+        let token = general_purpose::STANDARD.encode(vec![b'a'; 48]);
+        let input = (token + " ").repeat(100);
+        let mut budget = 100;
+        let mut candidates = 3;
+        let output = base64_views(input.as_bytes(), &mut budget, &mut candidates);
+        assert!(output.len() <= 100 && candidates <= 3);
+        let huge = vec![b'A'; MAX_ENCODED_TOKEN + 1];
+        assert!(base64_views(&huge, &mut budget, &mut candidates).is_empty());
+    }
 
     #[test]
     fn binary_percent_encoded_and_json_escaped_credentials_are_inspected() {
