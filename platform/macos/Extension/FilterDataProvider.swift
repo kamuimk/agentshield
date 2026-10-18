@@ -20,6 +20,7 @@ final class FilterDataProvider: NEFilterDataProvider {
             let settings = NEFilterSettings(rules: [], defaultAction: .filterData)
             apply(settings) { error in
                 if error == nil {
+                    self.audit.notice("provider_build=\(AgentShieldProviderBuild.identifier, privacy: .public)")
                     let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
                     let instance = self.filterConfiguration.vendorConfiguration?["instance"] as? String ?? "unknown"
                     timer.schedule(deadline: .now(), repeating: 10)

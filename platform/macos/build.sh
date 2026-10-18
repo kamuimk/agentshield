@@ -10,14 +10,9 @@ mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 EXT="$OUT/$IDENTIFIER.systemextension"
 mkdir -p "$EXT/Contents/MacOS"
-xcrun swiftc -O -target arm64-apple-macos14.0 -module-name AgentShieldNetwork \
-  Sources/FlowPolicy/*.swift Extension/FilterDataProvider.swift Extension/main.swift \
-  -o "$EXT/Contents/MacOS/AgentShieldNetwork"
-xcrun swiftc -O -emit-library -module-name AgentShieldNetworkHost -target arm64-apple-macos14.0 Sources/FlowPolicy/*.swift Host/main.swift \
-  -o "$OUT/libAgentShieldNetwork.dylib"
-python3 - "$EXT" "$IDENTIFIER" <<'PY'
+python3 - "$EXT" "$IDENTIFIER" "$OUT" <<'PY'
 import os, pathlib, plistlib, re, sys, time
-extension, identifier = pathlib.Path(sys.argv[1]), sys.argv[2]
+extension, identifier, output = pathlib.Path(sys.argv[1]), sys.argv[2], pathlib.Path(sys.argv[3])
 build = os.environ.get('AGENTSHIELD_BUILD_VERSION')
 if not build:
     build = (os.environ['GITHUB_RUN_ID'] + '.' + os.environ.get('GITHUB_RUN_ATTEMPT', '1')
@@ -32,7 +27,19 @@ info = {'CFBundleIdentifier':identifier,'CFBundleExecutable':'AgentShieldNetwork
         'NetworkExtension':{'NEProviderClasses':{'com.apple.networkextension.filter-data':'AgentShieldFilterDataProvider'},
                             'NEMachServiceName':'$(TeamIdentifierPrefix)'+identifier}}
 (extension/'Contents'/'Info.plist').write_bytes(plistlib.dumps(info))
+# A signing/plist-only version change leaves the executable LC_UUID unchanged.
+# Unified Logging may resolve that UUID to a previous installed image path.
+# Embed the already validated public build ID in executed provider code so each
+# distinct build has a distinct content-derived UUID, while preserving repeatable
+# output for the same source/build inputs and exact signed-image verification.
+(output/'AgentShieldProviderBuild.swift').write_text(
+    'enum AgentShieldProviderBuild { static let identifier = "' + build + '" }\n')
 PY
+xcrun swiftc -O -target arm64-apple-macos14.0 -module-name AgentShieldNetwork \
+  Sources/FlowPolicy/*.swift "$OUT/AgentShieldProviderBuild.swift" Extension/FilterDataProvider.swift Extension/main.swift \
+  -o "$EXT/Contents/MacOS/AgentShieldNetwork"
+xcrun swiftc -O -emit-library -module-name AgentShieldNetworkHost -target arm64-apple-macos14.0 Sources/FlowPolicy/*.swift Host/main.swift \
+  -o "$OUT/libAgentShieldNetwork.dylib"
 cp extension.entitlements "$OUT/extension.entitlements"
 cp host.entitlements "$OUT/host.entitlements"
 printf 'Built %s\n' "$EXT"
