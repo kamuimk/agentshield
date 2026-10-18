@@ -300,7 +300,7 @@ fn base64_views(input: &[u8], budget: &mut usize, candidates: &mut usize) -> Vec
             index += 1;
         }
         let token = &input[start..index];
-        if !(16..=MAX_ENCODED_TOKEN).contains(&token.len()) {
+        if !(8..=MAX_ENCODED_TOKEN).contains(&token.len()) {
             continue;
         }
         *candidates -= 1;
@@ -411,6 +411,24 @@ mod tests {
                 .scan(b"ordinary prose and harmless file metadata")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn short_encoded_account_information_is_not_excluded_by_token_floor() {
+        use base64::{Engine as _, engine::general_purpose};
+        let scanner = RegexScanner::new();
+        // Synthetic local fixture only; no email or DNS request is sent.
+        let address = b"x@y.zz";
+        let encoded = general_purpose::STANDARD.encode(address);
+        assert_eq!(encoded.len(), 8);
+        for payload in [encoded.clone(), general_purpose::STANDARD.encode(encoded)] {
+            assert!(
+                scanner
+                    .scan(payload.as_bytes())
+                    .iter()
+                    .any(|f| f.pattern_name == "email-address")
+            );
+        }
     }
 
     #[test]
