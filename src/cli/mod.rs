@@ -104,6 +104,8 @@ pub enum Commands {
 /// CA subcommands for certificate management.
 #[derive(Subcommand)]
 pub enum CaAction {
+    /// Validate or repair the app-local CA without rotating its key or changing system trust
+    Prepare,
     /// Generate a new Root CA key pair and self-signed certificate
     Init,
     /// Install the CA certificate into the system trust store

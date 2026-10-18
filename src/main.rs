@@ -148,6 +148,7 @@ async fn main() -> anyhow::Result<()> {
             use agentshield::cli::ca;
             let ca_dir = ca::ca_dir();
             match action {
+                CaAction::Prepare => ca::cmd_ca_prepare(&ca_dir)?,
                 CaAction::Init => ca::cmd_ca_init(&ca_dir)?,
                 CaAction::Trust => ca::cmd_ca_trust(&ca_dir)?,
                 CaAction::Show => ca::cmd_ca_show(&ca_dir)?,
