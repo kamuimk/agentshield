@@ -404,9 +404,10 @@ mod tests {
             old.self_signed(&key).unwrap().key_identifier(),
             new.clone().self_signed(&key).unwrap().key_identifier()
         );
-        assert!(new
-            .key_usages
-            .contains(&rcgen::KeyUsagePurpose::KeyCertSign));
+        assert!(
+            new.key_usages
+                .contains(&rcgen::KeyUsagePurpose::KeyCertSign)
+        );
         cmd_ca_prepare(&path).unwrap();
         assert_eq!(
             after,

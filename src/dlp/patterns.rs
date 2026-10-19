@@ -295,7 +295,7 @@ fn append_json_view(input: &[u8], output: &mut Vec<u8>, budget: &mut usize) {
     // candidates. Combining tokens first can hide JSON behind unrelated bytes.
     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(input) {
         if let Ok(json) = serde_json::to_vec(&value) {
-            if json != input && json.len() + 1 <= *budget {
+            if json != input && json.len() < *budget {
                 *budget -= json.len() + 1;
                 output.extend_from_slice(&json);
                 output.push(b'\n');
@@ -362,7 +362,7 @@ fn append_base64_views(text: &mut String) {
         text.push('\n');
         text.push_str(&String::from_utf8_lossy(&layer));
         let percent = percent_decode(&layer);
-        if percent != layer && percent.len() + 1 <= budget {
+        if percent != layer && percent.len() < budget {
             budget -= percent.len() + 1;
             text.push('\n');
             text.push_str(&String::from_utf8_lossy(&percent));
