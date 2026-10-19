@@ -27,7 +27,8 @@ the engine's configuration reload or dashboard mutation paths.
    using a constant-time comparison. Bound all operations and clean up on failure.
    Never reuse a key or nonce. Clear secret buffers after success or failure.
 
-SYSTEM ownership is checked by the engine, but it does not authenticate the
+SYSTEM ownership, byte/client-end flags and remote-client rejection are checked
+by the engine, but they do not authenticate the
 client to the host. Default named-pipe permissions are insufficient for this
 protocol; see Microsoft's [named-pipe security documentation](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)
 and [GetSecurityInfo documentation](https://learn.microsoft.com/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo).

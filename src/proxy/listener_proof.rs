@@ -199,7 +199,7 @@ fn read_system_frame(path: &str) -> io::Result<Zeroizing<Vec<u8>>> {
             IsWellKnownSid, OWNER_SECURITY_INFORMATION, WinLocalSystemSid,
         },
         Storage::FileSystem::{FILE_GENERIC_READ, ReadFile},
-        System::Pipes::{GetNamedPipeInfo, PeekNamedPipe},
+        System::Pipes::{GetNamedPipeInfo, PIPE_REJECT_REMOTE_CLIENTS, PeekNamedPipe},
     };
     let file = OpenOptions::new()
         .read(true)
@@ -246,7 +246,9 @@ fn read_system_frame(path: &str) -> io::Result<Zeroizing<Vec<u8>>> {
             std::ptr::null_mut(),
         )
     } == 0
-        || flags != 0
+        // GetNamedPipeInfo preserves the server's remote-rejection bit on
+        // client handles. Require that bit, byte mode and the client end.
+        || flags != PIPE_REJECT_REMOTE_CLIENTS
     {
         return Err(rejected("listener_proof_pipe_type_invalid"));
     }
