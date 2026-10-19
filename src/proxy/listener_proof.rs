@@ -206,7 +206,12 @@ fn read_system_frame(path: &str) -> io::Result<Zeroizing<Vec<u8>>> {
         .access_mode(FILE_GENERIC_READ)
         .share_mode(0)
         .open(path)
-        .map_err(|_| rejected("listener_proof_pipe_open_failed"))?;
+        .map_err(|error| {
+            io::Error::other(format!(
+                "listener_proof_pipe_open_failed:{}",
+                error.raw_os_error().unwrap_or(0)
+            ))
+        })?;
     let handle = file.as_raw_handle();
     let (mut owner, mut descriptor) = (std::ptr::null_mut(), std::ptr::null_mut());
     let code = unsafe {
