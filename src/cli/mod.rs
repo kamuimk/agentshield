@@ -39,6 +39,9 @@ pub enum Commands {
         /// Run as daemon in the background
         #[arg(long)]
         daemon: bool,
+        /// Import a Windows parent-owned listener from a private binary stdin pipe.
+        #[arg(long)]
+        owned_listener_stdin: bool,
     },
     /// Stop the proxy server
     Stop,
@@ -104,6 +107,8 @@ pub enum Commands {
 /// CA subcommands for certificate management.
 #[derive(Subcommand)]
 pub enum CaAction {
+    /// Validate or repair the app-local CA without rotating its key or changing system trust
+    Prepare,
     /// Generate a new Root CA key pair and self-signed certificate
     Init,
     /// Install the CA certificate into the system trust store

@@ -110,8 +110,12 @@ async fn e2e_proxy_policy_deny_logs_nothing_yet() {
         default: Action::Deny,
         rules: vec![],
     };
-    let server =
-        ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
+        .with_policy(Arc::new(RwLock::new(policy)));
     let (addr, _shutdown) = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -133,6 +137,10 @@ async fn e2e_openclaw_full_flow() {
     let config: AppConfig = toml::from_str(template).unwrap();
 
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(config.policy.clone())))
         .with_ask_broadcaster(auto_broadcaster(true));
     let (addr, _shutdown) = server.start().await.unwrap();
@@ -383,8 +391,12 @@ async fn ask_policy_without_channel_defaults_to_deny() {
     };
 
     // No ASK broadcaster attached — should default to deny (fail-closed)
-    let server =
-        ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
+        .with_policy(Arc::new(RwLock::new(policy)));
     let (addr, _shutdown) = server.start().await.unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -419,14 +431,17 @@ async fn proxy_handles_concurrent_connections() {
         }],
     };
 
-    let server =
-        ProxyServer::new("127.0.0.1:0".to_string()).with_policy(Arc::new(RwLock::new(policy)));
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
+        .with_policy(Arc::new(RwLock::new(policy)));
     let (addr, _shutdown) = server.start().await.unwrap();
 
     // Spawn 10 concurrent requests
     let mut handles = vec![];
     for i in 0..10 {
-        let addr = addr;
         handles.push(tokio::spawn(async move {
             let mut stream = TcpStream::connect(addr).await.unwrap();
             let domain = if i % 2 == 0 {
@@ -487,6 +502,10 @@ async fn proxy_logs_requests_to_sqlite() {
     let pool = logging::open_pool(&db_path).unwrap();
 
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(policy)))
         .with_db(pool.clone());
     let (addr, _shutdown) = server.start().await.unwrap();
@@ -552,6 +571,10 @@ async fn ask_channel_sends_request_on_ask_policy() {
     };
 
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(policy)))
         .with_ask_broadcaster(auto_broadcaster(true));
     let (addr, _shutdown) = server.start().await.unwrap();
@@ -589,6 +612,10 @@ async fn ask_channel_deny_returns_403() {
     };
 
     let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
         .with_policy(Arc::new(RwLock::new(policy)))
         .with_ask_broadcaster(auto_broadcaster(false));
     let (addr, _shutdown) = server.start().await.unwrap();
@@ -739,6 +766,8 @@ async fn web_ask_pending_and_resolve() {
             PendingWebAsk {
                 info: agentshield::ask::AskRequestInfo {
                     req_id: "test-req".to_string(),
+                    approval: None,
+
                     domain: "api.example.com".to_string(),
                     method: "POST".to_string(),
                     path: "/data".to_string(),
@@ -786,7 +815,7 @@ async fn web_ask_pending_and_resolve() {
     assert_eq!(resp.status(), 200);
 
     // Verify oneshot received the decision
-    assert_eq!(rx.await.unwrap(), true);
+    assert!(rx.await.unwrap());
 
     // Pending should be empty now
     assert!(pending.lock().unwrap().is_empty());

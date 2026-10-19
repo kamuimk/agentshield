@@ -43,9 +43,33 @@ fn db_path() -> std::path::PathBuf {
 /// Return (and lazily create) the AgentShield data directory (`~/.agentshield/`).
 fn dirs_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let dir = std::path::PathBuf::from(home).join(".agentshield");
+    let dir = data_dir(std::env::var_os("AGENTSHIELD_DATA_DIR"), &home);
     std::fs::create_dir_all(&dir).ok();
     dir
+}
+
+/// A host application can isolate its channel's state without changing HOME.
+fn data_dir(override_dir: Option<std::ffi::OsString>, home: &str) -> std::path::PathBuf {
+    override_dir
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(home).join(".agentshield"))
+}
+
+#[test]
+fn host_data_directory_is_isolated() {
+    assert_eq!(
+        data_dir(Some("/tmp/workos-dev/security".into()), "/home/user"),
+        std::path::PathBuf::from("/tmp/workos-dev/security")
+    );
+    assert_eq!(
+        data_dir(Some("".into()), "/home/user"),
+        std::path::PathBuf::from("/home/user/.agentshield")
+    );
+    assert_eq!(
+        data_dir(None, "/home/user"),
+        std::path::PathBuf::from("/home/user/.agentshield")
+    );
 }
 
 #[tokio::main]
@@ -65,8 +89,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Commands::Start { daemon: _ } => {
-            cmd_start(&cli.config).await?;
+        Commands::Start {
+            daemon: _,
+            owned_listener_stdin,
+        } => {
+            cmd_start(&cli.config, owned_listener_stdin).await?;
         }
         Commands::Stop => {
             cmd_stop()?;
@@ -124,6 +151,7 @@ async fn main() -> anyhow::Result<()> {
             use agentshield::cli::ca;
             let ca_dir = ca::ca_dir();
             match action {
+                CaAction::Prepare => ca::cmd_ca_prepare(&ca_dir)?,
                 CaAction::Init => ca::cmd_ca_init(&ca_dir)?,
                 CaAction::Trust => ca::cmd_ca_trust(&ca_dir)?,
                 CaAction::Show => ca::cmd_ca_show(&ca_dir)?,
@@ -167,7 +195,42 @@ struct ProxyHandle {
 ///
 /// Returns a `ProxyHandle` with the bound address. The caller is responsible
 /// for keeping the handle alive and deciding when to shut down.
-async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::Result<ProxyHandle> {
+async fn start_proxy_server(
+    config: &AppConfig,
+    config_path: &Path,
+    listener: Option<tokio::net::TcpListener>,
+) -> anyhow::Result<ProxyHandle> {
+    if let Some(approval) = &config.workos_approval {
+        approval.validate().map_err(anyhow::Error::msg)?;
+    }
+    if let Some(web) = &config.web {
+        if let Some(integration) = &web.integration {
+            anyhow::ensure!(web.enabled, "dashboard integration requires web.enabled");
+            integration
+                .validate(&web.listen, web.auth_token.as_deref())
+                .map_err(anyhow::Error::msg)?;
+        }
+    }
+    anyhow::ensure!(
+        !config.network.connect_ports.contains(&0),
+        "invalid CONNECT port zero"
+    );
+    if let Some(slack) = config
+        .notification
+        .as_ref()
+        .filter(|n| n.enabled)
+        .and_then(|n| n.slack.as_ref())
+        .filter(|s| s.interactive)
+    {
+        anyhow::ensure!(
+            slack.channel.as_deref().is_some_and(|s| s.starts_with('D'))
+                && slack
+                    .approver_user
+                    .as_deref()
+                    .is_some_and(|s| s.starts_with('U') || s.starts_with('W')),
+            "Slack interactive approval requires an exact DM channel and approver_user"
+        );
+    }
     info!("AgentShield starting...");
     info!("Config: {}", config_path.display());
     info!("Listen: {}", config.proxy.listen);
@@ -185,6 +248,13 @@ async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::R
 
     // ASK broadcaster: broadcasts ASK requests to all registered responders
     let mut broadcaster = AskBroadcaster::new(120);
+    let mut sensitive_broadcaster = AskBroadcaster::new(120);
+    if let Some(approval) = &config.workos_approval {
+        sensitive_broadcaster.add_responder(Arc::new(
+            agentshield::ask::workos::WorkosApprovalResponder::new(approval.clone())
+                .map_err(anyhow::Error::msg)?,
+        ));
+    }
     let terminal = Arc::new(TerminalResponder::new(config_path.to_path_buf()));
     broadcaster.add_responder(terminal);
 
@@ -213,18 +283,25 @@ async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::R
         if notif_config.enabled {
             if let Some(ref slack) = notif_config.slack {
                 if slack.interactive {
-                    if let (Some(bot_token), Some(app_token), Some(channel)) =
-                        (&slack.bot_token, &slack.app_token, &slack.channel)
-                    {
+                    if let (Some(bot_token), Some(app_token), Some(channel), Some(approver_user)) = (
+                        &slack.bot_token,
+                        &slack.app_token,
+                        &slack.channel,
+                        &slack.approver_user,
+                    ) {
                         let slack_responder = Arc::new(SlackAskResponder::new(
                             bot_token.clone(),
                             app_token.clone(),
                             channel.clone(),
+                            approver_user.clone(),
                         ));
+                        sensitive_broadcaster.add_responder(slack_responder.clone());
                         broadcaster.add_responder(slack_responder);
                         info!("Slack ASK responder enabled (interactive mode)");
                     } else {
-                        warn!("Slack interactive mode requires bot_token, app_token, and channel");
+                        warn!(
+                            "Slack interactive mode requires bot_token, app_token, DM channel, and approver_user"
+                        );
                     }
                 }
             }
@@ -281,6 +358,7 @@ async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::R
     };
 
     let mut server = ProxyServer::new(config.proxy.listen.clone())
+        .with_network_policy(config.network.clone())
         .with_policy(policy.clone())
         .with_db(pool.clone())
         .with_ask_broadcaster(broadcaster)
@@ -312,8 +390,8 @@ async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::R
                 server = server.with_cert_cache(Arc::new(cache));
             }
             Err(e) => {
-                error!(
-                    "Failed to load CA for MITM: {}. Falling back to transparent mode.",
+                anyhow::bail!(
+                    "MITM CA unavailable; refusing to start without inspection: {}",
                     e
                 );
             }
@@ -329,6 +407,9 @@ async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::R
             };
             info!("DLP scanner enabled");
             server = server.with_dlp(scanner);
+            if dlp_config.require_slack_approval {
+                server = server.with_sensitive_approval(Arc::new(sensitive_broadcaster));
+            }
         }
     }
 
@@ -412,7 +493,10 @@ async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::R
         }
     }
 
-    let (addr, shutdown_tx) = server.start().await?;
+    let (addr, shutdown_tx) = match listener {
+        Some(listener) => server.start_with_listener(listener).await?,
+        None => server.start().await?,
+    };
     info!("Proxy running on {}", addr);
     info!(
         "Set HTTPS_PROXY=http://{} to route traffic through AgentShield",
@@ -433,8 +517,13 @@ async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::R
                 ask_event_tx,
             };
             let listen = web_config.listen.clone();
+            let app = if let Some(integration) = &web_config.integration {
+                web::integration::router(web_state, ask_state, integration.clone())
+                    .map_err(anyhow::Error::msg)?
+            } else {
+                web::full_router(web_state, ask_state)
+            };
             tokio::spawn(async move {
-                let app = web::full_router(web_state, ask_state);
                 match tokio::net::TcpListener::bind(&listen).await {
                     Ok(listener) => {
                         info!("Web dashboard listening on {}", listen);
@@ -466,13 +555,40 @@ async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::R
     })
 }
 
+/// A supervised Windows process can intentionally have no console. In that
+/// case its owning Job Object controls lifetime; installing a console handler
+/// must not make an otherwise-ready inspection engine exit immediately.
+async fn shutdown_requested() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetConsoleWindow() -> *mut std::ffi::c_void;
+        }
+        // Safety: the Win32 function has no arguments and returns a borrowed
+        // window handle; it neither creates nor changes console state.
+        if unsafe { GetConsoleWindow() }.is_null() {
+            std::future::pending::<()>().await;
+        }
+    }
+    tokio::signal::ctrl_c().await?;
+    Ok(())
+}
+
 /// Start the proxy and block until Ctrl-C, then shut down gracefully.
-async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
+async fn cmd_start(config_path: &Path, owned_listener_stdin: bool) -> anyhow::Result<()> {
     let config = AppConfig::load_from_path(config_path)?;
-    let handle = start_proxy_server(&config, config_path).await?;
+    let listener = if owned_listener_stdin {
+        Some(agentshield::proxy::owned_listener::from_private_stdin(
+            &config.proxy.listen,
+        )?)
+    } else {
+        None
+    };
+    let handle = start_proxy_server(&config, config_path, listener).await?;
 
     // Keep running until interrupted
-    tokio::signal::ctrl_c().await?;
+    shutdown_requested().await?;
     info!("Shutting down gracefully...");
 
     // Stop accepting new connections
@@ -530,6 +646,7 @@ async fn cmd_wrap(
                 enabled: true,
                 listen: "127.0.0.1:18081".to_string(),
                 auth_token: None,
+                integration: None,
             });
         } else if let Some(ref mut web) = config.web {
             web.enabled = true;
@@ -554,7 +671,7 @@ async fn cmd_wrap(
     logging::open_db(&db)?;
 
     // 7. Start proxy server
-    let handle = start_proxy_server(&config, &resolved_config_path).await?;
+    let handle = start_proxy_server(&config, &resolved_config_path, None).await?;
     println!("AgentShield proxy running on {}", handle.addr);
 
     // 8. Build child environment

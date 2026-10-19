@@ -59,6 +59,8 @@ pub fn evaluate(req: &RequestInfo, config: &PolicyConfig) -> EvalResult {
 /// - `"*.example.com"` — matches subdomains (`api.example.com`) and the base domain (`example.com`)
 /// - `"*"` — matches everything
 pub fn domain_matches(pattern: &str, domain: &str) -> bool {
+    let pattern = pattern.trim_end_matches('.').to_ascii_lowercase();
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
     if pattern == "*" {
         return true;
     }

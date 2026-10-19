@@ -561,6 +561,7 @@ fn web_config_debug_masks_auth_token() {
         enabled: true,
         listen: "127.0.0.1:18081".to_string(),
         auth_token: Some("super-secret-token".to_string()),
+        integration: None,
     };
     let debug_output = format!("{:?}", web);
     assert!(
@@ -576,6 +577,7 @@ fn web_config_debug_shows_none_without_token() {
         enabled: true,
         listen: "127.0.0.1:18081".to_string(),
         auth_token: None,
+        integration: None,
     };
     let debug_output = format!("{:?}", web);
     assert!(debug_output.contains("None"));
@@ -852,6 +854,7 @@ fn slack_config_debug_masks_url() {
         bot_token: Some("xoxb-secret-bot-token".to_string()),
         app_token: Some("xapp-secret-app-token".to_string()),
         channel: Some("#general".to_string()),
+        approver_user: None,
         events: vec![],
         interactive: false,
     };

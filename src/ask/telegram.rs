@@ -459,6 +459,8 @@ mod tests {
     fn format_ask_text_without_body() {
         let req = AskRequestInfo {
             req_id: "id-1".to_string(),
+            approval: None,
+
             domain: "api.github.com".to_string(),
             method: "POST".to_string(),
             path: "/repos/user/repo/pulls".to_string(),
@@ -475,6 +477,8 @@ mod tests {
     fn format_ask_text_with_body() {
         let req = AskRequestInfo {
             req_id: "id-2".to_string(),
+            approval: None,
+
             domain: "example.com".to_string(),
             method: "PUT".to_string(),
             path: "/data".to_string(),
@@ -490,6 +494,8 @@ mod tests {
         let long_body = "x".repeat(500);
         let req = AskRequestInfo {
             req_id: "id-3".to_string(),
+            approval: None,
+
             domain: "example.com".to_string(),
             method: "POST".to_string(),
             path: "/upload".to_string(),

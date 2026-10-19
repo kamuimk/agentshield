@@ -41,6 +41,8 @@ pub struct ConnectionContext {
     pub db: Option<DbPool>,
     /// Broadcaster for ASK prompts to all registered responders.
     pub ask_broadcaster: Option<Arc<AskBroadcaster>>,
+    /// Dedicated Slack-only approval for sensitive request bytes.
+    pub sensitive_approval: Option<Arc<AskBroadcaster>>,
     /// DLP scanner for inspecting HTTP request bodies.
     pub dlp_scanner: Option<Arc<dyn DlpScanner>>,
     /// Domains that bypass policy and DLP evaluation.
@@ -59,6 +61,8 @@ pub struct ConnectionContext {
     pub upstream_tls_config: Option<Arc<rustls::ClientConfig>>,
     /// Audit logging configuration.
     pub logging_config: Option<LoggingConfig>,
+    /// Destination constraints, enforced even for system allowlist entries.
+    pub network: super::network::NetworkConfig,
 }
 
 /// Main accept loop: accept incoming connections and handle them.
@@ -72,16 +76,22 @@ pub async fn accept_loop(
     ctx: Arc<ConnectionContext>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
+    let permits = Arc::new(tokio::sync::Semaphore::new(32));
     loop {
         tokio::select! {
             result = listener.accept() => {
                 match result {
                     Ok((stream, peer_addr)) => {
                         info!("New connection from {}", peer_addr);
+                        let Ok(permit) = permits.clone().try_acquire_owned() else {
+                            drop(stream);
+                            continue;
+                        };
                         let ctx = ctx.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, &ctx).await {
-                                error!("Error handling connection from {}: {}", peer_addr, e);
+                            let _permit = permit;
+                            if handle_connection(stream, &ctx).await.is_err() {
+                                error!("Error handling connection from (request details withheld)");
                             }
                         });
                     }
@@ -123,6 +133,34 @@ fn log_to_db_with_audit(
     request_body: Option<&str>,
     dlp_findings: Option<&str>,
 ) {
+    let domain = if ctx
+        .dlp_scanner
+        .as_ref()
+        .is_some_and(|scanner| !scanner.scan(domain.as_bytes()).is_empty())
+    {
+        "redacted.invalid"
+    } else {
+        domain
+    };
+    let path = path.split('?').next().unwrap_or("/");
+    let path = if ctx
+        .dlp_scanner
+        .as_ref()
+        .is_some_and(|scanner| !scanner.scan(path.as_bytes()).is_empty())
+    {
+        "[PATH REDACTED]"
+    } else {
+        path
+    };
+    let reason = if ctx
+        .dlp_scanner
+        .as_ref()
+        .is_some_and(|scanner| !scanner.scan(reason.as_bytes()).is_empty())
+    {
+        "[REASON REDACTED]"
+    } else {
+        reason
+    };
     let timestamp = chrono::Utc::now().to_rfc3339();
 
     if let Some(ref pool) = ctx.db {
@@ -214,7 +252,13 @@ fn log_to_db_audited(
             .map(|c| c.audit_redact_dlp)
             .unwrap_or(true);
         // Redact body when DLP findings are present and redaction is enabled
-        let truncated_body = if redact_dlp && dlp_findings.is_some() {
+        let sensitive_approval_body = ctx.sensitive_approval.is_some()
+            && body.is_some_and(|bytes| {
+                ctx.dlp_scanner
+                    .as_ref()
+                    .is_some_and(|scanner| !scanner.scan(bytes).is_empty())
+            });
+        let truncated_body = if (redact_dlp && dlp_findings.is_some()) || sensitive_approval_body {
             Some("[BODY REDACTED: DLP sensitive data detected]".to_string())
         } else {
             body.and_then(|b| {
@@ -238,7 +282,34 @@ fn log_to_db_audited(
 }
 
 /// Fire-and-forget notification: spawn a task that won't block the proxy.
-fn notify_event(ctx: &ConnectionContext, event: NotificationEvent) {
+fn notify_event(ctx: &ConnectionContext, mut event: NotificationEvent) {
+    // Remote notifications must never copy request paths or query credentials.
+    match &mut event {
+        NotificationEvent::RequestDenied { path, reason, .. } => {
+            *path = "[path withheld]".into();
+            *reason = "[policy details withheld]".into();
+        }
+        NotificationEvent::AskPending { path, .. } => {
+            *path = "[path withheld]".into();
+        }
+        _ => {}
+    }
+    let destination = match &mut event {
+        NotificationEvent::RequestDenied { domain, .. }
+        | NotificationEvent::AskPending { domain, .. }
+        | NotificationEvent::DlpFinding { domain, .. }
+        | NotificationEvent::RateLimited { domain, .. } => Some(domain),
+        _ => None,
+    };
+    if let Some(domain) = destination {
+        if ctx
+            .dlp_scanner
+            .as_ref()
+            .is_some_and(|scanner| !scanner.scan(domain.as_bytes()).is_empty())
+        {
+            *domain = "redacted.invalid".into();
+        }
+    }
     if let Some(ref n) = ctx.notifier {
         let n = n.clone();
         tokio::spawn(async move {
@@ -255,19 +326,31 @@ async fn handle_connection(
     mut client: TcpStream,
     ctx: &ConnectionContext,
 ) -> crate::error::Result<()> {
-    let mut buf = vec![0u8; 8192];
-    let n = client.read(&mut buf).await?;
-    if n == 0 {
-        return Ok(());
-    }
-
-    let request = String::from_utf8_lossy(&buf[..n]);
-    let first_line = request.lines().next().unwrap_or("");
-
+    let request = match super::http::read_request(&mut client).await {
+        Ok(request) => request,
+        Err(rejection) => {
+            reject_request(&mut client, ctx, rejection.status, rejection.reason).await?;
+            return Ok(());
+        }
+    };
+    // Only parse the validated header line; bodies may be arbitrary binary.
+    let line_end = request.windows(2).position(|w| w == b"\r\n").unwrap();
+    let first_line = std::str::from_utf8(&request[..line_end]).unwrap();
     if first_line.starts_with("CONNECT ") {
+        let target = first_line.split_whitespace().nth(1).unwrap_or("");
+        let authority = super::http::authority(target, 443);
+        let host =
+            super::http::host_header(&request).and_then(|host| super::http::authority(host, 443));
+        if authority.is_err()
+            || authority.as_ref().ok() != host.as_ref().ok()
+            || !target.contains(':')
+        {
+            reject_request(&mut client, ctx, 400, "invalid CONNECT authority").await?;
+            return Ok(());
+        }
         handle_connect(&mut client, first_line, ctx).await
     } else {
-        handle_http_request(&mut client, &buf[..n], ctx).await
+        handle_http_request(&mut client, &request, ctx).await
     }
 }
 
@@ -277,21 +360,198 @@ async fn ask_and_wait(
     ctx: &ConnectionContext,
     domain: &str,
     method: &str,
-    path: &str,
-    body: Option<String>,
+    _path: &str,
+    _body: Option<String>,
 ) -> bool {
     if let Some(ref broadcaster) = ctx.ask_broadcaster {
         return broadcaster
             .ask(
                 domain.to_string(),
                 method.to_string(),
-                path.to_string(),
-                body,
+                "[path withheld]".to_string(),
+                None,
             )
             .await;
     }
     // No broadcaster: default to deny (fail-closed)
     false
+}
+
+/// Keep the exact request buffer in this handler until the one-shot decision.
+/// Only category names, length and a digest leave the device for approval.
+async fn approve_sensitive(
+    ctx: &ConnectionContext,
+    domain: &str,
+    method: &str,
+    request: &[u8],
+    findings: &[crate::dlp::DlpFinding],
+) -> bool {
+    let Some(broadcaster) = &ctx.sensitive_approval else {
+        return false;
+    };
+    // Do not leak a credential embedded in a destination hostname to an approval
+    // service. A hostname containing a sensitive value cannot be released here.
+    if ctx
+        .dlp_scanner
+        .as_ref()
+        .is_some_and(|scanner| !scanner.scan(domain.as_bytes()).is_empty())
+    {
+        return false;
+    }
+    if ctx.policy.as_ref().is_some_and(|policy| {
+        evaluator::evaluate(
+            &RequestInfo {
+                domain: domain.into(),
+                method: method.into(),
+                path: "/".into(),
+            },
+            &policy.read().unwrap(),
+        )
+        .action
+            == Action::Deny
+    }) {
+        return false;
+    }
+    let mut categories: Vec<String> = findings.iter().map(|f| f.pattern_name.clone()).collect();
+    categories.sort_unstable();
+    categories.dedup();
+    broadcaster
+        .ask_sensitive(domain.into(), method.into(), request, categories)
+        .await
+}
+
+async fn reject_request<W: tokio::io::AsyncWrite + Unpin>(
+    client: &mut W,
+    ctx: &ConnectionContext,
+    status: u16,
+    reason: &str,
+) -> crate::error::Result<()> {
+    log_to_db(ctx, "REJECT", "", "/", "deny", reason);
+    let phrase = match status {
+        403 => "Forbidden",
+        408 => "Request Timeout",
+        413 => "Content Too Large",
+        415 => "Unsupported Media Type",
+        429 => "Too Many Requests",
+        503 => "Service Unavailable",
+        _ => "Bad Request",
+    };
+    // Only fixed internal reasons reach this helper; never reflect request bytes.
+    client.write_all(format!("HTTP/1.1 {status} {phrase}\r\nConnection: close\r\nContent-Length: 0\r\nX-AgentShield-Reason: {reason}\r\n\r\n").as_bytes()).await?;
+    Ok(())
+}
+
+async fn write_bounded<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    tokio::time::timeout(std::time::Duration::from_secs(30), writer.write_all(bytes))
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "upstream write timeout"))?
+}
+
+async fn relay<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin>(
+    reader: &mut R,
+    writer: &mut W,
+) -> std::io::Result<u64> {
+    let mut buffer = [0u8; 8192];
+    let mut total = 0;
+    loop {
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            reader.read(&mut buffer),
+        )
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "relay idle timeout"))??;
+        if n == 0 {
+            return Ok(total);
+        }
+        write_bounded(writer, &buffer[..n]).await?;
+        total += n as u64;
+    }
+}
+
+async fn authorize_mitm<W: tokio::io::AsyncWrite + Unpin>(
+    client: &mut W,
+    ctx: &ConnectionContext,
+    domain: &str,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+) -> crate::error::Result<bool> {
+    let decision = ctx.policy.as_ref().map(|lock| {
+        evaluator::evaluate(
+            &RequestInfo {
+                domain: domain.into(),
+                method: method.into(),
+                path: path.into(),
+            },
+            &lock.read().unwrap(),
+        )
+    });
+    let Some(decision) = decision else {
+        return Ok(true);
+    };
+    let allowed = match decision.action {
+        Action::Deny => false,
+        Action::Ask => {
+            notify_event(
+                ctx,
+                NotificationEvent::AskPending {
+                    domain: domain.into(),
+                    method: method.into(),
+                    path: path.into(),
+                },
+            );
+            ask_and_wait(
+                ctx,
+                domain,
+                method,
+                path,
+                body.map(|b| String::from_utf8_lossy(&b[..b.len().min(4096)]).into_owned()),
+            )
+            .await
+        }
+        Action::Allow => true,
+    };
+    if !allowed {
+        log_to_db(ctx, method, domain, path, "deny", &decision.reason);
+        notify_event(
+            ctx,
+            NotificationEvent::RequestDenied {
+                domain: domain.into(),
+                method: method.into(),
+                path: path.into(),
+                reason: decision.reason,
+            },
+        );
+        reject_request(client, ctx, 403, "decrypted request denied by policy").await?;
+        return Ok(false);
+    }
+    if let (Some(limit), Some(limiter)) = (&decision.rate_limit, &ctx.rate_limiter) {
+        if !limiter.check_and_record(domain, limit.max_requests, limit.window_secs) {
+            log_to_db(
+                ctx,
+                method,
+                domain,
+                path,
+                "rate-limited",
+                "decrypted request rate limited",
+            );
+            notify_event(
+                ctx,
+                NotificationEvent::RateLimited {
+                    domain: domain.into(),
+                    method: method.into(),
+                    limit: limit.max_requests,
+                    window_secs: limit.window_secs,
+                },
+            );
+            reject_request(client, ctx, 429, "decrypted request rate limited").await?;
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Handle CONNECT method for HTTPS tunneling.
@@ -311,22 +571,54 @@ async fn handle_connect(
         return Ok(());
     }
 
-    let target = parts[1]; // e.g. "example.com:443"
-    let domain = target.split(':').next().unwrap_or(target);
-
-    // Validate domain to prevent header injection
-    if !validate_domain(domain) {
-        warn!("Invalid domain in CONNECT: {}", domain);
-        log_to_db(ctx, "CONNECT", domain, "/", "deny", "invalid domain");
-        let response = "HTTP/1.1 400 Bad Request\r\nX-AgentShield-Reason: invalid domain\r\n\r\n";
-        client.write_all(response.as_bytes()).await?;
+    let (domain, port) = super::http::authority(parts[1], 443)
+        .map_err(|_| crate::error::AgentShieldError::Proxy("invalid CONNECT authority".into()))?;
+    let target_owned = format!("{domain}:{port}");
+    let target = target_owned.as_str();
+    let domain = domain.as_str();
+    if !ctx.network.connect_ports.contains(&port) {
+        reject_request(client, ctx, 403, "CONNECT port denied").await?;
         return Ok(());
+    }
+
+    // In MITM mode, CONNECT is only a transport preflight. Apply method rules
+    // to the actual decrypted request, rather than authorizing the tunnel once.
+    let system_allowed =
+        is_system_allowed(domain, ctx.system_allowlist.as_deref().map(Vec::as_slice));
+    if ctx.mitm_enabled && !system_allowed {
+        let possible = ctx.policy.as_ref().is_none_or(|lock| {
+            let policy = lock.read().unwrap();
+            let mut possible = policy.default != Action::Deny;
+            for rule in &policy.rules {
+                if !rule
+                    .domains
+                    .iter()
+                    .any(|pattern| domain_matches(pattern, domain))
+                {
+                    continue;
+                }
+                if rule.methods.is_none() {
+                    return possible || rule.action != Action::Deny;
+                }
+                possible |= rule.action != Action::Deny;
+            }
+            possible
+        });
+        if !possible {
+            reject_request(client, ctx, 403, "CONNECT destination denied").await?;
+            return Ok(());
+        }
+        let Some(cache) = ctx.cert_cache.as_ref() else {
+            reject_request(client, ctx, 503, "TLS inspection unavailable").await?;
+            return Ok(());
+        };
+        return handle_connect_mitm(client, domain, target, ctx, cache).await;
     }
 
     // System allowlist bypass: skip policy evaluation for internal services
     let allowlist_slice = ctx.system_allowlist.as_ref().map(|v| v.as_slice());
     if is_system_allowed(domain, allowlist_slice) {
-        info!("SYSTEM-ALLOW CONNECT to {} (allowlist)", target);
+        info!("SYSTEM-ALLOW CONNECT to (request details withheld)");
         log_to_db(
             ctx,
             "CONNECT",
@@ -349,7 +641,7 @@ async fn handle_connect(
         };
         match result.action {
             Action::Deny => {
-                warn!("BLOCKED CONNECT to {} - {}", target, result.reason);
+                warn!("BLOCKED CONNECT to (request details withheld)");
                 log_to_db(ctx, "CONNECT", domain, "/", "deny", &result.reason);
                 notify_event(
                     ctx,
@@ -368,7 +660,7 @@ async fn handle_connect(
                 return Ok(());
             }
             Action::Ask => {
-                info!("ASK CONNECT to {} - {}", target, result.reason);
+                info!("ASK CONNECT to (request details withheld)");
                 notify_event(
                     ctx,
                     NotificationEvent::AskPending {
@@ -412,7 +704,7 @@ async fn handle_connect(
                                 "Rate limit exceeded ({}/ {}s for {})",
                                 rl_config.max_requests, rl_config.window_secs, domain
                             );
-                            warn!("RATE-LIMITED CONNECT to {} - {}", target, reason);
+                            warn!("RATE-LIMITED CONNECT to (request details withheld)");
                             log_to_db(ctx, "CONNECT", domain, "/", "rate-limited", &reason);
                             notify_event(
                                 ctx,
@@ -432,26 +724,15 @@ async fn handle_connect(
                         }
                     }
                 }
-                info!("ALLOWED CONNECT to {} - {}", target, result.reason);
+                info!("ALLOWED CONNECT to (request details withheld)");
                 log_to_db(ctx, "CONNECT", domain, "/", "allow", &result.reason);
             }
         }
     }
 
-    // MITM mode: decrypt TLS, inspect, re-encrypt
-    // System-allowlisted domains bypass MITM (use plain tunnel)
-    let allowlist_slice_for_mitm = ctx.system_allowlist.as_ref().map(|v| v.as_slice());
-    let system_allowed = is_system_allowed(domain, allowlist_slice_for_mitm);
-    if ctx.mitm_enabled && !system_allowed {
-        if let Some(ref cert_cache) = ctx.cert_cache {
-            info!("MITM CONNECT to {}", target);
-            return handle_connect_mitm(client, domain, target, ctx, cert_cache).await;
-        }
-    }
+    info!("CONNECT tunnel to (request details withheld)");
 
-    info!("CONNECT tunnel to {}", target);
-
-    match TcpStream::connect(target).await {
+    match super::network::connect(target, &ctx.network).await {
         Ok(mut remote) => {
             let response = "HTTP/1.1 200 Connection Established\r\n\r\n";
             client.write_all(response.as_bytes()).await?;
@@ -459,20 +740,29 @@ async fn handle_connect(
             let (mut client_read, mut client_write) = tokio::io::split(client);
             let (mut remote_read, mut remote_write) = tokio::io::split(&mut remote);
 
-            let client_to_remote = tokio::io::copy(&mut client_read, &mut remote_write);
-            let remote_to_client = tokio::io::copy(&mut remote_read, &mut client_write);
+            let client_to_remote = async {
+                let count = relay(&mut client_read, &mut remote_write).await?;
+                remote_write.shutdown().await?;
+                Ok::<u64, std::io::Error>(count)
+            };
+            let remote_to_client = relay(&mut remote_read, &mut client_write);
+            tokio::pin!(client_to_remote, remote_to_client);
 
             tokio::select! {
-                r = client_to_remote => {
+                r = &mut client_to_remote => {
                     if let Err(e) = r { warn!("client->remote error: {}", e); }
+                    else { let _ = remote_to_client.await; }
                 }
-                r = remote_to_client => {
+                r = &mut remote_to_client => {
                     if let Err(e) = r { warn!("remote->client error: {}", e); }
                 }
             }
         }
-        Err(e) => {
-            warn!("Failed to connect to {}: {}", target, e);
+        Err(super::network::ConnectError::Denied) => {
+            reject_request(client, ctx, 403, "destination address denied").await?;
+        }
+        Err(_) => {
+            warn!("Failed to connect to (request details withheld)");
             let response = "HTTP/1.1 502 Bad Gateway\r\n\r\n";
             client.write_all(response.as_bytes()).await?;
         }
@@ -503,7 +793,15 @@ async fn handle_http_request(
 
     let method = parts[0];
     let uri = parts[1];
-    let (host, port) = parse_host_port(uri)?;
+    let (host, port) = match super::http::host_header(raw_request)
+        .and_then(|host| super::http::destination(uri, host, None))
+    {
+        Ok(destination) => destination,
+        Err(error) => {
+            reject_request(client, ctx, error.status, error.reason).await?;
+            return Ok(());
+        }
+    };
     let path = parse_path(uri);
 
     // Extract body early for audit logging
@@ -511,7 +809,7 @@ async fn handle_http_request(
 
     // Validate domain to prevent header injection
     if !validate_domain(&host) {
-        warn!("Invalid domain in HTTP request: {}", host);
+        warn!("Invalid domain in HTTP request: (request details withheld)");
         log_to_db_audited(
             ctx,
             method,
@@ -534,11 +832,74 @@ async fn handle_http_request(
     // domains here disables all outbound protection for that destination.
     let allowlist_slice = ctx.system_allowlist.as_ref().map(|v| v.as_slice());
     let system_allowed = is_system_allowed(&host, allowlist_slice);
+    // DLP scan: check request body for sensitive data before forwarding.
+    // System-allowed domains bypass DLP (they already bypass policy above).
+    if !system_allowed || ctx.sensitive_approval.is_some() {
+        if let Some(ref scanner) = ctx.dlp_scanner {
+            if super::http::encoded_body(raw_request) {
+                reject_request(client, ctx, 415, "encoded body cannot be inspected").await?;
+                return Ok(());
+            }
+            {
+                let findings = scanner.scan(raw_request);
+                let has_critical = findings.iter().any(|f| f.severity == Severity::Critical);
+                let needs_approval = ctx.sensitive_approval.is_some() && !findings.is_empty();
+                let approved = if has_critical || needs_approval {
+                    approve_sensitive(ctx, &host, method, raw_request, &findings).await
+                } else {
+                    false
+                };
+                if (has_critical || needs_approval) && !approved {
+                    for f in &findings {
+                        warn!(severity = ?f.severity, pattern = %f.pattern_name, "DLP finding (request details withheld)");
+                    }
+                    let dlp_str = format_dlp_findings(&findings);
+                    log_to_db_audited(
+                        ctx,
+                        method,
+                        &host,
+                        &path,
+                        "deny",
+                        "DLP: critical finding",
+                        request_body,
+                        Some(&dlp_str),
+                    );
+                    // Notify about first critical finding
+                    if let Some(f) = findings.iter().find(|f| f.severity == Severity::Critical) {
+                        notify_event(
+                            ctx,
+                            NotificationEvent::DlpFinding {
+                                domain: host.clone(),
+                                method: method.to_string(),
+                                pattern_name: f.pattern_name.clone(),
+                                severity: format!("{:?}", f.severity),
+                            },
+                        );
+                    }
+                    let response = "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: DLP: sensitive data detected\r\n\r\n";
+                    client.write_all(response.as_bytes()).await?;
+                    return Ok(());
+                }
+                if approved {
+                    log_to_db(
+                        ctx,
+                        method,
+                        &host,
+                        &path,
+                        "sensitive-approved",
+                        "one-shot Slack approval for exact request",
+                    );
+                }
+                // Non-critical findings: log warning but allow request through
+                for f in &findings {
+                    warn!(severity = ?f.severity, pattern = %f.pattern_name, "DLP finding (request details withheld)");
+                }
+            }
+        }
+    } // end if !system_allowed (DLP bypass)
+
     if system_allowed {
-        info!(
-            "SYSTEM-ALLOW {} {} (allowlist, policy+dlp bypass)",
-            method, uri
-        );
+        info!("SYSTEM-ALLOW (request details withheld)");
         log_to_db_audited(
             ctx,
             method,
@@ -563,7 +924,7 @@ async fn handle_http_request(
         };
         match result.action {
             Action::Deny => {
-                warn!("BLOCKED {} {} - {}", method, uri, result.reason);
+                warn!("BLOCKED (request details withheld)");
                 log_to_db_audited(
                     ctx,
                     method,
@@ -591,7 +952,7 @@ async fn handle_http_request(
                 return Ok(());
             }
             Action::Ask => {
-                info!("ASK {} {} - {}", method, uri, result.reason);
+                info!("ASK (request details withheld)");
                 notify_event(
                     ctx,
                     NotificationEvent::AskPending {
@@ -650,7 +1011,7 @@ async fn handle_http_request(
                                 "Rate limit exceeded ({}/{}s for {})",
                                 rl_config.max_requests, rl_config.window_secs, host
                             );
-                            warn!("RATE-LIMITED {} {} - {}", method, uri, reason);
+                            warn!("RATE-LIMITED (request details withheld)");
                             log_to_db_audited(
                                 ctx,
                                 method,
@@ -679,7 +1040,7 @@ async fn handle_http_request(
                         }
                     }
                 }
-                info!("ALLOWED {} {} - {}", method, uri, result.reason);
+                info!("ALLOWED (request details withheld)");
                 log_to_db_audited(
                     ctx,
                     method,
@@ -694,95 +1055,36 @@ async fn handle_http_request(
         }
     }
 
-    // DLP scan: check request body for sensitive data before forwarding.
-    // System-allowed domains bypass DLP (they already bypass policy above).
-    if !system_allowed {
-        if let Some(ref scanner) = ctx.dlp_scanner {
-            if let Some(body) = extract_body(raw_request) {
-                let findings = scanner.scan(body);
-                let has_critical = findings.iter().any(|f| f.severity == Severity::Critical);
-                if has_critical {
-                    for f in &findings {
-                        warn!(
-                            "DLP {} finding in {} {}: pattern={}, match={}",
-                            format!("{:?}", f.severity),
-                            method,
-                            uri,
-                            f.pattern_name,
-                            f.matched_text
-                        );
-                    }
-                    let dlp_str = format_dlp_findings(&findings);
-                    log_to_db_audited(
-                        ctx,
-                        method,
-                        &host,
-                        &path,
-                        "deny",
-                        "DLP: critical finding",
-                        request_body,
-                        Some(&dlp_str),
-                    );
-                    // Notify about first critical finding
-                    if let Some(f) = findings.iter().find(|f| f.severity == Severity::Critical) {
-                        notify_event(
-                            ctx,
-                            NotificationEvent::DlpFinding {
-                                domain: host.clone(),
-                                method: method.to_string(),
-                                pattern_name: f.pattern_name.clone(),
-                                severity: format!("{:?}", f.severity),
-                            },
-                        );
-                    }
-                    let response = "HTTP/1.1 403 Forbidden\r\nX-AgentShield-Reason: DLP: sensitive data detected\r\n\r\n";
-                    client.write_all(response.as_bytes()).await?;
-                    return Ok(());
-                }
-                // Non-critical findings: log warning but allow request through
-                for f in &findings {
-                    warn!(
-                        "DLP {:?} finding in {} {}: pattern={}, match={}",
-                        f.severity, method, uri, f.pattern_name, f.matched_text
-                    );
-                }
-            }
-        }
-    } // end if !system_allowed (DLP bypass)
-
-    info!("HTTP {} to {}", method, uri);
+    info!("HTTP (request details withheld)");
     let target = format!("{}:{}", host, port);
 
-    match TcpStream::connect(&target).await {
+    match super::network::connect(&target, &ctx.network).await {
         Ok(mut remote) => {
-            // Inject Connection: close header so remote server closes after response
-            let request_str = String::from_utf8_lossy(raw_request);
-            let modified = if !request_str.to_lowercase().contains("connection:") {
-                request_str.replacen("\r\n\r\n", "\r\nConnection: close\r\n\r\n", 1)
-            } else {
-                request_str.to_string()
-            };
-            remote.write_all(modified.as_bytes()).await?;
+            let wire_request = super::http::origin_form(raw_request);
+            write_bounded(&mut remote, &wire_request).await?;
             // Stream the full response back to client with timeout
             let copy_result = tokio::time::timeout(
                 std::time::Duration::from_secs(30),
-                tokio::io::copy(&mut remote, client),
+                relay(&mut remote, client),
             )
             .await;
             match copy_result {
                 Ok(Ok(bytes)) => {
-                    info!("Streamed {} bytes from {}", bytes, target);
+                    info!(bytes, "Response streamed (request details withheld)");
                 }
-                Ok(Err(e)) => {
-                    warn!("Error streaming response from {}: {}", target, e);
+                Ok(Err(_)) => {
+                    warn!("Error streaming response from (request details withheld)");
                 }
                 Err(_) => {
-                    warn!("Timeout streaming response from {}", target);
+                    warn!("Timeout streaming response from (request details withheld)");
                 }
             }
         }
-        Err(e) => {
-            warn!("Failed to connect to {}: {}", target, e);
+        Err(super::network::ConnectError::Denied) => {
+            reject_request(client, ctx, 403, "destination address denied").await?;
+        }
+        Err(_) => {
+            warn!("Failed to connect to (request details withheld)");
             let response = "HTTP/1.1 502 Bad Gateway\r\n\r\n";
             client.write_all(response.as_bytes()).await?;
         }
@@ -826,116 +1128,34 @@ async fn handle_connect_mitm(
     // Step 2: TLS-accept the client using our CA-signed cert for this domain
     let server_config = match cert_cache.get_or_create(domain) {
         Ok(cfg) => cfg,
-        Err(e) => {
-            error!("Failed to generate cert for {}: {}", domain, e);
+        Err(_) => {
+            error!("Failed to generate cert for (request details withheld)");
             return Ok(());
         }
     };
     let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
-    let mut client_tls = match acceptor.accept(client).await {
-        Ok(stream) => stream,
-        Err(e) => {
-            warn!("TLS handshake with client failed for {}: {}", domain, e);
+    let mut client_tls =
+        match tokio::time::timeout(std::time::Duration::from_secs(15), acceptor.accept(client))
+            .await
+        {
+            Err(_) => return Ok(()),
+            Ok(result) => match result {
+                Ok(stream) => stream,
+                Err(_) => {
+                    warn!("TLS handshake with client failed for (request details withheld)");
+                    return Ok(());
+                }
+            },
+        };
+
+    // Use the same complete, bounded framing for decrypted and plaintext HTTP.
+    let request_buf = match super::http::read_request(&mut client_tls).await {
+        Ok(request) => request,
+        Err(rejection) => {
+            reject_request(&mut client_tls, ctx, rejection.status, rejection.reason).await?;
             return Ok(());
         }
     };
-
-    // Step 3: Read full decrypted HTTP request from client
-    // First read headers, then read remaining body based on Content-Length
-    let mut request_buf = Vec::with_capacity(8192);
-    let mut tmp = [0u8; 8192];
-    let mut header_end = None;
-
-    // Read until we find the end of headers (\r\n\r\n)
-    loop {
-        let n = match client_tls.read(&mut tmp).await {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) => {
-                warn!("Failed to read decrypted request for {}: {}", domain, e);
-                return Ok(());
-            }
-        };
-        request_buf.extend_from_slice(&tmp[..n]);
-        if let Some(pos) = find_header_end(&request_buf) {
-            header_end = Some(pos);
-            break;
-        }
-        // Safety limit: 64KB for headers alone
-        if request_buf.len() > 65536 {
-            break;
-        }
-    }
-
-    if request_buf.is_empty() {
-        return Ok(());
-    }
-
-    // If we found headers, read remaining body based on Content-Length or chunked encoding
-    if let Some(hdr_end) = header_end {
-        let body_start = hdr_end + 4; // after \r\n\r\n
-        let header_str = String::from_utf8_lossy(&request_buf[..hdr_end]);
-        let expected_body = if let Some(cl) = parse_content_length(&header_str) {
-            Some(cl)
-        } else if is_chunked(&header_str) {
-            // For chunked encoding, read until we see "0\r\n\r\n" terminator
-            None
-        } else {
-            // No body expected
-            Some(0)
-        };
-
-        match expected_body {
-            Some(content_length) if content_length > 0 => {
-                let body_so_far = request_buf.len() - body_start;
-                let remaining = content_length.saturating_sub(body_so_far);
-                // Cap at 10MB to prevent unbounded allocation
-                let remaining = remaining.min(10 * 1024 * 1024);
-                let mut left = remaining;
-                while left > 0 {
-                    let to_read = left.min(tmp.len());
-                    let n = match client_tls.read(&mut tmp[..to_read]).await {
-                        Ok(0) => break,
-                        Ok(n) => n,
-                        Err(_) => break,
-                    };
-                    request_buf.extend_from_slice(&tmp[..n]);
-                    left -= n;
-                }
-            }
-            None => {
-                // Chunked transfer encoding: read until "0\r\n\r\n" terminator or 10MB cap
-                let max_body = 10 * 1024 * 1024;
-                loop {
-                    if request_buf.len() > max_body + body_start {
-                        break;
-                    }
-                    // Check for chunked terminator "0\r\n\r\n" in body portion
-                    let body_portion = &request_buf[body_start..];
-                    if body_portion.windows(5).any(|w| w == b"0\r\n\r\n") {
-                        break;
-                    }
-                    let n = match client_tls.read(&mut tmp).await {
-                        Ok(0) => break,
-                        Ok(n) => n,
-                        Err(_) => break,
-                    };
-                    request_buf.extend_from_slice(&tmp[..n]);
-                }
-                // Decode chunked body and reconstruct request with Content-Length
-                let decoded = {
-                    let chunked_data = &request_buf[body_start..];
-                    decode_chunked_body(chunked_data, max_body)
-                };
-                if let Ok(decoded) = decoded {
-                    // Fix headers: remove Transfer-Encoding, add Content-Length, replace body
-                    fix_headers_after_chunked_decode(&mut request_buf, body_start, &decoded);
-                }
-            }
-            _ => {} // No body
-        }
-    }
-
     let raw_request = &request_buf[..];
 
     // Parse method and path from decrypted request
@@ -945,20 +1165,47 @@ async fn handle_connect_mitm(
     let method = parts.first().copied().unwrap_or("UNKNOWN");
     let path = parts.get(1).copied().unwrap_or("/");
 
+    let (_, port) = super::http::authority(target, 443).expect("validated CONNECT target");
+    if let Err(error) = super::http::host_header(raw_request)
+        .and_then(|host| super::http::destination(path, host, Some((domain, port))))
+    {
+        reject_request(&mut client_tls, ctx, error.status, error.reason).await?;
+        return Ok(());
+    }
+    let path_owned = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        parse_path(path)
+    };
+    let path = path_owned.as_str();
+    if ctx.dlp_scanner.is_some() && super::http::encoded_body(raw_request) {
+        reject_request(
+            &mut client_tls,
+            ctx,
+            415,
+            "encoded body cannot be inspected",
+        )
+        .await?;
+        return Ok(());
+    }
+
     // Extract body for audit logging
     let mitm_body = extract_body(raw_request);
 
     // Step 4: DLP scan
     if let Some(ref scanner) = ctx.dlp_scanner {
-        if let Some(body) = mitm_body {
-            let findings = scanner.scan(body);
+        {
+            let findings = scanner.scan(raw_request);
             let has_critical = findings.iter().any(|f| f.severity == Severity::Critical);
-            if has_critical {
+            let needs_approval = ctx.sensitive_approval.is_some() && !findings.is_empty();
+            let approved = if has_critical || needs_approval {
+                approve_sensitive(ctx, domain, method, raw_request, &findings).await
+            } else {
+                false
+            };
+            if (has_critical || needs_approval) && !approved {
                 for f in &findings {
-                    warn!(
-                        "MITM DLP {:?} finding in {} https://{}{}: pattern={}, match={}",
-                        f.severity, method, domain, path, f.pattern_name, f.matched_text
-                    );
+                    warn!(severity = ?f.severity, pattern = %f.pattern_name, "DLP finding (request details withheld)");
                 }
                 let dlp_str = format_dlp_findings(&findings);
                 log_to_db_audited(
@@ -987,14 +1234,34 @@ async fn handle_connect_mitm(
                 let _ = client_tls.shutdown().await;
                 return Ok(());
             }
-            // Non-critical findings: log but allow
-            for f in &findings {
-                warn!(
-                    "MITM DLP {:?} finding in {} https://{}{}: pattern={}, match={}",
-                    f.severity, method, domain, path, f.pattern_name, f.matched_text
+            if approved {
+                log_to_db(
+                    ctx,
+                    method,
+                    domain,
+                    path,
+                    "sensitive-approved",
+                    "one-shot Slack approval for exact request",
                 );
             }
+            // Non-critical findings: log but allow
+            for f in &findings {
+                warn!(severity = ?f.severity, pattern = %f.pattern_name, "DLP finding (request details withheld)");
+            }
         }
+    }
+
+    if !authorize_mitm(
+        &mut client_tls,
+        ctx,
+        domain,
+        method,
+        path,
+        extract_body(raw_request),
+    )
+    .await?
+    {
+        return Ok(());
     }
 
     // Step 5: TLS-connect to the real upstream server (reuse cached ClientConfig)
@@ -1005,10 +1272,14 @@ async fn handle_connect_mitm(
         .clone();
     let connector = tokio_rustls::TlsConnector::from(tls_config);
 
-    let remote_tcp = match TcpStream::connect(target).await {
+    let remote_tcp = match super::network::connect(target, &ctx.network).await {
         Ok(s) => s,
-        Err(e) => {
-            warn!("Failed to connect to upstream {}: {}", target, e);
+        Err(super::network::ConnectError::Denied) => {
+            reject_request(&mut client_tls, ctx, 403, "destination address denied").await?;
+            return Ok(());
+        }
+        Err(_) => {
+            warn!("Failed to connect to upstream (request details withheld)");
             let response = "HTTP/1.1 502 Bad Gateway\r\n\r\n";
             let _ = client_tls.write_all(response.as_bytes()).await;
             let _ = client_tls.shutdown().await;
@@ -1020,20 +1291,31 @@ async fn handle_connect_mitm(
         crate::error::AgentShieldError::Proxy(format!("Invalid server name: {}", e))
     })?;
 
-    let mut remote_tls = match connector.connect(server_name, remote_tcp).await {
-        Ok(s) => s,
-        Err(e) => {
-            warn!("TLS handshake with upstream {} failed: {}", target, e);
-            let response = "HTTP/1.1 502 Bad Gateway\r\n\r\n";
-            let _ = client_tls.write_all(response.as_bytes()).await;
-            let _ = client_tls.shutdown().await;
-            return Ok(());
-        }
+    let mut remote_tls = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        connector.connect(server_name, remote_tcp),
+    )
+    .await
+    {
+        Err(_) => return Ok(()),
+        Ok(result) => match result {
+            Ok(s) => s,
+            Err(_) => {
+                warn!("TLS handshake with upstream (request details withheld)");
+                let response = "HTTP/1.1 502 Bad Gateway\r\n\r\n";
+                let _ = client_tls.write_all(response.as_bytes()).await;
+                let _ = client_tls.shutdown().await;
+                return Ok(());
+            }
+        },
     };
 
     // Step 6: Forward decrypted request to upstream
-    if let Err(e) = remote_tls.write_all(raw_request).await {
-        warn!("Failed to forward request to {}: {}", target, e);
+    if write_bounded(&mut remote_tls, &super::http::origin_form(raw_request))
+        .await
+        .is_err()
+    {
+        warn!("Failed to forward request to (request details withheld)");
         let _ = client_tls.shutdown().await;
         return Ok(());
     }
@@ -1041,12 +1323,12 @@ async fn handle_connect_mitm(
     // Step 7: Stream upstream response back to client
     let (mut remote_read, _remote_write) = tokio::io::split(remote_tls);
     let (mut client_read, mut client_write) = tokio::io::split(client_tls);
-    let _ = tokio::io::copy(&mut remote_read, &mut client_write).await;
+    let _ = relay(&mut remote_read, &mut client_write).await;
 
     // Drain any remaining client data (keep-alive cleanup)
     let _ = client_read.read(&mut [0u8; 0]).await;
 
-    info!("MITM {} https://{}{}", method, domain, path);
+    info!("MITM (request details withheld)");
     log_to_db_audited(
         ctx,
         method,
@@ -1061,51 +1343,6 @@ async fn handle_connect_mitm(
     let _ = client_write.shutdown().await;
 
     Ok(())
-}
-
-/// Find the end of HTTP headers (\r\n\r\n) in a buffer.
-fn find_header_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|w| w == b"\r\n\r\n")
-}
-
-/// Parse Content-Length value from HTTP headers string.
-fn parse_content_length(headers: &str) -> Option<usize> {
-    for line in headers.lines() {
-        if let Some((key, val)) = line.split_once(':') {
-            if key.trim().eq_ignore_ascii_case("content-length") {
-                return val.trim().parse().ok();
-            }
-        }
-    }
-    None
-}
-
-/// After decoding chunked body, fix headers: remove Transfer-Encoding and add Content-Length.
-fn fix_headers_after_chunked_decode(request_buf: &mut Vec<u8>, body_start: usize, decoded: &[u8]) {
-    let header_str = String::from_utf8_lossy(&request_buf[..body_start]).into_owned();
-    let fixed_lines: Vec<&str> = header_str
-        .split("\r\n")
-        .filter(|line| {
-            if line.is_empty() {
-                return false;
-            }
-            if let Some((key, _)) = line.split_once(':') {
-                if key.trim().eq_ignore_ascii_case("transfer-encoding") {
-                    return false;
-                }
-            }
-            true
-        })
-        .collect();
-
-    request_buf.clear();
-    for line in &fixed_lines {
-        request_buf.extend_from_slice(line.as_bytes());
-        request_buf.extend_from_slice(b"\r\n");
-    }
-    request_buf.extend_from_slice(format!("Content-Length: {}\r\n", decoded.len()).as_bytes());
-    request_buf.extend_from_slice(b"\r\n");
-    request_buf.extend_from_slice(decoded);
 }
 
 /// Check if a domain is in the system allowlist (bypass policy evaluation).
@@ -1123,128 +1360,139 @@ fn validate_domain(domain: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
 }
 
-/// Parse host and port from an absolute URI like "http://example.com:8080/path"
-fn parse_host_port(uri: &str) -> crate::error::Result<(String, u16)> {
-    let is_https = uri.starts_with("https://");
-    let default_port: u16 = if is_https { 443 } else { 80 };
-
-    let without_scheme = if let Some(rest) = uri.strip_prefix("http://") {
-        rest
-    } else if let Some(rest) = uri.strip_prefix("https://") {
-        rest
-    } else {
-        uri
-    };
-
-    let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
-
-    if let Some((host, port_str)) = host_port.rsplit_once(':') {
-        let port: u16 = port_str.parse().unwrap_or(default_port);
-        Ok((host.to_string(), port))
-    } else {
-        Ok((host_port.to_string(), default_port))
-    }
-}
-
 /// Parse the path from an absolute URI
 fn parse_path(uri: &str) -> String {
-    let without_scheme = if let Some(rest) = uri.strip_prefix("http://") {
-        rest
-    } else if let Some(rest) = uri.strip_prefix("https://") {
-        rest
-    } else {
-        uri
-    };
-
-    if let Some(pos) = without_scheme.find('/') {
-        without_scheme[pos..].to_string()
-    } else {
-        "/".to_string()
-    }
-}
-
-/// Check if the request uses chunked transfer encoding.
-fn is_chunked(headers: &str) -> bool {
-    headers.lines().any(|line| {
-        line.split_once(':')
-            .map(|(key, val)| {
-                key.trim().eq_ignore_ascii_case("transfer-encoding")
-                    && val.trim().eq_ignore_ascii_case("chunked")
-            })
-            .unwrap_or(false)
-    })
-}
-
-/// Decode a chunked-encoded body from a byte slice.
-/// Returns an error if the decoded body exceeds `max_size`.
-fn decode_chunked_body(data: &[u8], max_size: usize) -> crate::error::Result<Vec<u8>> {
-    let mut result = Vec::new();
-    let mut pos = 0;
-
-    loop {
-        // Find end of chunk size line
-        let size_end = data[pos..]
-            .windows(2)
-            .position(|w| w == b"\r\n")
-            .map(|p| pos + p);
-
-        let size_end = match size_end {
-            Some(e) => e,
-            None => break,
-        };
-
-        // Parse chunk size (hex), ignoring optional chunk extensions after ';'
-        let size_str = std::str::from_utf8(&data[pos..size_end]).unwrap_or("0");
-        let size_part = size_str.split(';').next().unwrap_or("0");
-        let chunk_size = usize::from_str_radix(size_part.trim(), 16).unwrap_or(0);
-
-        if chunk_size == 0 {
-            break;
-        }
-
-        if result.len() + chunk_size > max_size {
-            return Err(crate::error::AgentShieldError::Proxy(format!(
-                "Chunked body exceeds max size ({} bytes)",
-                max_size
-            )));
-        }
-
-        let chunk_start = size_end + 2; // skip \r\n after size
-        let chunk_end = chunk_start + chunk_size;
-        if chunk_end > data.len() {
-            break;
-        }
-
-        result.extend_from_slice(&data[chunk_start..chunk_end]);
-        pos = chunk_end + 2; // skip \r\n after chunk data
-    }
-
-    Ok(result)
+    uri.parse::<hyper::Uri>()
+        .ok()
+        .and_then(|uri| uri.path_and_query().map(|path| path.as_str().to_string()))
+        .unwrap_or_else(|| "/".into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_parse_host_port_with_scheme() {
-        let (host, port) = parse_host_port("http://example.com/path").unwrap();
-        assert_eq!(host, "example.com");
-        assert_eq!(port, 80);
+    #[tokio::test]
+    async fn aws_hostname_credentials_never_reach_approval_metadata() {
+        use crate::ask::{AskRequestInfo, AskResponder};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Approver(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl AskResponder for Approver {
+            async fn prompt(&self, _request: &AskRequestInfo) -> Option<bool> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Some(true)
+            }
+            async fn notify_resolved(&self, _id: &str, _allowed: bool) {}
+            fn name(&self) -> &str {
+                "synthetic-approval-fixture"
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut approvals = AskBroadcaster::new(1);
+        approvals.add_responder(Arc::new(Approver(calls.clone())));
+        let scanner = Arc::new(crate::dlp::patterns::RegexScanner::new());
+        let ctx = ConnectionContext {
+            policy: None,
+            db: None,
+            ask_broadcaster: None,
+            sensitive_approval: Some(Arc::new(approvals)),
+            dlp_scanner: Some(scanner.clone()),
+            system_allowlist: None,
+            notifier: None,
+            event_tx: None,
+            rate_limiter: None,
+            mitm_enabled: false,
+            cert_cache: None,
+            upstream_tls_config: None,
+            logging_config: None,
+            network: super::super::network::NetworkConfig::default(),
+        };
+        let request = b"password=synthetic-hostname-fixture";
+        let findings = scanner.scan(request);
+        assert!(!findings.is_empty());
+        for key in ["AKIAIOSFODNN7EXAMPLE", "ASIAIOSFODNN7EXAMPLE"] {
+            let host = format!("{key}.example.test");
+            let (canonical, _) = super::super::http::authority(&host, 443).unwrap();
+            assert_eq!(canonical, host.to_ascii_lowercase());
+            assert!(
+                !approve_sensitive(&ctx, &canonical, "POST", request, &findings).await,
+                "hostname credentials must never be released through approval"
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "hostname credential reached the approval service"
+            );
+        }
+        assert!(approve_sensitive(&ctx, "example.test", "POST", request, &findings).await);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "ordinary approval positive control failed"
+        );
     }
 
-    #[test]
-    fn test_parse_host_port_with_explicit_port() {
-        let (host, port) = parse_host_port("http://example.com:8080/path").unwrap();
-        assert_eq!(host, "example.com");
-        assert_eq!(port, 8080);
-    }
-
-    #[test]
-    fn test_parse_host_port_https() {
-        let (host, port) = parse_host_port("https://api.anthropic.com/v1/messages").unwrap();
-        assert_eq!(host, "api.anthropic.com");
-        assert_eq!(port, 443);
+    #[tokio::test]
+    async fn denied_query_credentials_never_enter_diagnostic_output() {
+        use tracing::instrument::WithSubscriber;
+        #[derive(Clone)]
+        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = Capture(output.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let ctx = ConnectionContext {
+            policy: None,
+            db: None,
+            ask_broadcaster: None,
+            sensitive_approval: None,
+            dlp_scanner: Some(Arc::new(crate::dlp::patterns::RegexScanner::new())),
+            system_allowlist: None,
+            notifier: None,
+            event_tx: None,
+            rate_limiter: None,
+            mitm_enabled: false,
+            cert_cache: None,
+            upstream_tls_config: None,
+            logging_config: None,
+            network: super::super::network::NetworkConfig::default(),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        handle_http_request(&mut server,
+            b"GET http://example.test/private-path?password=fixture-sensitive-value HTTP/1.1\r\nHost: example.test\r\n\r\n", &ctx)
+            .with_subscriber(subscriber).await.unwrap();
+        let mut response = [0; 1024];
+        let size = client.read(&mut response).await.unwrap();
+        assert!(response[..size].starts_with(b"HTTP/1.1 403"));
+        let text = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.contains("DLP finding"),
+            "diagnostic event should remain useful"
+        );
+        for value in [
+            "fixture-sensitive-value",
+            "private-path",
+            "example.test",
+            "password=",
+        ] {
+            assert!(!text.contains(value), "diagnostic leaked request data");
+        }
     }
 
     #[test]
@@ -1330,6 +1578,7 @@ mod tests {
             policy: None,
             db: None,
             ask_broadcaster: None,
+            sensitive_approval: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -1339,6 +1588,7 @@ mod tests {
             cert_cache: None,
             upstream_tls_config: None,
             logging_config: None,
+            network: super::super::network::NetworkConfig::default(),
         };
 
         log_to_db(&ctx, "GET", "example.com", "/api", "allow", "test rule");
@@ -1358,6 +1608,7 @@ mod tests {
             policy: None,
             db: None,
             ask_broadcaster: None,
+            sensitive_approval: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -1367,6 +1618,7 @@ mod tests {
             cert_cache: None,
             upstream_tls_config: None,
             logging_config: None,
+            network: super::super::network::NetworkConfig::default(),
         };
 
         // Should not panic when event_tx is None
@@ -1381,6 +1633,7 @@ mod tests {
             policy: None,
             db: None,
             ask_broadcaster: None,
+            sensitive_approval: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -1390,6 +1643,7 @@ mod tests {
             cert_cache: None,
             upstream_tls_config: None,
             logging_config: None,
+            network: super::super::network::NetworkConfig::default(),
         };
 
         // Should not panic even with no active receivers
@@ -1404,6 +1658,7 @@ mod tests {
             policy: None,
             db: None,
             ask_broadcaster: None,
+            sensitive_approval: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -1413,6 +1668,7 @@ mod tests {
             cert_cache: None,
             upstream_tls_config: None,
             logging_config: None,
+            network: super::super::network::NetworkConfig::default(),
         };
 
         log_to_db(&ctx, "PUT", "multi.com", "/data", "allow", "multi test");
@@ -1440,69 +1696,6 @@ mod tests {
         // Debug trait works
         let debug_str = format!("{:?}", event);
         assert!(debug_str.contains("test.com"));
-    }
-
-    #[test]
-    fn find_header_end_found() {
-        let buf = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\nbody";
-        assert_eq!(find_header_end(buf), Some(33));
-    }
-
-    #[test]
-    fn find_header_end_not_found() {
-        let buf = b"GET / HTTP/1.1\r\nHost: example.com\r\n";
-        assert_eq!(find_header_end(buf), None);
-    }
-
-    #[test]
-    fn parse_content_length_standard() {
-        let headers = "POST / HTTP/1.1\r\nContent-Length: 42\r\nHost: x";
-        assert_eq!(parse_content_length(headers), Some(42));
-    }
-
-    #[test]
-    fn parse_content_length_lowercase() {
-        let headers = "POST / HTTP/1.1\r\ncontent-length: 100\r\nHost: x";
-        assert_eq!(parse_content_length(headers), Some(100));
-    }
-
-    #[test]
-    fn parse_content_length_missing() {
-        let headers = "GET / HTTP/1.1\r\nHost: example.com";
-        assert_eq!(parse_content_length(headers), None);
-    }
-
-    #[test]
-    fn is_chunked_true() {
-        let headers = "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nHost: x";
-        assert!(is_chunked(headers));
-    }
-
-    #[test]
-    fn is_chunked_false() {
-        let headers = "POST / HTTP/1.1\r\nContent-Length: 42\r\nHost: x";
-        assert!(!is_chunked(headers));
-    }
-
-    #[test]
-    fn is_chunked_case_insensitive() {
-        let headers = "POST / HTTP/1.1\r\ntransfer-encoding: Chunked\r\nHost: x";
-        assert!(is_chunked(headers));
-    }
-
-    #[test]
-    fn decode_chunked_body_simple() {
-        // "5\r\nhello\r\n0\r\n\r\n"
-        let input = b"5\r\nhello\r\n0\r\n\r\n";
-        let result = decode_chunked_body(input, 1024).unwrap();
-        assert_eq!(result, b"hello");
-    }
-
-    #[test]
-    fn decode_chunked_body_multiple_chunks() {
-        let input = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
-        let result = decode_chunked_body(input, 1024).unwrap();
-        assert_eq!(result, b"hello world");
     }
 
     #[test]
@@ -1578,6 +1771,7 @@ mod tests {
             policy: None,
             db: Some(pool.clone()),
             ask_broadcaster: None,
+            sensitive_approval: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -1587,6 +1781,7 @@ mod tests {
             cert_cache: None,
             upstream_tls_config: None,
             logging_config: Some(config),
+            network: super::super::network::NetworkConfig::default(),
         };
 
         log_to_db_audited(
@@ -1614,6 +1809,7 @@ mod tests {
             policy: None,
             db: Some(pool.clone()),
             ask_broadcaster: None,
+            sensitive_approval: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -1623,6 +1819,7 @@ mod tests {
             cert_cache: None,
             upstream_tls_config: None,
             logging_config: None,
+            network: super::super::network::NetworkConfig::default(),
         };
 
         log_to_db_audited(
@@ -1656,6 +1853,7 @@ mod tests {
             policy: None,
             db: Some(pool.clone()),
             ask_broadcaster: None,
+            sensitive_approval: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -1665,6 +1863,7 @@ mod tests {
             cert_cache: None,
             upstream_tls_config: None,
             logging_config: Some(config),
+            network: super::super::network::NetworkConfig::default(),
         };
 
         log_to_db_audited(
@@ -1699,6 +1898,7 @@ mod tests {
             policy: None,
             db: Some(pool.clone()),
             ask_broadcaster: None,
+            sensitive_approval: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -1708,6 +1908,7 @@ mod tests {
             cert_cache: None,
             upstream_tls_config: None,
             logging_config: Some(config),
+            network: super::super::network::NetworkConfig::default(),
         };
 
         log_to_db_audited(
@@ -1744,6 +1945,7 @@ mod tests {
             policy: None,
             db: Some(pool.clone()),
             ask_broadcaster: None,
+            sensitive_approval: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -1753,6 +1955,7 @@ mod tests {
             cert_cache: None,
             upstream_tls_config: None,
             logging_config: Some(config),
+            network: super::super::network::NetworkConfig::default(),
         };
 
         log_to_db_audited(
@@ -1774,36 +1977,6 @@ mod tests {
     }
 
     #[test]
-    fn decode_chunked_body_exceeds_limit() {
-        let input = b"5\r\nhello\r\n0\r\n\r\n";
-        let result = decode_chunked_body(input, 3);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn decode_chunked_body_with_extension() {
-        // RFC 7230: chunk-size can be followed by ";ext=value"
-        let input = b"5;ext=val\r\nhello\r\n0\r\n\r\n";
-        let result = decode_chunked_body(input, 1024).unwrap();
-        assert_eq!(result, b"hello");
-    }
-
-    #[test]
-    fn fix_headers_removes_transfer_encoding_adds_content_length() {
-        let mut buf =
-            b"POST /api HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n"
-                .to_vec();
-        let body_start = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
-        let decoded = b"hello world";
-        fix_headers_after_chunked_decode(&mut buf, body_start, decoded);
-
-        let result = String::from_utf8_lossy(&buf);
-        assert!(!result.contains("Transfer-Encoding"));
-        assert!(result.contains("Content-Length: 11"));
-        assert!(result.contains("hello world"));
-    }
-
-    #[test]
     fn format_dlp_findings_escapes_special_chars() {
         let findings = vec![crate::dlp::DlpFinding {
             pattern_name: "test".to_string(),
@@ -1816,18 +1989,6 @@ mod tests {
         assert_eq!(parsed[0]["matched"], r#"has "quotes" and \backslash"#);
     }
 
-    #[test]
-    fn is_chunked_mixed_case() {
-        let headers = "POST / HTTP/1.1\r\nTRANSFER-ENCODING: CHUNKED\r\nHost: x";
-        assert!(is_chunked(headers));
-    }
-
-    #[test]
-    fn parse_content_length_mixed_case() {
-        let headers = "POST / HTTP/1.1\r\nCONTENT-LENGTH: 99\r\nHost: x";
-        assert_eq!(parse_content_length(headers), Some(99));
-    }
-
     #[tokio::test]
     async fn accept_loop_stops_on_shutdown_signal() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1836,6 +1997,7 @@ mod tests {
             policy: None,
             db: None,
             ask_broadcaster: None,
+            sensitive_approval: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -1845,6 +2007,7 @@ mod tests {
             cert_cache: None,
             upstream_tls_config: None,
             logging_config: None,
+            network: super::super::network::NetworkConfig::default(),
         });
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

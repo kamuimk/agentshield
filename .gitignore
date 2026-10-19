@@ -6,3 +6,7 @@
 .idea/
 agentshield.toml
 CODE_REVIEW.md
+
+/platform/macos/.build/
+
+/platform/macos/target/

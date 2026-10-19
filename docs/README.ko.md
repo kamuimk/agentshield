@@ -10,6 +10,8 @@
 
 AgentShield는 AI 에이전트(OpenClaw, Claude Code 등)의 아웃바운드 HTTP/HTTPS 트래픽을 제어하는 투명 이그레스 방화벽입니다. TOML 기반 정책 규칙으로 허가되지 않은 요청을 차단하며, MITM 모드에서는 HTTPS 연결을 복호화하여 DLP 스캔을 수행할 수 있습니다.
 
+보호는 프록시를 거치는 통신에 적용됩니다. WorkOS 등 호스트에 대시보드를 내장하는 기능과 기본 사설망 차단·CONNECT 포트 제한은 [통합 안내](dashboard-integration.md)를 참고하세요. OS 전체 통신 강제는 별도 구현 대상입니다.
+
 ## 아키텍처
 
 ```mermaid

@@ -48,6 +48,7 @@ pub enum AskSseEvent {
     #[serde(rename = "new_ask")]
     NewAsk {
         req_id: String,
+
         domain: String,
         method: String,
         path: String,
@@ -97,6 +98,7 @@ impl AskResponder for WebDashboardResponder {
         // Broadcast the new ASK event to SSE subscribers
         let _ = self.ask_event_tx.send(AskSseEvent::NewAsk {
             req_id: req.req_id.clone(),
+
             domain: req.domain.clone(),
             method: req.method.clone(),
             path: req.path.clone(),
@@ -132,6 +134,7 @@ impl AskResponder for WebDashboardResponder {
         // Broadcast resolution to SSE subscribers
         let _ = self.ask_event_tx.send(AskSseEvent::Resolved {
             req_id: req_id.to_string(),
+
             allowed,
         });
     }
@@ -181,6 +184,7 @@ async fn get_pending(State(state): State<AskState>) -> Json<Vec<PendingAskRespon
         .values()
         .map(|pa| PendingAskResponse {
             req_id: pa.info.req_id.clone(),
+
             domain: pa.info.domain.clone(),
             method: pa.info.method.clone(),
             path: pa.info.path.clone(),
@@ -225,6 +229,7 @@ async fn post_deny(
 fn resolve_ask(
     state: &AskState,
     req_id: &str,
+
     allowed: bool,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let pending_ask = {
@@ -305,6 +310,8 @@ mod tests {
                 PendingWebAsk {
                     info: AskRequestInfo {
                         req_id: "req-1".to_string(),
+                        approval: None,
+
                         domain: "example.com".to_string(),
                         method: "GET".to_string(),
                         path: "/api".to_string(),
@@ -335,6 +342,8 @@ mod tests {
                 PendingWebAsk {
                     info: AskRequestInfo {
                         req_id: "req-allow".to_string(),
+                        approval: None,
+
                         domain: "test.com".to_string(),
                         method: "POST".to_string(),
                         path: "/data".to_string(),
@@ -351,7 +360,7 @@ mod tests {
         assert_eq!(json["action"], "allowed");
 
         // oneshot should have received true
-        assert_eq!(rx.await.unwrap(), true);
+        assert!(rx.await.unwrap());
         // pending map should be empty
         assert!(state.pending.lock().unwrap().is_empty());
     }
@@ -367,6 +376,8 @@ mod tests {
                 PendingWebAsk {
                     info: AskRequestInfo {
                         req_id: "req-deny".to_string(),
+                        approval: None,
+
                         domain: "test.com".to_string(),
                         method: "DELETE".to_string(),
                         path: "/resource".to_string(),
@@ -382,7 +393,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["action"], "denied");
 
-        assert_eq!(rx.await.unwrap(), false);
+        assert!(!rx.await.unwrap());
     }
 
     #[tokio::test]
@@ -410,6 +421,8 @@ mod tests {
 
         let req = AskRequestInfo {
             req_id: "test-prompt".to_string(),
+            approval: None,
+
             domain: "prompt.com".to_string(),
             method: "GET".to_string(),
             path: "/test".to_string(),
@@ -458,6 +471,8 @@ mod tests {
                 PendingWebAsk {
                     info: AskRequestInfo {
                         req_id: "cleanup-test".to_string(),
+                        approval: None,
+
                         domain: "cleanup.com".to_string(),
                         method: "GET".to_string(),
                         path: "/".to_string(),
@@ -506,6 +521,8 @@ mod tests {
 
         let req = AskRequestInfo {
             req_id: "sse-new".to_string(),
+            approval: None,
+
             domain: "sse.com".to_string(),
             method: "POST".to_string(),
             path: "/hook".to_string(),

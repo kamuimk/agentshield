@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 /// for the same domain reuse the cached `ServerConfig`.
 pub struct CertCache {
     ca_key: rcgen::KeyPair,
-    /// Self-signed CA Certificate (reconstructed from params + key for signing child certs).
+    /// Issuer subject and key identifier imported from the validated disk certificate.
     ca_cert: rcgen::Certificate,
     /// Original CA certificate DER from disk (included in TLS chain).
     ca_cert_der: rustls::pki_types::CertificateDer<'static>,
@@ -25,7 +25,7 @@ pub struct CertCache {
 impl CertCache {
     /// Load the Root CA key and certificate from `ca_dir`.
     ///
-    /// Expects `key.pem` and `cert.pem` files produced by `agentshield ca init`.
+    /// Expects `key.pem` and `cert.pem` validated by `agentshield ca prepare`.
     pub fn load(ca_dir: &Path) -> anyhow::Result<Self> {
         let key_pem = std::fs::read_to_string(ca_dir.join("key.pem"))?;
         let cert_pem = std::fs::read_to_string(ca_dir.join("cert.pem"))?;
@@ -42,20 +42,15 @@ impl CertCache {
             .next()
             .ok_or_else(|| anyhow::anyhow!("No certificate found in cert.pem"))?;
 
-        // NOTE: rcgen does not support loading a Certificate from PEM/DER directly.
-        // We reconstruct a CA Certificate by self-signing new params with the same key.
-        // The resulting `ca_cert` has a different serial/validity than the disk cert, but
-        // since `signed_by()` uses the CA's *key* (not serial) for signing, domain certs
-        // are valid. The original `ca_cert_der` from disk is included in the TLS chain
-        // so clients can verify against the installed Root CA.
-        let mut ca_params = rcgen::CertificateParams::default();
-        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        ca_params
-            .distinguished_name
-            .push(rcgen::DnType::CommonName, "AgentShield CA");
-        ca_params
-            .distinguished_name
-            .push(rcgen::DnType::OrganizationName, "AgentShield");
+        // Preserve the actual issuer subject and SKI. Validation also refuses a
+        // mismatched private key or a legacy CA not yet prepared by the owner.
+        let ca_params = crate::cli::ca::validated_ca_params(&cert_pem, &ca_key)?;
+        anyhow::ensure!(
+            ca_params
+                .key_usages
+                .contains(&rcgen::KeyUsagePurpose::KeyCertSign),
+            "CA needs preparation; run agentshield ca prepare"
+        );
         let ca_cert = ca_params.self_signed(&ca_key)?;
 
         let cache = Mutex::new(lru::LruCache::new(
@@ -95,6 +90,9 @@ impl CertCache {
 
         let mut domain_params = rcgen::CertificateParams::new(vec![domain.to_string()])?;
         domain_params.is_ca = rcgen::IsCa::NoCa;
+        domain_params.use_authority_key_identifier_extension = true;
+        domain_params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
+        domain_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
         domain_params
             .distinguished_name
             .push(rcgen::DnType::CommonName, domain);

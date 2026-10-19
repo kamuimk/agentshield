@@ -36,7 +36,7 @@ pub enum Severity {
 pub struct DlpFinding {
     /// Name of the pattern that matched (e.g., `"openai-api-key"`).
     pub pattern_name: String,
-    /// Redacted snippet of the matched text (first 4 + last 4 chars).
+    /// Constant redaction marker; no prefix or suffix of the matched value.
     pub matched_text: String,
     /// Severity level of this finding.
     pub severity: Severity,

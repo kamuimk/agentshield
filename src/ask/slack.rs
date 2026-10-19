@@ -21,6 +21,9 @@ use super::{AskRequestInfo, AskResponder};
 pub(crate) struct PendingAsk {
     /// One-shot channel to deliver the decision back to `prompt()`.
     tx: oneshot::Sender<bool>,
+    channel: String,
+    message_ts: String,
+    expires: std::time::Instant,
 }
 
 /// Slack interactive ASK responder using Socket Mode.
@@ -36,8 +39,16 @@ pub struct SlackAskResponder {
 
 impl SlackAskResponder {
     /// Create a new Slack ASK responder and start the Socket Mode WebSocket loop.
-    pub fn new(bot_token: String, app_token: String, channel: String) -> Self {
-        let client = reqwest::Client::new();
+    pub fn new(
+        bot_token: String,
+        app_token: String,
+        channel: String,
+        approver_user: String,
+    ) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("HTTP client");
         let pending: Arc<Mutex<HashMap<String, PendingAsk>>> = Arc::new(Mutex::new(HashMap::new()));
         let message_ts: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
 
@@ -47,7 +58,7 @@ impl SlackAskResponder {
         let ws_pending = pending.clone();
 
         tokio::spawn(async move {
-            socket_mode_loop(&ws_client, &ws_app_token, &ws_pending).await;
+            socket_mode_loop(&ws_client, &ws_app_token, &ws_pending, &approver_user).await;
         });
 
         Self {
@@ -98,14 +109,22 @@ impl AskResponder for SlackAskResponder {
 
         info!(
             "Slack ASK sent for {} {} {} (ts: {})",
-            req.method, req.domain, req.path, ts
+            req.method, req.domain, "[path omitted]", ts
         );
 
         // Create one-shot channel and store in pending map
         let (tx, rx) = oneshot::channel();
         {
             let mut map = self.pending.lock().unwrap();
-            map.insert(req.req_id.clone(), PendingAsk { tx });
+            map.insert(
+                req.req_id.clone(),
+                PendingAsk {
+                    tx,
+                    channel: self.channel.clone(),
+                    message_ts: ts.clone(),
+                    expires: std::time::Instant::now() + std::time::Duration::from_secs(120),
+                },
+            );
         }
         {
             let mut ts_map = self.message_ts.lock().unwrap();
@@ -159,27 +178,38 @@ impl AskResponder for SlackAskResponder {
 
 /// Build Block Kit blocks for an ASK message with Allow/Deny buttons.
 pub fn build_ask_blocks(req: &AskRequestInfo) -> serde_json::Value {
+    use sha2::{Digest, Sha256};
+    // Never send URL paths, queries, account values, or payload previews to Slack.
+    // A digest distinguishes held requests without disclosing their contents.
+    let mut digest = Sha256::new();
+    for field in [&req.domain, &req.method, &req.path] {
+        digest.update((field.len() as u64).to_be_bytes());
+        digest.update(field.as_bytes());
+    }
+    if let Some(body) = &req.body {
+        digest.update(body.as_bytes());
+    }
     let mut text = format!(
-        ":bell: *AgentShield ASK*\n\n\
-         *Domain:* `{}`\n\
-         *Method:* `{}`\n\
-         *Path:* `{}`",
-        req.domain, req.method, req.path
+        "AgentShield: approve this request once?\nDestination: {}\nMethod: {}\nRequest digest: {:x}\nPayload and URL path omitted. Expires within 120 seconds.",
+        req.domain,
+        req.method,
+        digest.finalize()
     );
-    if let Some(ref body) = req.body {
-        let preview = if body.len() > 200 {
-            format!("{}...", &body[..200])
-        } else {
-            body.clone()
-        };
-        text.push_str(&format!("\n*Body:* `{}`", preview));
+
+    if let Some(metadata) = &req.approval {
+        text.push_str(&format!(
+            "\nSensitive categories: {}\nHeld request bytes: {}\nHeld request SHA256: {}",
+            metadata.categories.join(", "),
+            metadata.request_bytes,
+            metadata.request_sha256
+        ));
     }
 
     serde_json::json!([
         {
             "type": "section",
             "text": {
-                "type": "mrkdwn",
+                "type": "plain_text",
                 "text": text
             }
         },
@@ -208,8 +238,8 @@ pub fn build_ask_blocks(req: &AskRequestInfo) -> serde_json::Value {
 /// Format the fallback text for the ASK message.
 pub fn format_ask_text(req: &AskRequestInfo) -> String {
     format!(
-        "AgentShield ASK: {} {} {}",
-        req.method, req.domain, req.path
+        "AgentShield ASK: {} {} (payload and path omitted)",
+        req.method, req.domain
     )
 }
 
@@ -348,6 +378,24 @@ pub fn parse_interaction_payload(payload: &serde_json::Value) -> Option<(String,
     }
 }
 
+fn authorized_interaction(
+    envelope: &serde_json::Value,
+    approver: &str,
+    pending: &PendingAsk,
+) -> bool {
+    let payload = &envelope["payload"];
+    !approver.is_empty()
+        && pending.channel.starts_with('D')
+        && std::time::Instant::now() < pending.expires
+        && payload["user"]["id"].as_str() == Some(approver)
+        && payload["channel"]["id"].as_str() == Some(pending.channel.as_str())
+        && payload["container"]["message_ts"].as_str() == Some(pending.message_ts.as_str())
+        && payload["type"].as_str() == Some("block_actions")
+        && payload["actions"]
+            .as_array()
+            .is_some_and(|actions| actions.len() == 1)
+}
+
 /// Background Socket Mode WebSocket loop.
 ///
 /// Connects to Slack via Socket Mode, receives interaction events,
@@ -356,6 +404,7 @@ async fn socket_mode_loop(
     client: &reqwest::Client,
     app_token: &str,
     pending: &Arc<Mutex<HashMap<String, PendingAsk>>>,
+    approver_user: &str,
 ) {
     loop {
         // Get WebSocket URL
@@ -439,7 +488,10 @@ async fn socket_mode_loop(
 
                 let pending_ask = {
                     let mut map = pending.lock().unwrap();
-                    map.remove(&req_id)
+                    let valid = map.get(&req_id).is_some_and(|entry| {
+                        authorized_interaction(&envelope, approver_user, entry)
+                    });
+                    if valid { map.remove(&req_id) } else { None }
                 };
 
                 if let Some(pa) = pending_ask {
@@ -461,9 +513,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn interactions_are_owner_message_and_expiry_bound() {
+        let (tx, _) = oneshot::channel();
+        let mut pending = PendingAsk {
+            tx,
+            channel: "DTEST".into(),
+            message_ts: "1.2".into(),
+            expires: std::time::Instant::now() + std::time::Duration::from_secs(60),
+        };
+        let valid = serde_json::json!({"payload":{"type":"block_actions","user":{"id":"UOWNER"},"channel":{"id":"DTEST"},"container":{"message_ts":"1.2"},"actions":[{"action_id":"ask_allow","value":"request"}]}});
+        assert!(authorized_interaction(&valid, "UOWNER", &pending));
+        assert!(!authorized_interaction(&valid, "UOTHER", &pending));
+        let mut wrong = valid.clone();
+        wrong["payload"]["channel"]["id"] = "DOTHER".into();
+        assert!(!authorized_interaction(&wrong, "UOWNER", &pending));
+        wrong = valid.clone();
+        wrong["payload"]["container"]["message_ts"] = "other".into();
+        assert!(!authorized_interaction(&wrong, "UOWNER", &pending));
+        pending.expires = std::time::Instant::now();
+        assert!(!authorized_interaction(&valid, "UOWNER", &pending));
+    }
+
+    #[test]
     fn build_ask_blocks_contains_buttons() {
         let req = AskRequestInfo {
             req_id: "test-123".to_string(),
+            approval: None,
+
             domain: "api.openai.com".to_string(),
             method: "POST".to_string(),
             path: "/v1/chat".to_string(),
@@ -495,6 +571,8 @@ mod tests {
     fn build_ask_blocks_with_body() {
         let req = AskRequestInfo {
             req_id: "test-456".to_string(),
+            approval: None,
+
             domain: "api.anthropic.com".to_string(),
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
@@ -502,13 +580,16 @@ mod tests {
         };
         let blocks = build_ask_blocks(&req);
         let text = blocks[0]["text"]["text"].as_str().unwrap();
-        assert!(text.contains("hello world"));
+        assert!(!text.contains("hello world"));
+        assert!(text.contains("Request digest"));
     }
 
     #[test]
     fn build_ask_blocks_truncates_long_body() {
         let req = AskRequestInfo {
             req_id: "test-789".to_string(),
+            approval: None,
+
             domain: "api.example.com".to_string(),
             method: "POST".to_string(),
             path: "/data".to_string(),
@@ -516,7 +597,7 @@ mod tests {
         };
         let blocks = build_ask_blocks(&req);
         let text = blocks[0]["text"]["text"].as_str().unwrap();
-        assert!(text.contains("..."));
+        assert!(!text.contains(&"x".repeat(200)));
         // Should not contain the full 300 chars
         assert!(text.len() < 400);
     }
@@ -525,6 +606,8 @@ mod tests {
     fn format_ask_text_basic() {
         let req = AskRequestInfo {
             req_id: "r1".to_string(),
+            approval: None,
+
             domain: "api.openai.com".to_string(),
             method: "POST".to_string(),
             path: "/v1/chat".to_string(),
@@ -533,7 +616,7 @@ mod tests {
         let text = format_ask_text(&req);
         assert!(text.contains("POST"));
         assert!(text.contains("api.openai.com"));
-        assert!(text.contains("/v1/chat"));
+        assert!(!text.contains("/v1/chat"));
     }
 
     #[test]
@@ -615,7 +698,15 @@ mod tests {
         let (tx, _rx) = oneshot::channel();
         {
             let mut map = r.pending().lock().unwrap();
-            map.insert("req-1".to_string(), PendingAsk { tx });
+            map.insert(
+                "req-1".to_string(),
+                PendingAsk {
+                    tx,
+                    channel: "DTEST".into(),
+                    message_ts: "1234.5678".into(),
+                    expires: std::time::Instant::now() + std::time::Duration::from_secs(120),
+                },
+            );
         }
         {
             let mut ts = r.message_ts_map().lock().unwrap();

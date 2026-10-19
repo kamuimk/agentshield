@@ -8,7 +8,9 @@
 
 **[한국어 문서 (Korean)](docs/README.ko.md)**
 
-AgentShield is a transparent egress firewall for AI agents (OpenClaw, Claude Code, etc.). It intercepts all outbound HTTP/HTTPS traffic and enforces TOML-based policy rules — blocking unauthorized requests before they leave your machine. In MITM mode, it can decrypt HTTPS connections to perform DLP scanning on encrypted payloads.
+AgentShield is an explicit HTTP/HTTPS egress proxy for AI agents (OpenClaw, Claude Code, etc.). It enforces TOML-based policies on traffic routed through it. In MITM mode, clients that trust its CA can have their HTTPS request bodies inspected before forwarding. It does not enforce system-wide routing.
+
+**Dashboard embedding:** [WorkOS / host integration](docs/dashboard-integration.md) provides an embedded dashboard, scoped credentials and a browser host adapter. The same guide describes new network restrictions and compatibility limits, including default private-network denial and CONNECT port 443.
 
 ## Architecture
 
