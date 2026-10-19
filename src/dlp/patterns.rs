@@ -282,6 +282,28 @@ const MAX_ENCODED_TOKEN: usize = 65_536;
 const MAX_DECODED_BYTES: usize = 1_048_576;
 const MAX_ENCODED_CANDIDATES: usize = 2_048;
 
+fn append_json_view(input: &[u8], output: &mut Vec<u8>, budget: &mut usize) {
+    if *budget == 0
+        || !input
+            .iter()
+            .find(|b| !b.is_ascii_whitespace())
+            .is_some_and(|b| matches!(*b, b'{' | b'[' | b'"'))
+    {
+        return;
+    }
+    // Each input is one bounded decoded token, not the concatenation of all
+    // candidates. Combining tokens first can hide JSON behind unrelated bytes.
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(input) {
+        if let Ok(json) = serde_json::to_vec(&value) {
+            if json != input && json.len() + 1 <= *budget {
+                *budget -= json.len() + 1;
+                output.extend_from_slice(&json);
+                output.push(b'\n');
+            }
+        }
+    }
+}
+
 fn base64_views(input: &[u8], budget: &mut usize, candidates: &mut usize) -> Vec<u8> {
     use base64::{Engine as _, engine::general_purpose};
     let mut output = Vec::new();
@@ -317,6 +339,11 @@ fn base64_views(input: &[u8], budget: &mut usize, candidates: &mut usize) -> Vec
                 *budget -= decoded.len() + 1;
                 output.extend_from_slice(&decoded);
                 output.push(b'\n');
+                append_json_view(&decoded, &mut output, budget);
+                let percent = percent_decode(&decoded);
+                if percent != decoded {
+                    append_json_view(&percent, &mut output, budget);
+                }
                 break;
             }
         }
@@ -414,6 +441,35 @@ mod tests {
     }
 
     #[test]
+    fn json_escaped_credentials_inside_transport_tokens_are_inspected() {
+        use base64::{Engine as _, engine::general_purpose};
+        let scanner = RegexScanner::new();
+        for (secret, category) in [
+            ("sk-abcdefghijklmnopqrstuvwxyz1234567890", "openai-api-key"),
+            ("ASIAIOSFODNN7EXAMPLE", "aws-access-key"),
+            ("x@y.zz", "email-address"),
+        ] {
+            let escaped: String = secret.bytes().map(|b| format!("\\u{b:04x}")).collect();
+            let json = format!(r#"{{"value":"{escaped}"}}"#);
+            let encoded = general_purpose::STANDARD.encode(&json);
+            let percent = json.replace('\\', "%5C");
+            for payload in [
+                encoded.clone(),
+                general_purpose::STANDARD.encode(encoded),
+                general_purpose::URL_SAFE_NO_PAD.encode(&json),
+                general_purpose::STANDARD.encode(percent),
+            ] {
+                let findings = scanner.scan(format!("transport={payload}").as_bytes());
+                assert!(
+                    findings.iter().any(|f| f.pattern_name == category),
+                    "composed JSON transport was not inspected"
+                );
+                assert!(findings.iter().all(|f| f.matched_text == "[REDACTED...]"));
+            }
+        }
+    }
+
+    #[test]
     fn short_encoded_account_information_is_not_excluded_by_token_floor() {
         use base64::{Engine as _, engine::general_purpose};
         let scanner = RegexScanner::new();
@@ -442,6 +498,23 @@ mod tests {
         assert!(output.len() <= 100 && candidates <= 3);
         let huge = vec![b'A'; MAX_ENCODED_TOKEN + 1];
         assert!(base64_views(&huge, &mut budget, &mut candidates).is_empty());
+    }
+
+    #[test]
+    fn decoded_json_views_share_the_transport_output_budget() {
+        use base64::{Engine as _, engine::general_purpose};
+        let json = br#"{"value":"x\u0040y.zz"}"#;
+        let encoded = general_purpose::STANDARD.encode(json);
+        for limit in [0, json.len(), json.len() + 1, 256] {
+            let mut budget = limit;
+            let mut candidates = 1;
+            let output = base64_views(encoded.as_bytes(), &mut budget, &mut candidates);
+            assert!(output.len() <= limit);
+            assert_eq!(output.len() + budget, limit);
+            if limit == 256 {
+                assert!(String::from_utf8_lossy(&output).contains("x@y.zz"));
+            }
+        }
     }
 
     #[test]
