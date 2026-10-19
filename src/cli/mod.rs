@@ -42,6 +42,9 @@ pub enum Commands {
         /// Import a Windows parent-owned listener from a private binary stdin pipe.
         #[arg(long)]
         owned_listener_stdin: bool,
+        /// Receive a one-shot listener proof challenge from a local SYSTEM pipe.
+        #[arg(long, requires = "owned_listener_stdin")]
+        listener_proof_pipe: Option<String>,
     },
     /// Stop the proxy server
     Stop,
@@ -154,4 +157,32 @@ pub enum PolicyAction {
         #[arg(long)]
         list: bool,
     },
+}
+
+#[cfg(test)]
+mod listener_proof_args_tests {
+    use super::*;
+    #[test]
+    fn proof_pipe_cannot_be_enabled_without_owned_socket_import() {
+        let pipe = r"\\.\pipe\AgentShield.ListenerProof.v1.00000000000000000000000000000000";
+        assert!(
+            Cli::try_parse_from(["agentshield", "start", "--listener-proof-pipe", pipe]).is_err()
+        );
+        let cli = Cli::try_parse_from([
+            "agentshield",
+            "start",
+            "--owned-listener-stdin",
+            "--listener-proof-pipe",
+            pipe,
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Start {
+                owned_listener_stdin: true,
+                listener_proof_pipe: Some(_),
+                ..
+            }
+        ));
+    }
 }

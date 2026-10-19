@@ -92,8 +92,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Start {
             daemon: _,
             owned_listener_stdin,
+            listener_proof_pipe,
         } => {
-            cmd_start(&cli.config, owned_listener_stdin).await?;
+            cmd_start(&cli.config, owned_listener_stdin, listener_proof_pipe).await?;
         }
         Commands::Stop => {
             cmd_stop()?;
@@ -199,6 +200,7 @@ async fn start_proxy_server(
     config: &AppConfig,
     config_path: &Path,
     listener: Option<tokio::net::TcpListener>,
+    proof: Option<agentshield::proxy::listener_proof::ListenerProof>,
 ) -> anyhow::Result<ProxyHandle> {
     if let Some(approval) = &config.workos_approval {
         approval.validate().map_err(anyhow::Error::msg)?;
@@ -363,6 +365,10 @@ async fn start_proxy_server(
         .with_db(pool.clone())
         .with_ask_broadcaster(broadcaster)
         .with_event_channel(event_tx.clone());
+
+    if let Some(proof) = proof {
+        server = server.with_listener_proof(proof);
+    }
 
     if let Some(limiter) = rate_limiter {
         server = server.with_rate_limiter(limiter);
@@ -576,7 +582,11 @@ async fn shutdown_requested() -> anyhow::Result<()> {
 }
 
 /// Start the proxy and block until Ctrl-C, then shut down gracefully.
-async fn cmd_start(config_path: &Path, owned_listener_stdin: bool) -> anyhow::Result<()> {
+async fn cmd_start(
+    config_path: &Path,
+    owned_listener_stdin: bool,
+    proof_pipe: Option<String>,
+) -> anyhow::Result<()> {
     let config = AppConfig::load_from_path(config_path)?;
     let listener = if owned_listener_stdin {
         Some(agentshield::proxy::owned_listener::from_private_stdin(
@@ -585,7 +595,16 @@ async fn cmd_start(config_path: &Path, owned_listener_stdin: bool) -> anyhow::Re
     } else {
         None
     };
-    let handle = start_proxy_server(&config, config_path, listener).await?;
+    let proof = if let Some(pipe) = proof_pipe {
+        let address = listener
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("listener_proof_requires_owned_listener"))?
+            .local_addr()?;
+        Some(agentshield::proxy::listener_proof::ListenerProof::from_system_pipe(&pipe, address)?)
+    } else {
+        None
+    };
+    let handle = start_proxy_server(&config, config_path, listener, proof).await?;
 
     // Keep running until interrupted
     shutdown_requested().await?;
@@ -671,7 +690,7 @@ async fn cmd_wrap(
     logging::open_db(&db)?;
 
     // 7. Start proxy server
-    let handle = start_proxy_server(&config, &resolved_config_path, None).await?;
+    let handle = start_proxy_server(&config, &resolved_config_path, None, None).await?;
     println!("AgentShield proxy running on {}", handle.addr);
 
     // 8. Build child environment

@@ -59,13 +59,15 @@ tokio-rustls = "0.26"
 rustls-pemfile = "2"
 lru = "0.12"
 sha2 = "0.10"
+hmac = "0.12"
+zeroize = "1.8"
 webpki-roots = "1"
 dirs = "6"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock", "Win32_System_Console", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock", "Win32_System_Console", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_Security_Authorization"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
