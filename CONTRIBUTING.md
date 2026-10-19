@@ -106,6 +106,18 @@ tests/              # Integration + E2E tests
 - `docs: ...` for documentation only
 - `test: ...` for test additions
 
+## Host integration publication boundary
+
+WorkOS and other host integrations may contribute reusable AgentShield engine features,
+dashboard adapters, public API contracts, and synthetic examples here. Keep private host
+implementation in the host's private repository: ontology, business logic, authentication
+and authorization internals, database schemas, and operational configuration or credentials.
+
+Review documentation, tests, examples, commit messages, and build artifacts alongside code.
+Do not copy private source paths, internal design references, real accounts, or private build
+outputs into a public change. Use synthetic fixtures and document only the integration
+contract needed by an independent host implementer.
+
 ## Reporting Issues
 
 Use the [GitHub issue templates](https://github.com/kamuimk/agentshield/issues/new/choose):
