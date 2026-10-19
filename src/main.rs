@@ -89,8 +89,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Commands::Start { daemon: _ } => {
-            cmd_start(&cli.config).await?;
+        Commands::Start {
+            daemon: _,
+            owned_listener_stdin,
+        } => {
+            cmd_start(&cli.config, owned_listener_stdin).await?;
         }
         Commands::Stop => {
             cmd_stop()?;
@@ -192,7 +195,11 @@ struct ProxyHandle {
 ///
 /// Returns a `ProxyHandle` with the bound address. The caller is responsible
 /// for keeping the handle alive and deciding when to shut down.
-async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::Result<ProxyHandle> {
+async fn start_proxy_server(
+    config: &AppConfig,
+    config_path: &Path,
+    listener: Option<tokio::net::TcpListener>,
+) -> anyhow::Result<ProxyHandle> {
     if let Some(approval) = &config.workos_approval {
         approval.validate().map_err(anyhow::Error::msg)?;
     }
@@ -486,7 +493,10 @@ async fn start_proxy_server(config: &AppConfig, config_path: &Path) -> anyhow::R
         }
     }
 
-    let (addr, shutdown_tx) = server.start().await?;
+    let (addr, shutdown_tx) = match listener {
+        Some(listener) => server.start_with_listener(listener).await?,
+        None => server.start().await?,
+    };
     info!("Proxy running on {}", addr);
     info!(
         "Set HTTPS_PROXY=http://{} to route traffic through AgentShield",
@@ -566,9 +576,16 @@ async fn shutdown_requested() -> anyhow::Result<()> {
 }
 
 /// Start the proxy and block until Ctrl-C, then shut down gracefully.
-async fn cmd_start(config_path: &Path) -> anyhow::Result<()> {
+async fn cmd_start(config_path: &Path, owned_listener_stdin: bool) -> anyhow::Result<()> {
     let config = AppConfig::load_from_path(config_path)?;
-    let handle = start_proxy_server(&config, config_path).await?;
+    let listener = if owned_listener_stdin {
+        Some(agentshield::proxy::owned_listener::from_private_stdin(
+            &config.proxy.listen,
+        )?)
+    } else {
+        None
+    };
+    let handle = start_proxy_server(&config, config_path, listener).await?;
 
     // Keep running until interrupted
     shutdown_requested().await?;
@@ -654,7 +671,7 @@ async fn cmd_wrap(
     logging::open_db(&db)?;
 
     // 7. Start proxy server
-    let handle = start_proxy_server(&config, &resolved_config_path).await?;
+    let handle = start_proxy_server(&config, &resolved_config_path, None).await?;
     println!("AgentShield proxy running on {}", handle.addr);
 
     // 8. Build child environment

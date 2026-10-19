@@ -64,6 +64,9 @@ dirs = "6"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock", "Win32_System_Console", "Win32_System_Pipes"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

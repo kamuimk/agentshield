@@ -8,6 +8,7 @@
 pub mod connect;
 mod http;
 pub mod network;
+pub mod owned_listener;
 pub mod tls;
 
 use std::net::SocketAddr;
@@ -158,6 +159,29 @@ impl ProxyServer {
     /// shutdown sender. Sending `true` on the sender stops the accept loop.
     pub async fn start(&self) -> Result<(SocketAddr, tokio::sync::watch::Sender<bool>)> {
         let listener = TcpListener::bind(&self.listen_addr).await?;
+        self.serve_listener(listener).await
+    }
+
+    /// Use a caller-owned listener without releasing and rebinding its address.
+    pub async fn start_with_listener(
+        &self,
+        listener: TcpListener,
+    ) -> Result<(SocketAddr, tokio::sync::watch::Sender<bool>)> {
+        let expected: SocketAddr = self
+            .listen_addr
+            .parse()
+            .map_err(|_| std::io::Error::other("owned_listener_address_invalid"))?;
+        let local_addr = listener.local_addr()?;
+        if local_addr != expected && !(expected.port() == 0 && local_addr.ip() == expected.ip()) {
+            return Err(std::io::Error::other("owned_listener_address_mismatch").into());
+        }
+        self.serve_listener(listener).await
+    }
+
+    async fn serve_listener(
+        &self,
+        listener: TcpListener,
+    ) -> Result<(SocketAddr, tokio::sync::watch::Sender<bool>)> {
         let local_addr = listener.local_addr()?;
         info!("AgentShield proxy listening on {}", local_addr);
 
@@ -200,5 +224,58 @@ impl ProxyServer {
         });
 
         Ok((local_addr, shutdown_tx))
+    }
+}
+
+#[cfg(test)]
+mod owned_listener_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn handed_listener_serves_without_rebinding() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = ProxyServer::new(address.to_string()).with_policy(Arc::new(RwLock::new(
+            PolicyConfig {
+                default: crate::policy::config::Action::Deny,
+                rules: vec![],
+            },
+        )));
+        let (actual, shutdown) = server.start_with_listener(listener).await.unwrap();
+        assert_eq!(actual, address);
+        let mut connection = tokio::net::TcpStream::connect(actual).await.unwrap();
+        connection.write_all(b"GET http://example.test/ HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n").await.unwrap();
+        let mut response = [0; 64];
+        let count = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            connection.read(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(response[..count].starts_with(b"HTTP/1.1 403"));
+        shutdown.send(true).unwrap();
+    }
+
+    #[tokio::test]
+    async fn handed_listener_cannot_change_configured_address() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let error = ProxyServer::new("127.0.0.2:0".into())
+            .start_with_listener(listener)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("address_mismatch"));
+    }
+
+    #[tokio::test]
+    async fn ordinary_hostname_binding_remains_supported() {
+        let (address, shutdown) = ProxyServer::new("localhost:0".into())
+            .start()
+            .await
+            .unwrap();
+        assert!(address.ip().is_loopback());
+        assert_ne!(address.port(), 0);
+        shutdown.send(true).unwrap();
     }
 }

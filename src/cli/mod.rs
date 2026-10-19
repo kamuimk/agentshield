@@ -39,6 +39,9 @@ pub enum Commands {
         /// Run as daemon in the background
         #[arg(long)]
         daemon: bool,
+        /// Import a Windows parent-owned listener from a private binary stdin pipe.
+        #[arg(long)]
+        owned_listener_stdin: bool,
     },
     /// Stop the proxy server
     Stop,
