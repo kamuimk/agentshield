@@ -200,3 +200,30 @@ with adjacent text, percent-encoded text and JSON escapes. Compressed bodies are
 rejected while DLP is enabled. Regex detection cannot identify every proprietary
 secret, transformed payload or prompt injection; destination policy, tool scope,
 credential-file confinement and OS network controls remain independent boundaries.
+
+### Quiet streams and stalled startup
+
+The log SSE endpoint emits an immediate `: connected` comment. This supplies body
+bytes so WebKit can deliver fetch startup without waiting for an audit event or
+its first periodic keepalive. The comment is not an audit record and does not
+increase request counts. Real log events retain their existing JSON data format.
+
+The dashboard bounds stream response startup to ten seconds, displays a failed
+connection, and retries after three seconds. The deadline is cleared once response
+headers/body become available; it does not impose a lifetime limit on a connected
+quiet stream. Host disposal aborts streams without scheduling a reconnect.
+
+The browser fixture delays its first synthetic event by ten seconds to test
+connection before any audit event. It also stalls headers, checks failure state,
+then restores the transport and verifies reconnect/event delivery. Run against
+both browser engines with Playwright available:
+
+```sh
+cargo build --locked --example dashboard_fixture
+AGENTSHIELD_BROWSER=chromium node integrations/dashboard-browser-test.mjs
+AGENTSHIELD_BROWSER=webkit node integrations/dashboard-browser-test.mjs
+```
+
+`PLAYWRIGHT_MODULE` and `AGENTSHIELD_DASHBOARD_FIXTURE` can point to existing local
+test installations. These tests use only synthetic keys, events and fixture hosts.
+A host application's installed release must still be verified separately.
