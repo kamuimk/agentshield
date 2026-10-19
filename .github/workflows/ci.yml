@@ -5,12 +5,78 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      source_revision:
+        description: Exact public commit SHA for a Windows development build
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
+  ENGINE_SOURCE_REVISION: ${{ inputs.source_revision || github.event.pull_request.head.sha || github.sha }}
 
 jobs:
+  windows-engine:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Require an immutable source revision
+        shell: pwsh
+        run: |
+          if ($env:ENGINE_SOURCE_REVISION -notmatch '^[0-9a-f]{40}$') {
+            throw 'An exact source commit SHA is required'
+          }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.ENGINE_SOURCE_REVISION }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test the native Windows engine
+        run: cargo test --all --locked
+
+      - name: Build the native Windows engine
+        run: cargo build --release --locked --bin agentshield
+
+      - name: Record exact source and binary identities
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = Join-Path $env:RUNNER_TEMP 'agentshield-windows-native'
+          New-Item -ItemType Directory -Path $output | Out-Null
+          Copy-Item target/release/agentshield.exe, LICENSE -Destination $output
+          $revision = (git rev-parse HEAD).Trim()
+          $digest = (Get-FileHash (Join-Path $output 'agentshield.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          @{
+            repository = 'https://github.com/kamuimk/agentshield.git'
+            revision = $revision
+            protocol = 'agentshield.dashboard.v1'
+            license = 'Apache-2.0'
+            development = $true
+          } | ConvertTo-Json | Set-Content (Join-Path $output 'source.json') -Encoding utf8
+          @{
+            protocol = 'agentshield.dashboard.v1'
+            revision = $revision
+            sha256 = $digest
+            target = 'x86_64-pc-windows-msvc'
+            rustc = (rustc --version).Trim()
+            cargoLockSha256 = (Get-FileHash Cargo.lock -Algorithm SHA256).Hash.ToLowerInvariant()
+            signed = $false
+          } | ConvertTo-Json | Set-Content (Join-Path $output 'receipt.json') -Encoding utf8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentshield-windows-native-${{ env.ENGINE_SOURCE_REVISION }}
+          path: ${{ runner.temp }}/agentshield-windows-native
+          if-no-files-found: error
+          retention-days: 7
+
   test:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +97,7 @@ jobs:
         run: cargo test --all
 
   coverage:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
