@@ -5,9 +5,16 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      source_revision:
+        description: Exact public commit SHA for a Windows development build
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
+  ENGINE_SOURCE_REVISION: ${{ inputs.source_revision || github.event.pull_request.head.sha || github.sha }}
 
 jobs:
   windows-engine:
@@ -16,7 +23,16 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Require an immutable source revision
+        shell: pwsh
+        run: |
+          if ($env:ENGINE_SOURCE_REVISION -notmatch '^[0-9a-f]{40}$') {
+            throw 'An exact source commit SHA is required'
+          }
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.ENGINE_SOURCE_REVISION }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -54,12 +70,13 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: agentshield-windows-native-${{ github.sha }}
+          name: agentshield-windows-native-${{ env.ENGINE_SOURCE_REVISION }}
           path: ${{ runner.temp }}/agentshield-windows-native
           if-no-files-found: error
           retention-days: 7
 
   test:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -80,6 +97,7 @@ jobs:
         run: cargo test --all
 
   coverage:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
