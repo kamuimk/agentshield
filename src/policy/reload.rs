@@ -96,6 +96,22 @@ pub fn start_sighup_handler(_config_path: PathBuf, _policy_lock: Arc<RwLock<Poli
     // SIGHUP is not available on this platform
 }
 
+/// Consume SIGHUP without reloading policy or terminating an immutable CLI instance.
+#[cfg(unix)]
+pub fn start_immutable_sighup_handler() {
+    tokio::spawn(async move {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sig = signal(SignalKind::hangup()).expect("Failed to register SIGHUP handler");
+        while sig.recv().await.is_some() {
+            info!("SIGHUP ignored: startup policy is immutable");
+        }
+    });
+}
+
+/// No-op on platforms without SIGHUP.
+#[cfg(not(unix))]
+pub fn start_immutable_sighup_handler() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

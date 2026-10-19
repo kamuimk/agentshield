@@ -45,6 +45,9 @@ pub enum Commands {
         /// Receive a one-shot listener proof challenge from a local SYSTEM pipe.
         #[arg(long, requires = "owned_listener_stdin")]
         listener_proof_pipe: Option<String>,
+        /// Freeze the startup policy; disable reload and dashboard control.
+        #[arg(long)]
+        immutable_policy: bool,
     },
     /// Stop the proxy server
     Stop,

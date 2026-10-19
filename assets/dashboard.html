@@ -299,7 +299,7 @@
     const embedConfig = window.AGENTSHIELD_EMBED || null;
     const PROTOCOL = 'agentshield.dashboard.v1';
     let authToken = embedConfig ? '' : sessionStorage.getItem('agentshield_token') || '';
-    let capabilities = ['observe', 'policy:write', 'ask:resolve'];
+    let capabilities = window.AGENTSHIELD_READ_ONLY ? ['observe'] : ['observe', 'policy:write', 'ask:resolve'];
     let dashboardStarted = false;
     let connectionGeneration = 0;
     const streamControllers = new Set();
@@ -339,6 +339,8 @@
         document.getElementById('policyEditor').readOnly = !writable;
         document.getElementById('policySaveButton').classList.toggle('hidden', !writable);
     }
+
+    setCapabilities(capabilities);
 
     window.addEventListener('pagehide', stopDashboard);
     if (embedConfig) {

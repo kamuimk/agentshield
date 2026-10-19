@@ -93,8 +93,15 @@ async fn main() -> anyhow::Result<()> {
             daemon: _,
             owned_listener_stdin,
             listener_proof_pipe,
+            immutable_policy,
         } => {
-            cmd_start(&cli.config, owned_listener_stdin, listener_proof_pipe).await?;
+            cmd_start(
+                &cli.config,
+                owned_listener_stdin,
+                listener_proof_pipe,
+                immutable_policy,
+            )
+            .await?;
         }
         Commands::Stop => {
             cmd_stop()?;
@@ -201,6 +208,7 @@ async fn start_proxy_server(
     config_path: &Path,
     listener: Option<tokio::net::TcpListener>,
     proof: Option<agentshield::proxy::listener_proof::ListenerProof>,
+    immutable_policy: bool,
 ) -> anyhow::Result<ProxyHandle> {
     if let Some(approval) = &config.workos_approval {
         approval.validate().map_err(anyhow::Error::msg)?;
@@ -524,8 +532,14 @@ async fn start_proxy_server(
             };
             let listen = web_config.listen.clone();
             let app = if let Some(integration) = &web_config.integration {
-                web::integration::router(web_state, ask_state, integration.clone())
-                    .map_err(anyhow::Error::msg)?
+                let build = if immutable_policy {
+                    web::integration::read_only_router
+                } else {
+                    web::integration::router
+                };
+                build(web_state, ask_state, integration.clone()).map_err(anyhow::Error::msg)?
+            } else if immutable_policy {
+                web::read_only_router(web_state)
             } else {
                 web::full_router(web_state, ask_state)
             };
@@ -546,13 +560,19 @@ async fn start_proxy_server(
     }
 
     // Policy hot-reload: file watcher + SIGHUP handler
-    let watcher = reload::start_file_watcher(config_path.to_path_buf(), policy.clone())
-        .map_err(|e| {
-            warn!("Failed to start config file watcher: {}", e);
-            e
-        })
-        .ok();
-    reload::start_sighup_handler(config_path.to_path_buf(), policy);
+    let watcher = if immutable_policy {
+        reload::start_immutable_sighup_handler();
+        None
+    } else {
+        let watcher = reload::start_file_watcher(config_path.to_path_buf(), policy.clone())
+            .map_err(|e| {
+                warn!("Failed to start config file watcher: {}", e);
+                e
+            })
+            .ok();
+        reload::start_sighup_handler(config_path.to_path_buf(), policy);
+        watcher
+    };
 
     Ok(ProxyHandle {
         addr,
@@ -586,6 +606,7 @@ async fn cmd_start(
     config_path: &Path,
     owned_listener_stdin: bool,
     proof_pipe: Option<String>,
+    immutable_policy: bool,
 ) -> anyhow::Result<()> {
     let config = AppConfig::load_from_path(config_path)?;
     let listener = if owned_listener_stdin {
@@ -604,7 +625,8 @@ async fn cmd_start(
     } else {
         None
     };
-    let handle = start_proxy_server(&config, config_path, listener, proof).await?;
+    let handle =
+        start_proxy_server(&config, config_path, listener, proof, immutable_policy).await?;
 
     // Keep running until interrupted
     shutdown_requested().await?;
@@ -690,7 +712,7 @@ async fn cmd_wrap(
     logging::open_db(&db)?;
 
     // 7. Start proxy server
-    let handle = start_proxy_server(&config, &resolved_config_path, None, None).await?;
+    let handle = start_proxy_server(&config, &resolved_config_path, None, None, false).await?;
     println!("AgentShield proxy running on {}", handle.addr);
 
     // 8. Build child environment

@@ -111,6 +111,25 @@ pub fn router(
     asks: AskState,
     config: IntegrationConfig,
 ) -> Result<Router, &'static str> {
+    build_router(state, asks, config, false)
+}
+
+/// Build an observation-only dashboard, including for administrator credentials.
+/// Policy writes and local ASK decisions stay unavailable for the router lifetime.
+pub fn read_only_router(
+    state: Arc<AppState>,
+    asks: AskState,
+    config: IntegrationConfig,
+) -> Result<Router, &'static str> {
+    build_router(state, asks, config, true)
+}
+
+fn build_router(
+    state: Arc<AppState>,
+    asks: AskState,
+    config: IntegrationConfig,
+    read_only: bool,
+) -> Result<Router, &'static str> {
     // Binding is validated against the actual configured listen address by startup too.
     config.validate("127.0.0.1:0", state.auth_token.as_deref())?;
     let admin = state.auth_token.clone().unwrap();
@@ -119,20 +138,34 @@ pub fn router(
         .route("/api/integration", get(manifest))
         .layer(axum::middleware::from_fn({
             let config = config.clone();
-            move |request, next| authenticate(admin.clone(), config.clone(), request, next)
+            move |request, next| {
+                authenticate(admin.clone(), config.clone(), read_only, request, next)
+            }
         }));
     let ancestors = format!("frame-ancestors {}", config.allowed_origins.join(" "));
     let embed_config =
         serde_json::to_string(&serde_json::json!({ "origins": config.allowed_origins }))
             .unwrap()
             .replace('<', "\\u003c");
-    let html = super::DASHBOARD_HTML.replacen(
+    let html = if read_only {
+        super::read_only_dashboard_html()
+    } else {
+        super::DASHBOARD_HTML.to_owned()
+    };
+    let html = html.replacen(
         "<script>",
         &format!("<script>window.AGENTSHIELD_EMBED={embed_config};</script><script>"),
         1,
     );
     let public = Router::new()
-        .route("/", get(super::dashboard_handler))
+        .route(
+            "/",
+            if read_only {
+                get(super::read_only_dashboard_handler)
+            } else {
+                get(super::dashboard_handler)
+            },
+        )
         .route(
             "/embed",
             get(move || {
@@ -155,6 +188,7 @@ pub fn router(
 async fn authenticate(
     admin: String,
     config: IntegrationConfig,
+    read_only: bool,
     mut req: Request,
     next: Next,
 ) -> Response {
@@ -166,7 +200,7 @@ async fn authenticate(
     else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    let access = if super::token_matches(provided, &admin) {
+    let mut access = if super::token_matches(provided, &admin) {
         Access {
             control: true,
             embedded: false,
@@ -188,6 +222,7 @@ async fn authenticate(
     } else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    access.control &= !read_only;
     // Exact route allowlist: future API endpoints do not silently become available.
     let path = req.uri().path();
     let observe = req.method() == Method::GET
