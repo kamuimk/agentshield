@@ -296,7 +296,10 @@ async fn get_logs_stream(
         Err(_) => None, // lagged receiver — skip
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    // WebKit may defer fetch response delivery until body bytes arrive. Signal
+    // a live transport immediately, without manufacturing an audit log event.
+    let connected = tokio_stream::once(Ok(Event::default().comment("connected")));
+    Sse::new(connected.chain(stream)).keep_alive(KeepAlive::default())
 }
 
 /// `GET /api/status` — aggregated request statistics.
@@ -451,6 +454,45 @@ mod tests {
             }),
             dir,
         )
+    }
+
+    #[tokio::test]
+    async fn quiet_log_stream_starts_without_fabricating_audit_events() {
+        let (state, _dir) = test_state();
+        let mut body = get_logs_stream(State(state.clone()))
+            .await
+            .into_response()
+            .into_body()
+            .into_data_stream();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(1), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.as_ref(), b": connected\n\n");
+        state
+            .event_tx
+            .send(LogEvent {
+                timestamp: "fixture-time".into(),
+                method: "GET".into(),
+                domain: "stream.example.test".into(),
+                path: "/fixture".into(),
+                action: "deny".into(),
+                reason: "synthetic".into(),
+            })
+            .unwrap();
+        let next = tokio::time::timeout(std::time::Duration::from_secs(1), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let data = std::str::from_utf8(&next)
+            .unwrap()
+            .strip_prefix("data: ")
+            .unwrap()
+            .trim();
+        let event: serde_json::Value = serde_json::from_str(data).unwrap();
+        assert_eq!(event["domain"], "stream.example.test");
     }
 
     /// Send a GET request to the router and parse the JSON response body.

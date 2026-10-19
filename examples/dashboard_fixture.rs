@@ -11,6 +11,10 @@ async fn main() -> anyhow::Result<()> {
     let origin = std::env::args()
         .nth(1)
         .expect("provide the browser test parent origin");
+    let event_delay_ms: u64 = std::env::args()
+        .nth(2)
+        .map(|value| value.parse().expect("fixture event delay in milliseconds"))
+        .unwrap_or(250);
     let (event_tx, _) = tokio::sync::broadcast::channel(16);
     let pool = logging::open_memory_pool()?;
     logging::log_request(
@@ -71,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .map_err(anyhow::Error::msg)?;
     tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(event_delay_ms)).await;
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             let _ = event_tx.send(logging::LogEvent {

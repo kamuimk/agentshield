@@ -6,7 +6,9 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 
-const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const engines = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const browserType = engines[process.env.AGENTSHIELD_BROWSER || 'chromium'];
+assert.ok(browserType, 'supported browser engine required');
 const adapter = await readFile(new URL('./dashboard-host.mjs', import.meta.url));
 const host = createServer((request, response) => {
     response.setHeader('content-type', request.url === '/adapter.mjs' ? 'text/javascript' : 'text/html');
@@ -15,7 +17,7 @@ const host = createServer((request, response) => {
 host.listen(0, '127.0.0.1');
 await once(host, 'listening');
 const parent = `http://127.0.0.1:${host.address().port}`;
-const fixture = spawn(fileURLToPath(new URL('../target/debug/examples/dashboard_fixture', import.meta.url)), [parent], { stdio: ['ignore', 'pipe', 'inherit'] });
+const fixture = spawn(process.env.AGENTSHIELD_DASHBOARD_FIXTURE || fileURLToPath(new URL('../target/debug/examples/dashboard_fixture', import.meta.url)), [parent, '10000'], { stdio: ['ignore', 'pipe', 'inherit'] });
 let browser;
 try {
     const url = await Promise.race([
@@ -27,7 +29,7 @@ try {
         }),
         new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('fixture startup timeout')), 10000); timer.unref(); }),
     ]);
-    browser = await chromium.launch({ headless: true });
+    browser = await browserType.launch({ headless: true });
     const page = await browser.newPage();
     const errors = [];
     const urls = [];
@@ -45,7 +47,9 @@ try {
     assert.deepEqual(manifest.capabilities, ['observe']);
     assert.equal(manifest.protection.system_egress_enforced, false);
     let frame = page.frames().find((frame) => frame.url() === `${url}/embed`);
-    await frame.waitForFunction(() => document.getElementById('connectionStatus').textContent === 'Connected');
+    // A quiet stream must become connected before the first audit event.
+    await frame.waitForFunction(() => document.getElementById('connectionStatus').textContent === 'Connected', null, { timeout: 4000 });
+    assert.equal(await frame.evaluate(() => document.getElementById('logTableBody').textContent.includes('stream.example.test')), false, 'connection must precede the first audit event');
     await frame.waitForFunction(() => document.getElementById('logTableBody').textContent.includes('stream.example.test'));
     assert.equal(await frame.locator('#policySaveButton').isVisible(), false);
     assert.equal(await frame.locator('#policyEditor').evaluate((element) => element.readOnly), true);
@@ -65,6 +69,15 @@ try {
     assert.equal(await page.locator('iframe').count(), 1);
     await page.evaluate(() => window.shield.dispose());
     assert.equal(await page.locator('iframe').count(), 0);
+    // A transport that never supplies response headers must not leave the UI waiting forever.
+    await page.route('**/api/logs/stream', () => {});
+    await mount(reader);
+    frame = page.frames().find((frame) => frame.url() === `${url}/embed`);
+    await frame.waitForFunction(() => document.getElementById('connectionStatus').textContent === 'Disconnected', null, { timeout: 12000 });
+    await page.unroute('**/api/logs/stream');
+    await frame.waitForFunction(() => document.getElementById('connectionStatus').textContent === 'Connected', null, { timeout: 7000 });
+    await frame.waitForFunction(() => document.getElementById('logTableBody').textContent.includes('stream.example.test'));
+    await page.evaluate(() => window.shield.dispose());
     const controlManifest = await mount(control);
     assert.deepEqual(controlManifest.capabilities, ['observe', 'policy:write', 'ask:resolve']);
     frame = page.frames().find((frame) => frame.url() === `${url}/embed`);

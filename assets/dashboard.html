@@ -435,9 +435,16 @@
     function openStream(path, onMessage, onOpen = () => {}) {
         const controller = new AbortController();
         streamControllers.add(controller);
+        let headerTimedOut = false;
+        // Bound only stream startup. A connected, quiet stream may stay open indefinitely.
+        const headerTimer = setTimeout(() => {
+            headerTimedOut = true;
+            controller.abort();
+        }, 10000);
         (async () => {
             try {
                 const response = await apiFetch(`${API_BASE}${path}`, { signal: controller.signal });
+                clearTimeout(headerTimer);
                 if (!response.ok || !response.body) throw new Error('stream unavailable');
                 if (!dashboardStarted) return;
                 onOpen();
@@ -464,10 +471,11 @@
                     }
                 }
             } catch (error) {
-                if (controller.signal.aborted) return;
+                if (controller.signal.aborted && !headerTimedOut) return;
             } finally {
+                clearTimeout(headerTimer);
                 streamControllers.delete(controller);
-                if (dashboardStarted && !controller.signal.aborted) {
+                if (dashboardStarted && (!controller.signal.aborted || headerTimedOut)) {
                     document.getElementById('connectionStatus').textContent = 'Disconnected';
                     document.getElementById('connectionStatus').className = 'text-sm text-red-400';
                     const timer = setTimeout(() => {
