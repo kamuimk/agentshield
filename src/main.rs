@@ -94,12 +94,14 @@ async fn main() -> anyhow::Result<()> {
             owned_listener_stdin,
             listener_proof_pipe,
             immutable_policy,
+            managed_proof_pipe,
         } => {
             cmd_start(
                 &cli.config,
                 owned_listener_stdin,
                 listener_proof_pipe,
                 immutable_policy,
+                managed_proof_pipe,
             )
             .await?;
         }
@@ -607,8 +609,21 @@ async fn cmd_start(
     owned_listener_stdin: bool,
     proof_pipe: Option<String>,
     immutable_policy: bool,
+    managed_proof_pipe: Option<String>,
 ) -> anyhow::Result<()> {
-    let config = AppConfig::load_from_path(config_path)?;
+    if managed_proof_pipe.is_some()
+        && (!immutable_policy || !owned_listener_stdin || proof_pipe.is_some())
+    {
+        return Err(anyhow::anyhow!(
+            "managed_proof_requires_owned_immutable_startup"
+        ));
+    }
+    let (config, digest) = if managed_proof_pipe.is_some() {
+        let snapshot = agentshield::policy::managed_snapshot::ManagedSnapshot::load(config_path)?;
+        (snapshot.config, Some(snapshot.sha256))
+    } else {
+        (AppConfig::load_from_path(config_path)?, None)
+    };
     let listener = if owned_listener_stdin {
         Some(agentshield::proxy::owned_listener::from_private_stdin(
             &config.proxy.listen,
@@ -616,7 +631,19 @@ async fn cmd_start(
     } else {
         None
     };
-    let proof = if let Some(pipe) = proof_pipe {
+    let proof = if let Some(pipe) = managed_proof_pipe {
+        let address = listener
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("managed_proof_requires_owned_listener"))?
+            .local_addr()?;
+        Some(
+            agentshield::proxy::listener_proof::ListenerProof::from_managed_system_pipe(
+                &pipe,
+                address,
+                digest.ok_or_else(|| anyhow::anyhow!("managed_configuration_missing"))?,
+            )?,
+        )
+    } else if let Some(pipe) = proof_pipe {
         let address = listener
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("listener_proof_requires_owned_listener"))?

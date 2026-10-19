@@ -6,4 +6,5 @@
 
 pub mod config;
 pub mod evaluator;
+pub mod managed_snapshot;
 pub mod reload;

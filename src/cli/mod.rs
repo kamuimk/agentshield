@@ -48,6 +48,9 @@ pub enum Commands {
         /// Freeze the startup policy; disable reload and dashboard control.
         #[arg(long)]
         immutable_policy: bool,
+        /// Bind an immutable exact-byte configuration to a privileged v2 proof.
+        #[arg(long, requires_all = ["owned_listener_stdin", "immutable_policy"], conflicts_with = "listener_proof_pipe")]
+        managed_proof_pipe: Option<String>,
     },
     /// Stop the proxy server
     Stop,
@@ -165,6 +168,35 @@ pub enum PolicyAction {
 #[cfg(test)]
 mod listener_proof_args_tests {
     use super::*;
+    #[test]
+    fn managed_proof_requires_owned_immutable_startup_and_excludes_v1() {
+        for extra in [
+            vec![],
+            vec!["--owned-listener-stdin"],
+            vec!["--immutable-policy"],
+            vec![
+                "--owned-listener-stdin",
+                "--immutable-policy",
+                "--listener-proof-pipe",
+                "other",
+            ],
+        ] {
+            let mut args = vec!["agentshield", "start", "--managed-proof-pipe", "fixture"];
+            args.extend(extra);
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        assert!(
+            Cli::try_parse_from([
+                "agentshield",
+                "start",
+                "--managed-proof-pipe",
+                "fixture",
+                "--owned-listener-stdin",
+                "--immutable-policy"
+            ])
+            .is_ok()
+        );
+    }
     #[test]
     fn proof_pipe_cannot_be_enabled_without_owned_socket_import() {
         let pipe = r"\\.\pipe\AgentShield.ListenerProof.v1.00000000000000000000000000000000";

@@ -26,6 +26,10 @@ execution or credential release. A trusted library caller retaining a mutable
 policy Arc remains responsible for its own mutation boundary; this CLI mode does
 not turn that Arc into an immutable library type.
 
+Windows hosts can combine this mode with [managed startup proof v2](managed-proof.md)
+to bind the exact literal TOML snapshot through the privileged challenge channel.
+That proof still requires separate semantic policy/dependency and OS admission checks.
+
 Automated tests start actual CLI processes in both modes, with standalone and
 integrated dashboards. They attempt administrator policy updates, change the
 configuration file, send SIGHUP on Unix, and check the active policy and real

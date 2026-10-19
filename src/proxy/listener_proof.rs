@@ -13,8 +13,12 @@ use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
 pub const PATH: &str = "/.__agentshield/listener-proof/v1";
+/// Reserved endpoint for an immutable, exact-configuration CLI startup proof.
+pub const MANAGED_PATH: &str = "/.__agentshield/managed-proof/v2";
 const DOMAIN: &[u8] = b"agentshield.listener-proof.v1\0";
+const MANAGED_DOMAIN: &[u8] = b"agentshield.managed-proof.v2\0";
 const PIPE_PREFIX: &str = r"\\.\pipe\AgentShield.ListenerProof.v1.";
+const MANAGED_PIPE_PREFIX: &str = r"\\.\pipe\AgentShield.ManagedProof.v2.";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +33,33 @@ impl Drop for Frame {
         self.key.zeroize();
         self.nonce.zeroize();
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedFrame {
+    v: u8,
+    key: String,
+    nonce: String,
+    port: u16,
+    #[serde(rename = "configSha256")]
+    config_sha256: String,
+}
+impl Drop for ManagedFrame {
+    fn drop(&mut self) {
+        self.key.zeroize();
+        self.nonce.zeroize();
+        self.config_sha256.zeroize();
+    }
+}
+
+fn valid_pipe_name(path: &str, prefix: &str) -> bool {
+    path.strip_prefix(prefix).is_some_and(|tail| {
+        tail.len() == 32
+            && tail
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
 }
 
 fn rejected(stage: &'static str) -> io::Error {
@@ -56,6 +87,7 @@ pub struct ListenerProof {
     nonce: [u8; 32],
     key: Mutex<Option<Zeroizing<[u8; 32]>>>,
     expires: Instant,
+    configuration: Option<[u8; 32]>,
 }
 impl ListenerProof {
     fn from_frame(raw: &[u8], address: SocketAddr) -> io::Result<Self> {
@@ -78,22 +110,57 @@ impl ListenerProof {
             nonce,
             key: Mutex::new(Some(key)),
             expires: Instant::now() + Duration::from_secs(30),
+            configuration: None,
         })
     }
 
     /// A host must authenticate the exact connecting engine process before sending
     /// the frame. SYSTEM ownership alone does not authenticate the client to host.
     pub fn from_system_pipe(path: &str, address: SocketAddr) -> io::Result<Self> {
-        if !path.strip_prefix(PIPE_PREFIX).is_some_and(|tail| {
-            tail.len() == 32
-                && tail
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        }) {
+        if !valid_pipe_name(path, PIPE_PREFIX) {
             return Err(rejected("listener_proof_pipe_name_invalid"));
         }
         let raw = read_system_frame(path)?;
         Self::from_frame(&raw, address)
+    }
+
+    fn from_managed_frame(raw: &[u8], address: SocketAddr, digest: [u8; 32]) -> io::Result<Self> {
+        if raw.len() > 512
+            || !address.is_ipv4()
+            || address.ip() != std::net::Ipv4Addr::LOCALHOST
+            || address.port() == 0
+        {
+            return Err(rejected("managed_proof_frame_invalid"));
+        }
+        let frame: ManagedFrame =
+            serde_json::from_slice(raw).map_err(|_| rejected("managed_proof_frame_invalid"))?;
+        if frame.v != 2 || frame.port != address.port() {
+            return Err(rejected("managed_proof_frame_invalid"));
+        }
+        if !bool::from(hex32(&frame.config_sha256)?.ct_eq(&digest)) {
+            return Err(rejected("managed_proof_configuration_mismatch"));
+        }
+        Ok(Self {
+            address,
+            nonce: hex32(&frame.nonce)?,
+            key: Mutex::new(Some(Zeroizing::new(hex32(&frame.key)?))),
+            expires: Instant::now() + Duration::from_secs(30),
+            configuration: Some(digest),
+        })
+    }
+
+    /// Bind a privileged host's expected configuration digest to the exact bytes
+    /// parsed by a pinned CLI. The CLI must enforce immutable policy for v2.
+    pub fn from_managed_system_pipe(
+        path: &str,
+        address: SocketAddr,
+        digest: [u8; 32],
+    ) -> io::Result<Self> {
+        if !valid_pipe_name(path, MANAGED_PIPE_PREFIX) {
+            return Err(rejected("managed_proof_pipe_name_invalid"));
+        }
+        let raw = read_system_frame(path)?;
+        Self::from_managed_frame(&raw, address, digest)
     }
 
     pub(super) fn binds(&self, address: SocketAddr) -> bool {
@@ -117,7 +184,12 @@ impl ListenerProof {
     pub(super) fn response(&self, raw: &[u8], local: SocketAddr) -> Option<Vec<u8>> {
         let first = raw.split(|b| *b == b'\n').next()?;
         let line = std::str::from_utf8(first).ok()?;
-        if line.split_ascii_whitespace().nth(1) != Some(PATH) {
+        let (path, domain) = if self.configuration.is_some() {
+            (MANAGED_PATH, MANAGED_DOMAIN)
+        } else {
+            (PATH, DOMAIN)
+        };
+        if line.split_ascii_whitespace().nth(1) != Some(path) {
             return None;
         }
         let reject = |code| {
@@ -168,8 +240,11 @@ impl ListenerProof {
             return reject(410);
         };
         let mut mac = Hmac::<Sha256>::new_from_slice(&key[..]).expect("fixed HMAC key size");
-        mac.update(DOMAIN);
+        mac.update(domain);
         mac.update(&self.address.port().to_be_bytes());
+        if let Some(digest) = &self.configuration {
+            mac.update(digest);
+        }
         mac.update(&self.nonce);
         let tag: String = mac
             .finalize()
@@ -329,6 +404,81 @@ mod tests {
     }
     fn status(response: Option<Vec<u8>>) -> String {
         String::from_utf8(response.unwrap()).unwrap()
+    }
+
+    fn managed_frame() -> Vec<u8> {
+        format!(
+            r#"{{"v":2,"key":"{}","nonce":"{}","port":443,"configSha256":"{}"}}"#,
+            "11".repeat(32),
+            "22".repeat(32),
+            "33".repeat(32)
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn managed_proof_binds_configuration_with_independent_vector_and_distinct_route() {
+        let proof =
+            ListenerProof::from_managed_frame(&managed_frame(), address(), [0x33; 32]).unwrap();
+        assert!(proof.response(&request(address()), address()).is_none());
+        let managed = String::from_utf8(request(address()))
+            .unwrap()
+            .replace(PATH, MANAGED_PATH)
+            .into_bytes();
+        let response = status(proof.response(&managed, address()));
+        assert!(response.starts_with("HTTP/1.1 200"));
+        // Independent Python HMAC: domain-v2 || uint16_be(443) || 0x33*32 || 0x22*32.
+        assert!(
+            response.contains("933bba5c6ec62267d5c268225a68b642c9ab966b616be37de9441ecf5923a78e")
+        );
+        assert!(!response.contains(&"11".repeat(32)) && !response.contains(&"33".repeat(32)));
+        assert!(status(proof.response(&managed, address())).starts_with("HTTP/1.1 410"));
+    }
+
+    #[test]
+    fn managed_proof_rejects_wrong_snapshot_and_protocol_confusion_before_startup() {
+        assert_eq!(
+            ListenerProof::from_managed_frame(&managed_frame(), address(), [0x44; 32])
+                .err()
+                .unwrap()
+                .to_string(),
+            "managed_proof_configuration_mismatch"
+        );
+        assert!(ListenerProof::from_frame(&managed_frame(), address()).is_err());
+        assert!(ListenerProof::from_managed_frame(&frame(443), address(), [0x33; 32]).is_err());
+        let valid = String::from_utf8(managed_frame()).unwrap();
+        for raw in [
+            valid.replace("\"v\":2", "\"v\":1"),
+            valid.replace("\"port\":443", "\"port\":444"),
+            valid.replace("\"v\":2", "\"unknown\":true,\"v\":2"),
+            valid.replace("\"v\":2", "\"v\":2,\"v\":2"),
+            valid.replace(&"33".repeat(32), "invalid"),
+            " ".repeat(513),
+        ] {
+            let error = ListenerProof::from_managed_frame(raw.as_bytes(), address(), [0x33; 32])
+                .err()
+                .unwrap();
+            assert!(!error.to_string().contains(&"11".repeat(32)));
+        }
+        assert!(
+            ListenerProof::from_managed_frame(
+                &managed_frame(),
+                "0.0.0.0:443".parse().unwrap(),
+                [0x33; 32]
+            )
+            .is_err()
+        );
+        assert_eq!(
+            ListenerProof::from_managed_system_pipe(
+                &(PIPE_PREFIX.to_owned() + &"0".repeat(32)),
+                address(),
+                [0x33; 32]
+            )
+            .err()
+            .unwrap()
+            .to_string(),
+            "managed_proof_pipe_name_invalid"
+        );
     }
 
     #[test]
