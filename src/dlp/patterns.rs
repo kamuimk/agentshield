@@ -138,11 +138,11 @@ impl RegexScanner {
 
         // === Cloud & Infrastructure Keys ===
 
-        // AWS Access Key ID
+        // AWS long-term and STS access-key IDs, including case-folded DNS labels.
         patterns.insert(
             "aws-access-key".to_string(),
             PatternDef {
-                regex: Regex::new(r"AKIA[0-9A-Z]{16}").unwrap(),
+                regex: Regex::new(r"(?i-u:(?:AKIA|ASIA)[0-9A-Z]{16})").unwrap(),
                 severity: Severity::Critical,
             },
         );
@@ -495,6 +495,21 @@ mod tests {
             .find(|f| f.pattern_name == "aws-access-key")
             .expect("should detect aws-access-key");
         assert_eq!(finding.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn detects_aws_static_and_temporary_keys_after_hostname_case_folding() {
+        let scanner = RegexScanner::new();
+        for key in [
+            "AKIAIOSFODNN7EXAMPLE",
+            "akiaiosfodnn7example",
+            "ASIAIOSFODNN7EXAMPLE",
+            "asiaiosfodnn7example",
+        ] {
+            let findings = scanner.scan(format!("{key}.example.test").as_bytes());
+            assert!(findings.iter().any(|f| f.pattern_name == "aws-access-key" && f.severity == Severity::Critical),
+                    "AWS synthetic hostname credential was not classified");
+        }
     }
 
     #[test]

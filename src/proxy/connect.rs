@@ -1373,6 +1373,67 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn aws_hostname_credentials_never_reach_approval_metadata() {
+        use crate::ask::{AskRequestInfo, AskResponder};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Approver(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl AskResponder for Approver {
+            async fn prompt(&self, _request: &AskRequestInfo) -> Option<bool> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Some(true)
+            }
+            async fn notify_resolved(&self, _id: &str, _allowed: bool) {}
+            fn name(&self) -> &str {
+                "synthetic-approval-fixture"
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut approvals = AskBroadcaster::new(1);
+        approvals.add_responder(Arc::new(Approver(calls.clone())));
+        let scanner = Arc::new(crate::dlp::patterns::RegexScanner::new());
+        let ctx = ConnectionContext {
+            policy: None,
+            db: None,
+            ask_broadcaster: None,
+            sensitive_approval: Some(Arc::new(approvals)),
+            dlp_scanner: Some(scanner.clone()),
+            system_allowlist: None,
+            notifier: None,
+            event_tx: None,
+            rate_limiter: None,
+            mitm_enabled: false,
+            cert_cache: None,
+            upstream_tls_config: None,
+            logging_config: None,
+            network: super::super::network::NetworkConfig::default(),
+        };
+        let request = b"password=synthetic-hostname-fixture";
+        let findings = scanner.scan(request);
+        assert!(!findings.is_empty());
+        for key in ["AKIAIOSFODNN7EXAMPLE", "ASIAIOSFODNN7EXAMPLE"] {
+            let host = format!("{key}.example.test");
+            let (canonical, _) = super::super::http::authority(&host, 443).unwrap();
+            assert_eq!(canonical, host.to_ascii_lowercase());
+            assert!(
+                !approve_sensitive(&ctx, &canonical, "POST", request, &findings).await,
+                "hostname credentials must never be released through approval"
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "hostname credential reached the approval service"
+            );
+        }
+        assert!(approve_sensitive(&ctx, "example.test", "POST", request, &findings).await);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "ordinary approval positive control failed"
+        );
+    }
+
+    #[tokio::test]
     async fn denied_query_credentials_never_enter_diagnostic_output() {
         use tracing::instrument::WithSubscriber;
         #[derive(Clone)]
