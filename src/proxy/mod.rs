@@ -6,6 +6,7 @@
 //! system allowlist before being forwarded to the upstream server.
 
 pub mod connect;
+pub mod host_authentication;
 mod http;
 pub mod listener_proof;
 pub mod network;
@@ -45,6 +46,7 @@ pub struct ProxyServer {
     db: Option<DbPool>,
     ask_broadcaster: Option<Arc<AskBroadcaster>>,
     sensitive_approval: Option<Arc<AskBroadcaster>>,
+    host_authenticator: Option<Arc<dyn host_authentication::HostAuthenticator>>,
     dlp_scanner: Option<Arc<dyn DlpScanner>>,
     system_allowlist: Option<Arc<Vec<String>>>,
     notifier: Option<Arc<dyn Notifier>>,
@@ -66,6 +68,7 @@ impl ProxyServer {
             db: None,
             ask_broadcaster: None,
             sensitive_approval: None,
+            host_authenticator: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -110,6 +113,14 @@ impl ProxyServer {
     /// terminal/web ASK channel. Approval applies only to this buffered request.
     pub fn with_sensitive_approval(mut self, broadcaster: Arc<AskBroadcaster>) -> Self {
         self.sensitive_approval = Some(broadcaster);
+        self
+    }
+
+    pub fn with_host_authenticator(
+        mut self,
+        authenticator: Arc<dyn host_authentication::HostAuthenticator>,
+    ) -> Self {
+        self.host_authenticator = Some(authenticator);
         self
     }
 
@@ -201,6 +212,19 @@ impl ProxyServer {
         info!("AgentShield proxy listening on {}", local_addr);
 
         // Build upstream TLS config once for MITM mode (reused across all connections)
+        if self.host_authenticator.is_some()
+            && (!self.mitm_enabled
+                || self.cert_cache.is_none()
+                || self.dlp_scanner.is_none()
+                || self
+                    .system_allowlist
+                    .as_ref()
+                    .is_some_and(|v| !v.is_empty()))
+        {
+            return Err(crate::error::AgentShieldError::Proxy(
+                "host authentication requires complete TLS inspection".into(),
+            ));
+        }
         let upstream_tls_config = if self.mitm_enabled {
             let mut root_store = rustls::RootCertStore::empty();
             root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -221,6 +245,7 @@ impl ProxyServer {
             db: self.db.clone(),
             ask_broadcaster: self.ask_broadcaster.clone(),
             sensitive_approval: self.sensitive_approval.clone(),
+            host_authenticator: self.host_authenticator.clone(),
             dlp_scanner: self.dlp_scanner.clone(),
             system_allowlist: self.system_allowlist.clone(),
             notifier: self.notifier.clone(),

@@ -105,6 +105,10 @@ pub struct PolicyConfig {
 /// Data Loss Prevention configuration (`[dlp]` section).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DlpConfig {
+    /// Permit only a one-shot trusted-host classification of its own issuer-bound auth header.
+    /// This does not authorize the destination, body or other credential findings.
+    #[serde(default)]
+    pub host_authentication: bool,
     /// Hold any finding (including account/PII patterns) for an exact Slack DM approval.
     /// Without an authenticated Slack responder, held requests are denied.
     #[serde(default)]

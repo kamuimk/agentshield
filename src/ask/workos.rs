@@ -42,40 +42,32 @@ impl WorkosApprovalConfig {
     }
 }
 pub struct WorkosApprovalResponder {
-    config: WorkosApprovalConfig,
-    client: reqwest::Client,
+    client: super::metadata_bridge::MetadataBridgeClient,
 }
 impl WorkosApprovalResponder {
     pub fn new(config: WorkosApprovalConfig) -> Result<Self, &'static str> {
-        config.validate()?;
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(115))
-            .build()
-            .map_err(|_| "approval client unavailable")?;
-        Ok(Self { config, client })
+        Ok(Self {
+            client: super::metadata_bridge::MetadataBridgeClient::new(
+                config,
+                std::time::Duration::from_secs(115),
+            )?,
+        })
     }
 }
 #[async_trait::async_trait]
 impl AskResponder for WorkosApprovalResponder {
     async fn prompt(&self, req: &AskRequestInfo) -> Option<bool> {
         let metadata = req.approval.as_ref()?;
-        let mut response = self.client.post(&self.config.endpoint).bearer_auth(&self.config.token)
-            .json(&serde_json::json!({"requestId":req.req_id,"requestSha256":metadata.request_sha256,
-                "destination":req.domain,"method":req.method,"requestBytes":metadata.request_bytes,"categories":metadata.categories}))
-            .send().await.ok()?;
-        if !response.status().is_success() || response.content_length().is_some_and(|n| n > 4096) {
-            return Some(false);
-        }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.ok()? {
-            if bytes.len() + chunk.len() > 4096 {
-                return Some(false);
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let value = self
+            .client
+            .post(
+                "/approve",
+                &serde_json::json!({"requestId":req.req_id,
+            "requestSha256":metadata.request_sha256,"destination":req.domain,"method":req.method,
+            "requestBytes":metadata.request_bytes,"categories":metadata.categories}),
+                4096,
+            )
+            .await?;
         Some(
             value["requestId"].as_str() == Some(req.req_id.as_str())
                 && value["requestSha256"].as_str() == Some(metadata.request_sha256.as_str())
@@ -123,11 +115,17 @@ mod tests {
     async fn metadata_only_and_digest_bound() {
         use axum::{Json, Router, routing::post};
         for wrong_digest in [false, true] {
-            let app = Router::new().route("/approve", post(move |headers: axum::http::HeaderMap, Json(value): Json<serde_json::Value>| async move {
-                assert_eq!(headers["authorization"], format!("Bearer {}", "t".repeat(40)));
+            let app = Router::new().route("/approve", post(move |headers: axum::http::HeaderMap, raw: axum::body::Bytes| async move {
+                let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+                let challenge = headers[crate::ask::metadata_bridge::CHALLENGE].to_str().unwrap();
+                assert_eq!(headers["authorization"], format!("AgentShield-Metadata {}", crate::ask::metadata_bridge::request_tag(&"t".repeat(40), "/approve", challenge, &raw)));
+                assert!(!headers["authorization"].to_str().unwrap().contains(&"t".repeat(40)));
                 assert!(value.get("body").is_none()); assert!(value.get("path").is_none());
                 assert!(!value.to_string().contains("SYNTHETIC_SECRET_VALUE"));
-                Json(serde_json::json!({"requestId":value["requestId"], "requestSha256": if wrong_digest { serde_json::json!("b".repeat(64)) } else { value["requestSha256"].clone() }, "approved":true}))
+                let response = serde_json::json!({"requestId":value["requestId"], "requestSha256": if wrong_digest { serde_json::json!("b".repeat(64)) } else { value["requestSha256"].clone() }, "approved":true});
+                let bytes = serde_json::to_vec(&response).unwrap();
+                let proof = crate::ask::metadata_bridge::response_tag(&"t".repeat(40), "/approve", challenge, &raw, &bytes);
+                ([(crate::ask::metadata_bridge::PROOF, proof)], Json(response))
             }));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = format!("http://{}/approve", listener.local_addr().unwrap());

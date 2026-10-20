@@ -257,6 +257,7 @@ async fn manifest(Extension(access): Extension<Access>) -> impl IntoResponse {
     };
     axum::Json(serde_json::json!({
         "protocol": "agentshield.dashboard.v1", "version": env!("CARGO_PKG_VERSION"),
+        "hostAuthentication": "header-intent.v1",
         "dashboard": "/embed", "capabilities": capabilities,
         "protection": { "mode": "proxy", "system_egress_enforced": false },
         "streams": { "logs": "/api/logs/stream", "ask": "/api/ask/stream" }
