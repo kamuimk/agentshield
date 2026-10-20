@@ -39,6 +39,9 @@ jobs:
       - name: Test the native Windows engine
         run: cargo test --all --locked
 
+      - name: Reject a non-SYSTEM listener-proof pipe
+        run: cargo test --lib --locked regular_owner_pipe_is_rejected_before_any_frame_read -- --ignored
+
       - name: Build the native Windows engine
         run: cargo build --release --locked --bin agentshield
 

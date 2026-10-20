@@ -92,8 +92,18 @@ async fn main() -> anyhow::Result<()> {
         Commands::Start {
             daemon: _,
             owned_listener_stdin,
+            listener_proof_pipe,
+            immutable_policy,
+            managed_proof_pipe,
         } => {
-            cmd_start(&cli.config, owned_listener_stdin).await?;
+            cmd_start(
+                &cli.config,
+                owned_listener_stdin,
+                listener_proof_pipe,
+                immutable_policy,
+                managed_proof_pipe,
+            )
+            .await?;
         }
         Commands::Stop => {
             cmd_stop()?;
@@ -199,6 +209,8 @@ async fn start_proxy_server(
     config: &AppConfig,
     config_path: &Path,
     listener: Option<tokio::net::TcpListener>,
+    proof: Option<agentshield::proxy::listener_proof::ListenerProof>,
+    immutable_policy: bool,
 ) -> anyhow::Result<ProxyHandle> {
     if let Some(approval) = &config.workos_approval {
         approval.validate().map_err(anyhow::Error::msg)?;
@@ -364,6 +376,10 @@ async fn start_proxy_server(
         .with_ask_broadcaster(broadcaster)
         .with_event_channel(event_tx.clone());
 
+    if let Some(proof) = proof {
+        server = server.with_listener_proof(proof);
+    }
+
     if let Some(limiter) = rate_limiter {
         server = server.with_rate_limiter(limiter);
     }
@@ -518,8 +534,14 @@ async fn start_proxy_server(
             };
             let listen = web_config.listen.clone();
             let app = if let Some(integration) = &web_config.integration {
-                web::integration::router(web_state, ask_state, integration.clone())
-                    .map_err(anyhow::Error::msg)?
+                let build = if immutable_policy {
+                    web::integration::read_only_router
+                } else {
+                    web::integration::router
+                };
+                build(web_state, ask_state, integration.clone()).map_err(anyhow::Error::msg)?
+            } else if immutable_policy {
+                web::read_only_router(web_state)
             } else {
                 web::full_router(web_state, ask_state)
             };
@@ -540,13 +562,19 @@ async fn start_proxy_server(
     }
 
     // Policy hot-reload: file watcher + SIGHUP handler
-    let watcher = reload::start_file_watcher(config_path.to_path_buf(), policy.clone())
-        .map_err(|e| {
-            warn!("Failed to start config file watcher: {}", e);
-            e
-        })
-        .ok();
-    reload::start_sighup_handler(config_path.to_path_buf(), policy);
+    let watcher = if immutable_policy {
+        reload::start_immutable_sighup_handler();
+        None
+    } else {
+        let watcher = reload::start_file_watcher(config_path.to_path_buf(), policy.clone())
+            .map_err(|e| {
+                warn!("Failed to start config file watcher: {}", e);
+                e
+            })
+            .ok();
+        reload::start_sighup_handler(config_path.to_path_buf(), policy);
+        watcher
+    };
 
     Ok(ProxyHandle {
         addr,
@@ -576,8 +604,26 @@ async fn shutdown_requested() -> anyhow::Result<()> {
 }
 
 /// Start the proxy and block until Ctrl-C, then shut down gracefully.
-async fn cmd_start(config_path: &Path, owned_listener_stdin: bool) -> anyhow::Result<()> {
-    let config = AppConfig::load_from_path(config_path)?;
+async fn cmd_start(
+    config_path: &Path,
+    owned_listener_stdin: bool,
+    proof_pipe: Option<String>,
+    immutable_policy: bool,
+    managed_proof_pipe: Option<String>,
+) -> anyhow::Result<()> {
+    if managed_proof_pipe.is_some()
+        && (!immutable_policy || !owned_listener_stdin || proof_pipe.is_some())
+    {
+        return Err(anyhow::anyhow!(
+            "managed_proof_requires_owned_immutable_startup"
+        ));
+    }
+    let (config, digest) = if managed_proof_pipe.is_some() {
+        let snapshot = agentshield::policy::managed_snapshot::ManagedSnapshot::load(config_path)?;
+        (snapshot.config, Some(snapshot.sha256))
+    } else {
+        (AppConfig::load_from_path(config_path)?, None)
+    };
     let listener = if owned_listener_stdin {
         Some(agentshield::proxy::owned_listener::from_private_stdin(
             &config.proxy.listen,
@@ -585,7 +631,29 @@ async fn cmd_start(config_path: &Path, owned_listener_stdin: bool) -> anyhow::Re
     } else {
         None
     };
-    let handle = start_proxy_server(&config, config_path, listener).await?;
+    let proof = if let Some(pipe) = managed_proof_pipe {
+        let address = listener
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("managed_proof_requires_owned_listener"))?
+            .local_addr()?;
+        Some(
+            agentshield::proxy::listener_proof::ListenerProof::from_managed_system_pipe(
+                &pipe,
+                address,
+                digest.ok_or_else(|| anyhow::anyhow!("managed_configuration_missing"))?,
+            )?,
+        )
+    } else if let Some(pipe) = proof_pipe {
+        let address = listener
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("listener_proof_requires_owned_listener"))?
+            .local_addr()?;
+        Some(agentshield::proxy::listener_proof::ListenerProof::from_system_pipe(&pipe, address)?)
+    } else {
+        None
+    };
+    let handle =
+        start_proxy_server(&config, config_path, listener, proof, immutable_policy).await?;
 
     // Keep running until interrupted
     shutdown_requested().await?;
@@ -671,7 +739,7 @@ async fn cmd_wrap(
     logging::open_db(&db)?;
 
     // 7. Start proxy server
-    let handle = start_proxy_server(&config, &resolved_config_path, None).await?;
+    let handle = start_proxy_server(&config, &resolved_config_path, None, None, false).await?;
     println!("AgentShield proxy running on {}", handle.addr);
 
     // 8. Build child environment

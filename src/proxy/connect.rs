@@ -74,7 +74,16 @@ pub struct ConnectionContext {
 pub async fn accept_loop(
     listener: TcpListener,
     ctx: Arc<ConnectionContext>,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    accept_loop_with_proof(listener, ctx, shutdown_rx, None).await;
+}
+
+pub(super) async fn accept_loop_with_proof(
+    listener: TcpListener,
+    ctx: Arc<ConnectionContext>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    proof: Option<Arc<super::listener_proof::ListenerProof>>,
 ) {
     let permits = Arc::new(tokio::sync::Semaphore::new(32));
     loop {
@@ -88,9 +97,10 @@ pub async fn accept_loop(
                             continue;
                         };
                         let ctx = ctx.clone();
+                        let proof = proof.clone();
                         tokio::spawn(async move {
                             let _permit = permit;
-                            if handle_connection(stream, &ctx).await.is_err() {
+                            if handle_connection(stream, &ctx, proof.as_deref()).await.is_err() {
                                 error!("Error handling connection from (request details withheld)");
                             }
                         });
@@ -325,6 +335,7 @@ fn notify_event(ctx: &ConnectionContext, mut event: NotificationEvent) {
 async fn handle_connection(
     mut client: TcpStream,
     ctx: &ConnectionContext,
+    proof: Option<&super::listener_proof::ListenerProof>,
 ) -> crate::error::Result<()> {
     let request = match super::http::read_request(&mut client).await {
         Ok(request) => request,
@@ -333,6 +344,12 @@ async fn handle_connection(
             return Ok(());
         }
     };
+    if let Some(proof) = proof {
+        if let Some(response) = proof.response(&request, client.local_addr()?) {
+            client.write_all(&response).await?;
+            return Ok(());
+        }
+    }
     // Only parse the validated header line; bodies may be arbitrary binary.
     let line_end = request.windows(2).position(|w| w == b"\r\n").unwrap();
     let first_line = std::str::from_utf8(&request[..line_end]).unwrap();

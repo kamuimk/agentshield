@@ -7,6 +7,7 @@
 
 pub mod connect;
 mod http;
+pub mod listener_proof;
 pub mod network;
 pub mod owned_listener;
 pub mod tls;
@@ -53,6 +54,7 @@ pub struct ProxyServer {
     mitm_enabled: bool,
     logging_config: Option<LoggingConfig>,
     network: network::NetworkConfig,
+    listener_proof: Option<Arc<listener_proof::ListenerProof>>,
 }
 
 impl ProxyServer {
@@ -73,7 +75,14 @@ impl ProxyServer {
             mitm_enabled: false,
             logging_config: None,
             network: network::NetworkConfig::default(),
+            listener_proof: None,
         }
+    }
+
+    /// Attach a one-shot SYSTEM-pipe proof for this exact imported endpoint.
+    pub fn with_listener_proof(mut self, proof: listener_proof::ListenerProof) -> Self {
+        self.listener_proof = Some(Arc::new(proof));
+        self
     }
 
     /// Attach a policy configuration for request evaluation.
@@ -183,6 +192,12 @@ impl ProxyServer {
         listener: TcpListener,
     ) -> Result<(SocketAddr, tokio::sync::watch::Sender<bool>)> {
         let local_addr = listener.local_addr()?;
+        if let Some(proof) = &self.listener_proof {
+            if !proof.binds(local_addr) {
+                return Err(std::io::Error::other("listener_proof_address_mismatch").into());
+            }
+            proof.schedule_expiry();
+        }
         info!("AgentShield proxy listening on {}", local_addr);
 
         // Build upstream TLS config once for MITM mode (reused across all connections)
@@ -219,8 +234,9 @@ impl ProxyServer {
         });
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let proof = self.listener_proof.clone();
         tokio::spawn(async move {
-            connect::accept_loop(listener, ctx, shutdown_rx).await;
+            connect::accept_loop_with_proof(listener, ctx, shutdown_rx, proof).await;
         });
 
         Ok((local_addr, shutdown_tx))

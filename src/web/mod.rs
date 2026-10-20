@@ -48,8 +48,19 @@ pub struct AppState {
 /// When `auth_token` is set in `AppState`, all `/api/*` routes require
 /// a valid `Authorization: Bearer <token>` header. `GET /` is always public.
 pub fn router(state: Arc<AppState>) -> Router {
+    standalone_router(state, false)
+}
+
+fn standalone_router(state: Arc<AppState>, read_only: bool) -> Router {
     let public = Router::new()
-        .route("/", get(dashboard_handler))
+        .route(
+            "/",
+            if read_only {
+                get(read_only_dashboard_handler)
+            } else {
+                get(dashboard_handler)
+            },
+        )
         .with_state(state.clone());
 
     let api = api_router(state.clone());
@@ -64,6 +75,20 @@ pub fn router(state: Arc<AppState>) -> Router {
     };
 
     public.merge(api)
+}
+
+/// Serve authenticated observations without policy mutations or ASK endpoints.
+pub fn read_only_router(state: Arc<AppState>) -> Router {
+    standalone_router(state, true).layer(axum::middleware::from_fn(
+        |request: Request, next: Next| async move {
+            if request.method() != axum::http::Method::GET
+                && request.method() != axum::http::Method::HEAD
+            {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+            next.run(request).await
+        },
+    ))
 }
 
 /// Build the full router including ASK endpoints.
@@ -150,6 +175,14 @@ const DASHBOARD_HTML: &str = include_str!("../../assets/dashboard.html");
 /// `GET /` — serve the embedded SPA dashboard.
 async fn dashboard_handler() -> axum::response::Html<&'static str> {
     axum::response::Html(DASHBOARD_HTML)
+}
+
+fn read_only_dashboard_html() -> String {
+    DASHBOARD_HTML.replacen("<script>", "<script>window.AGENTSHIELD_READ_ONLY=true;", 1)
+}
+
+async fn read_only_dashboard_handler() -> axum::response::Html<String> {
+    axum::response::Html(read_only_dashboard_html())
 }
 
 /// Start the web server on the given address.

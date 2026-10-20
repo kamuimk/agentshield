@@ -23,6 +23,10 @@ fn config() -> IntegrationConfig {
 }
 
 fn app() -> axum::Router {
+    app_with_read_only(false)
+}
+
+fn app_with_read_only(read_only: bool) -> axum::Router {
     let (event_tx, _) = tokio::sync::broadcast::channel(8);
     let state = Arc::new(AppState {
         db: Some(logging::open_memory_pool().unwrap()),
@@ -38,7 +42,64 @@ fn app() -> axum::Router {
         pending: Default::default(),
         ask_event_tx,
     };
-    web::integration::router(state, asks, config()).unwrap()
+    if read_only {
+        web::integration::read_only_router(state, asks, config()).unwrap()
+    } else {
+        web::integration::router(state, asks, config()).unwrap()
+    }
+}
+
+#[tokio::test]
+async fn immutable_integration_keeps_observation_but_removes_all_control_credentials() {
+    for token in [ADMIN, CONTROL, READER] {
+        let app = app_with_read_only(true);
+        let request = |method: &str, path: &str, body: Body| {
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap()
+        };
+        let result = app
+            .clone()
+            .oneshot(request(
+                "PUT",
+                "/api/policy",
+                Body::from(r#"{"default":"allow","rules":[]}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result.status(), StatusCode::FORBIDDEN);
+        for (method, path) in [("POST", "/api/ask/id/allow"), ("GET", "/api/ask/pending")] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(request(method, path, Body::empty()))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+        for path in ["/api/policy", "/api/integration"] {
+            let result = app
+                .clone()
+                .oneshot(request("GET", path, Body::empty()))
+                .await
+                .unwrap();
+            assert_eq!(result.status(), StatusCode::OK);
+            let raw = axum::body::to_bytes(result.into_body(), 8192)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+            if path == "/api/policy" {
+                assert_eq!(value["default"], "deny");
+            } else {
+                assert_eq!(value["capabilities"], serde_json::json!(["observe"]));
+            }
+        }
+    }
 }
 
 async fn send(method: &str, path: &str, token: Option<&str>) -> axum::response::Response {

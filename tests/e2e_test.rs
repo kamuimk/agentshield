@@ -23,7 +23,10 @@ async fn start_mock_server() -> SocketAddr {
                 tokio::spawn(async move {
                     let mut buf = [0u8; 4096];
                     let _ = stream.read(&mut buf).await;
-                    let response = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+                    // Each mock connection serves one response. Tell the client
+                    // before closing so a following request cannot reuse it.
+                    let response =
+                        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello";
                     let _ = stream.write_all(response.as_bytes()).await;
                 });
             }
