@@ -88,8 +88,8 @@ async fn main() -> anyhow::Result<()> {
     );
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     anyhow::ensure!(
-        args.len() == 3,
-        "usage: inspection_fixture <private-ca-dir> <synthetic-upstream-cert> <loopback-port>"
+        (args.len() == 3 || args.len() == 4),
+        "usage: inspection_fixture <private-ca-dir> <synthetic-upstream-cert> <loopback-port> [private-authority-json]"
     );
     let upstream_port: u16 = args[2]
         .to_str()
@@ -128,10 +128,31 @@ async fn main() -> anyhow::Result<()> {
             rate_limit: None,
         }],
     };
+    let host_authenticator: Option<
+        Arc<dyn agentshield::proxy::host_authentication::HostAuthenticator>,
+    > = if args.len() == 4 {
+        use std::io::Read;
+        let file = std::fs::File::open(&args[3])
+            .map_err(|_| anyhow::anyhow!("invalid fixture authority"))?;
+        anyhow::ensure!(file.metadata()?.is_file(), "invalid fixture authority");
+        let mut raw = zeroize::Zeroizing::new(Vec::new());
+        file.take(8193).read_to_end(&mut raw)?;
+        anyhow::ensure!(raw.len() <= 8192, "invalid fixture authority");
+        let config = serde_json::from_slice(&raw)
+            .map_err(|_| anyhow::anyhow!("invalid fixture authority"))?;
+        Some(Arc::new(
+            agentshield::proxy::host_authentication::HostAuthenticationClient::new(config)
+                .map_err(|_| anyhow::anyhow!("invalid fixture authority"))?,
+        ))
+    } else {
+        None
+    };
+    let host_authentication_enabled = host_authenticator.is_some();
     let context = Arc::new(ConnectionContext {
         policy: Some(Arc::new(RwLock::new(policy))),
         db: None,
         ask_broadcaster: None,
+        host_authenticator,
         sensitive_approval: Some(Arc::new(approval)),
         dlp_scanner: Some(Arc::new(RegexScanner::new())),
         system_allowlist: None,
@@ -152,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let task = tokio::spawn(accept_loop(listener, context, stopped));
     emit(
-        json!({"type":"ready", "proxy":format!("http://{address}"), "ca":ca_dir.join("cert.pem")}),
+        json!({"type":"ready", "proxy":format!("http://{address}"), "ca":ca_dir.join("cert.pem"), "hostAuthentication":host_authentication_enabled}),
     )
     .await;
     let mut input = BufReader::new(tokio::io::stdin());

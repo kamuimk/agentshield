@@ -10,6 +10,7 @@
 //! (fail-closed).
 
 pub mod discord;
+pub(crate) mod metadata_bridge;
 pub mod slack;
 pub mod telegram;
 pub mod terminal;

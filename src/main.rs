@@ -414,6 +414,26 @@ async fn start_proxy_server(
         }
     }
 
+    if config
+        .dlp
+        .as_ref()
+        .is_some_and(|dlp| dlp.host_authentication)
+    {
+        anyhow::ensure!(
+            config.dlp.as_ref().is_some_and(|d| d.enabled)
+                && config.proxy.mode == agentshield::policy::config::ProxyMode::Mitm,
+            "host authentication requires TLS inspection and DLP"
+        );
+        let approval = config
+            .workos_approval
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("host authentication requires local authority"))?;
+        let authenticator =
+            agentshield::proxy::host_authentication::HostAuthenticationClient::new(approval)
+                .map_err(|_| anyhow::anyhow!("host authentication unavailable"))?;
+        server = server.with_host_authenticator(Arc::new(authenticator));
+    }
+
     // Initialize DLP scanner if enabled in config
     if let Some(ref dlp_config) = config.dlp {
         if dlp_config.enabled {

@@ -43,6 +43,7 @@ pub struct ConnectionContext {
     pub ask_broadcaster: Option<Arc<AskBroadcaster>>,
     /// Dedicated Slack-only approval for sensitive request bytes.
     pub sensitive_approval: Option<Arc<AskBroadcaster>>,
+    pub host_authenticator: Option<Arc<dyn super::host_authentication::HostAuthenticator>>,
     /// DLP scanner for inspecting HTTP request bodies.
     pub dlp_scanner: Option<Arc<dyn DlpScanner>>,
     /// Domains that bypass policy and DLP evaluation.
@@ -354,6 +355,17 @@ async fn handle_connection(
     let line_end = request.windows(2).position(|w| w == b"\r\n").unwrap();
     let first_line = std::str::from_utf8(&request[..line_end]).unwrap();
     if first_line.starts_with("CONNECT ") {
+        if super::host_authentication::has_control_header(&request) {
+            reject_request(
+                &mut client,
+                ctx,
+                403,
+                "host authentication belongs inside inspected TLS",
+            )
+            .await?;
+            return Ok(());
+        }
+
         let target = first_line.split_whitespace().nth(1).unwrap_or("");
         let authority = super::http::authority(target, 443);
         let host =
@@ -798,6 +810,16 @@ async fn handle_http_request(
     raw_request: &[u8],
     ctx: &ConnectionContext,
 ) -> crate::error::Result<()> {
+    if super::host_authentication::has_control_header(raw_request) {
+        reject_request(
+            client,
+            ctx,
+            403,
+            "host authentication requires TLS inspection",
+        )
+        .await?;
+        return Ok(());
+    }
     let request_str = String::from_utf8_lossy(raw_request);
     let first_line = request_str.lines().next().unwrap_or("");
 
@@ -1206,13 +1228,37 @@ async fn handle_connect_mitm(
         return Ok(());
     }
 
+    let host_intent =
+        match super::host_authentication::intent(raw_request, domain, port, method, path) {
+            Ok(value) => value,
+            Err(reason) => {
+                reject_request(&mut client_tls, ctx, 403, reason).await?;
+                return Ok(());
+            }
+        };
+    if let Some(intent) = &host_intent {
+        let allowed = if let Some(authenticator) = &ctx.host_authenticator {
+            authenticator.authenticate(&intent.request).await
+        } else {
+            false
+        };
+        if !allowed {
+            reject_request(&mut client_tls, ctx, 403, "host authentication unavailable").await?;
+            return Ok(());
+        }
+    }
+
     // Extract body for audit logging
     let mitm_body = extract_body(raw_request);
 
     // Step 4: DLP scan
     if let Some(ref scanner) = ctx.dlp_scanner {
         {
-            let findings = scanner.scan(raw_request);
+            let findings = if let Some(intent) = &host_intent {
+                intent.findings(scanner.as_ref(), raw_request)
+            } else {
+                scanner.scan(raw_request)
+            };
             let has_critical = findings.iter().any(|f| f.severity == Severity::Critical);
             let needs_approval = ctx.sensitive_approval.is_some() && !findings.is_empty();
             let approved = if has_critical || needs_approval {
@@ -1328,7 +1374,11 @@ async fn handle_connect_mitm(
     };
 
     // Step 6: Forward decrypted request to upstream
-    if write_bounded(&mut remote_tls, &super::http::origin_form(raw_request))
+    let forward = host_intent
+        .as_ref()
+        .map(|intent| intent.forward_bytes(raw_request));
+    let forwarded = forward.as_deref().unwrap_or(raw_request);
+    if write_bounded(&mut remote_tls, &super::http::origin_form(forwarded))
         .await
         .is_err()
     {
@@ -1413,6 +1463,7 @@ mod tests {
             policy: None,
             db: None,
             ask_broadcaster: None,
+            host_authenticator: None,
             sensitive_approval: Some(Arc::new(approvals)),
             dlp_scanner: Some(scanner.clone()),
             system_allowlist: None,
@@ -1475,6 +1526,7 @@ mod tests {
             db: None,
             ask_broadcaster: None,
             sensitive_approval: None,
+            host_authenticator: None,
             dlp_scanner: Some(Arc::new(crate::dlp::patterns::RegexScanner::new())),
             system_allowlist: None,
             notifier: None,
@@ -1596,6 +1648,7 @@ mod tests {
             db: None,
             ask_broadcaster: None,
             sensitive_approval: None,
+            host_authenticator: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -1626,6 +1679,7 @@ mod tests {
             db: None,
             ask_broadcaster: None,
             sensitive_approval: None,
+            host_authenticator: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -1651,6 +1705,7 @@ mod tests {
             db: None,
             ask_broadcaster: None,
             sensitive_approval: None,
+            host_authenticator: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -1676,6 +1731,7 @@ mod tests {
             db: None,
             ask_broadcaster: None,
             sensitive_approval: None,
+            host_authenticator: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -1789,6 +1845,7 @@ mod tests {
             db: Some(pool.clone()),
             ask_broadcaster: None,
             sensitive_approval: None,
+            host_authenticator: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -1827,6 +1884,7 @@ mod tests {
             db: Some(pool.clone()),
             ask_broadcaster: None,
             sensitive_approval: None,
+            host_authenticator: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -1871,6 +1929,7 @@ mod tests {
             db: Some(pool.clone()),
             ask_broadcaster: None,
             sensitive_approval: None,
+            host_authenticator: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -1916,6 +1975,7 @@ mod tests {
             db: Some(pool.clone()),
             ask_broadcaster: None,
             sensitive_approval: None,
+            host_authenticator: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -1963,6 +2023,7 @@ mod tests {
             db: Some(pool.clone()),
             ask_broadcaster: None,
             sensitive_approval: None,
+            host_authenticator: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,
@@ -2015,6 +2076,7 @@ mod tests {
             db: None,
             ask_broadcaster: None,
             sensitive_approval: None,
+            host_authenticator: None,
             dlp_scanner: None,
             system_allowlist: None,
             notifier: None,

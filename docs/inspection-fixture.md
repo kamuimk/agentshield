@@ -40,11 +40,18 @@ A host acceptance driver can compare the approved digest with the HTTP request
 received by its TLS server, change its original body object while approval is
 pending, deny secrets, replay old decisions, allow expiry, and terminate the
 fixture while a request is held to check that the host does not fall back to
-uninspected direct traffic. Authentication headers themselves are sensitive under
-the current scanner; a benign body does not make such a request automatically
-approved.
+uninspected direct traffic. Without the optional trusted-host authentication contract below, authentication
+headers themselves are sensitive; a benign body does not make such a request
+automatically approved.
 
 These are synthetic stdio decisions. This example does not validate Slack identity,
 backend approval consumption, an installed/frozen engine receipt, native OS
 confinement, real credentials or production deployment. Host-specific source and
 fixtures belong in the host's own repository.
+
+For the optional trusted-host authentication test, provide a fourth argument:
+private JSON containing the local `endpoint` (`/approve`) and `token`. The fixture
+uses the actual authenticated metadata client for `/authenticate`; its synthetic
+human decisions remain on stdin. The ready frame advertises `hostAuthentication`.
+Keep the configuration file private and delete it after the test. Never put the
+key in argv or environment. See [the protocol](host-authentication.md).
