@@ -55,3 +55,22 @@ uses the actual authenticated metadata client for `/authenticate`; its synthetic
 human decisions remain on stdin. The ready frame advertises `hostAuthentication`.
 Keep the configuration file private and delete it after the test. Never put the
 key in argv or environment. See [the protocol](host-authentication.md).
+
+## Optional host approval transport
+
+A fifth argument, `approval-json`, switches human-decision transport from synthetic
+stdin to the production `WorkosApprovalResponder`. Its private JSON contains the
+exact IPv4 loopback `/approve` endpoint and local bridge key in `token`. The client
+uses the production challenge/MAC request and response checks; the key is neither
+sent in argv nor emitted in readiness. Pass `-` in the fourth position if the test
+does not use the separate host-authentication contract. Both configs are bounded
+to 8192 bytes and parse errors do not disclose their contents.
+
+In this mode the fixture does not emit stdio approval frames or obtain approvals
+from stdin; decisions come from the authenticated host bridge. Keep stdin open to
+retain process ownership and close it to shut down. The host integration fixture
+must prove its own identity, ledger, callback, expiry and one-shot consumption.
+This mode alone is still not proof of real human Slack consent, mTLS enrollment,
+installed OS protection or production deployment. Use synthetic credentials and
+owner-only configuration files, and remove the test CA and config on teardown.
+Loopback/default-deny network policy and upstream TLS trust remain unchanged.

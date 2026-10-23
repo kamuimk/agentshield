@@ -88,8 +88,8 @@ async fn main() -> anyhow::Result<()> {
     );
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     anyhow::ensure!(
-        (args.len() == 3 || args.len() == 4),
-        "usage: inspection_fixture <private-ca-dir> <synthetic-upstream-cert> <loopback-port> [private-authority-json]"
+        (3..=5).contains(&args.len()),
+        "usage: inspection_fixture <private-ca-dir> <synthetic-upstream-cert> <loopback-port> [private-authority-json] [private-approval-json]"
     );
     let upstream_port: u16 = args[2]
         .to_str()
@@ -114,9 +114,29 @@ async fn main() -> anyhow::Result<()> {
     .with_no_client_auth();
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
     let mut approval = AskBroadcaster::new(10);
-    approval.add_responder(Arc::new(Responder {
-        pending: pending.clone(),
-    }));
+    if args.len() == 5 {
+        use agentshield::ask::workos::{WorkosApprovalConfig, WorkosApprovalResponder};
+        use std::io::Read;
+        let file = std::fs::File::open(&args[4])
+            .map_err(|_| anyhow::anyhow!("invalid fixture approval config"))?;
+        anyhow::ensure!(
+            file.metadata()?.is_file(),
+            "invalid fixture approval config"
+        );
+        let mut raw = zeroize::Zeroizing::new(Vec::new());
+        file.take(8193).read_to_end(&mut raw)?;
+        anyhow::ensure!(raw.len() <= 8192, "invalid fixture approval config");
+        let config: WorkosApprovalConfig = serde_json::from_slice(&raw)
+            .map_err(|_| anyhow::anyhow!("invalid fixture approval config"))?;
+        approval.add_responder(Arc::new(
+            WorkosApprovalResponder::new(config)
+                .map_err(|_| anyhow::anyhow!("invalid fixture approval config"))?,
+        ));
+    } else {
+        approval.add_responder(Arc::new(Responder {
+            pending: pending.clone(),
+        }));
+    }
     let policy = PolicyConfig {
         default: Action::Deny,
         rules: vec![Rule {
@@ -130,7 +150,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let host_authenticator: Option<
         Arc<dyn agentshield::proxy::host_authentication::HostAuthenticator>,
-    > = if args.len() == 4 {
+    > = if args.len() >= 4 && args[3] != "-" {
         use std::io::Read;
         let file = std::fs::File::open(&args[3])
             .map_err(|_| anyhow::anyhow!("invalid fixture authority"))?;
