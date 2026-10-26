@@ -76,6 +76,18 @@ fn host_data_directory_is_isolated() {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // Offline inspection must not load configuration, initialize logging, create
+    // state/CA files, open a listener or contact any notification service.
+    if matches!(&cli.command, Commands::Inspect) {
+        if agentshield::cli::inspect::run(std::io::stdin().lock(), std::io::stdout().lock())
+            .is_err()
+        {
+            eprintln!("inspection_failed");
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
+
     // For `wrap` without --verbose, suppress tracing to avoid polluting child output.
     // For all other commands, use default tracing (respects RUST_LOG).
     let is_wrap_quiet = matches!(&cli.command, Commands::Wrap(args) if !args.verbose);
@@ -89,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
+        Commands::Inspect => unreachable!("handled before runtime configuration"),
         Commands::Start {
             daemon: _,
             owned_listener_stdin,
