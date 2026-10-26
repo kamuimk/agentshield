@@ -8,6 +8,7 @@
 //! - [`integrate`] — OpenClaw integration (set/remove Telegram proxy)
 
 pub mod ca;
+pub mod inspect;
 pub mod integrate;
 pub mod prompt;
 pub mod quickstart;
@@ -34,6 +35,8 @@ pub struct Cli {
 /// Available CLI subcommands.
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Inspect up to 4 MiB from stdin offline; emit category names only as JSON
+    Inspect,
     /// Start the proxy server
     Start {
         /// Run as daemon in the background
