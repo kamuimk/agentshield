@@ -367,3 +367,208 @@ async fn sensitive_approval_missing_denies_and_headers_are_inspected() {
             .is_err()
     );
 }
+
+fn exact_local(target: std::net::SocketAddr) -> NetworkConfig {
+    NetworkConfig {
+        loopback_endpoint: Some(target.to_string().parse().unwrap()),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn exact_loopback_relay_forwards_healthy_body_with_private_guard_on() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = upstream.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        let mut bytes = Vec::new();
+        let expected_body = b"{\"input\":\"hello\"}";
+        loop {
+            let mut chunk = [0; 1024];
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert!(count > 0);
+            bytes.extend_from_slice(&chunk[..count]);
+            assert!(bytes.len() <= 4096);
+            if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                if bytes.len() >= end + 4 + expected_body.len() {
+                    assert_eq!(&bytes[end + 4..], expected_body);
+                    break;
+                }
+            }
+        }
+        let request = String::from_utf8_lossy(&bytes);
+        assert!(request.starts_with("POST /responses HTTP/1.1\r\n"));
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .await
+            .unwrap();
+    });
+    let network = exact_local(target);
+    assert!(network.block_private_networks);
+    let (proxy, _stop) = ProxyServer::new("127.0.0.1:0".into())
+        .with_policy(Arc::new(RwLock::new(allow())))
+        .with_network_policy(network)
+        .with_dlp(Arc::new(RegexScanner::new()))
+        .start()
+        .await
+        .unwrap();
+    let body = "{\"input\":\"hello\"}";
+    let response = raw(proxy, format!("POST http://{target}/responses HTTP/1.1\r\nHost: {target}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.ends_with("ok"));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn exact_loopback_does_not_allow_another_port_or_dns_alias() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let other = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = upstream.local_addr().unwrap();
+    let (proxy, _stop) = ProxyServer::new("127.0.0.1:0".into())
+        .with_policy(Arc::new(RwLock::new(allow())))
+        .with_system_allowlist(vec!["*".into()])
+        .with_network_policy(exact_local(target))
+        .start()
+        .await
+        .unwrap();
+    for authority in [
+        other.local_addr().unwrap().to_string(),
+        format!("localhost:{}", target.port()),
+        format!("127.0.0.2:{}", target.port()),
+    ] {
+        let response = raw(
+            proxy,
+            format!(
+                "GET http://{authority}/ HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    }
+    for listener in [upstream, other] {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn exact_loopback_keeps_dlp_and_connect_port_guards() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = upstream.local_addr().unwrap();
+    let (proxy, _stop) = ProxyServer::new("127.0.0.1:0".into())
+        .with_policy(Arc::new(RwLock::new(allow())))
+        .with_system_allowlist(vec!["*".into()])
+        .with_network_policy(exact_local(target))
+        .with_dlp(Arc::new(RegexScanner::new()))
+        .start()
+        .await
+        .unwrap();
+    let secret = "AKIAIOSFODNN7EXAMPLE";
+    let response = raw(proxy, format!("POST http://{target}/ HTTP/1.1\r\nHost: {target}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{secret}",secret.len()).as_bytes()).await;
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    let response = raw(
+        proxy,
+        format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes(),
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), upstream.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn exact_loopback_does_not_override_policy_deny() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = upstream.local_addr().unwrap();
+    let (proxy, _stop) = ProxyServer::new("127.0.0.1:0".into())
+        .with_policy(Arc::new(RwLock::new(PolicyConfig {
+            default: Action::Deny,
+            rules: vec![],
+        })))
+        .with_network_policy(exact_local(target))
+        .with_system_allowlist(vec!["*".into()])
+        .start()
+        .await
+        .unwrap();
+    let response = raw(
+        proxy,
+        format!("GET http://{target}/ HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes(),
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), upstream.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn exact_loopback_allowlist_cannot_turn_mitm_into_an_opaque_tunnel() {
+    let dir = tempfile::tempdir().unwrap();
+    agentshield::cli::ca::generate_ca(dir.path()).unwrap();
+    let cache = Arc::new(agentshield::proxy::tls::CertCache::load(dir.path()).unwrap());
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = upstream.local_addr().unwrap();
+    let mut network = exact_local(target);
+    network.connect_ports = vec![target.port()];
+    let (proxy, _stop) = ProxyServer::new("127.0.0.1:0".into())
+        .with_policy(Arc::new(RwLock::new(allow())))
+        .with_system_allowlist(vec!["*".into()])
+        .with_network_policy(network)
+        .with_dlp(Arc::new(RegexScanner::new()))
+        .with_cert_cache(cache)
+        .start()
+        .await
+        .unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    let pem = std::fs::read(dir.path().join("cert.pem")).unwrap();
+    for cert in rustls_pemfile::certs(&mut &pem[..]) {
+        roots.add(cert.unwrap()).unwrap();
+    }
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let mut tcp = TcpStream::connect(proxy).await.unwrap();
+    tcp.write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut headers = Vec::new();
+    while !headers.ends_with(b"\r\n\r\n") {
+        headers.push(tcp.read_u8().await.unwrap());
+    }
+    assert!(headers.starts_with(b"HTTP/1.1 200"));
+    let mut tls = tokio_rustls::TlsConnector::from(Arc::new(config))
+        .connect(
+            rustls::pki_types::ServerName::IpAddress(
+                "127.0.0.1".parse::<std::net::IpAddr>().unwrap().into(),
+            ),
+            tcp,
+        )
+        .await
+        .unwrap();
+    let secret = "AKIAIOSFODNN7EXAMPLE";
+    tls.write_all(format!("POST / HTTP/1.1\r\nHost: {target}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{secret}",secret.len()).as_bytes()).await.unwrap();
+    let mut response = [0; 1024];
+    let count = tokio::time::timeout(Duration::from_secs(3), tls.read(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&response[..count]).starts_with("HTTP/1.1 403"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), upstream.accept())
+            .await
+            .is_err()
+    );
+}

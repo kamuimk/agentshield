@@ -201,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
 #[allow(dead_code)]
 struct ProxyHandle {
     addr: SocketAddr,
-    _watcher: Option<notify::RecommendedWatcher>,
+    _watcher: Option<reload::PolicyWatcher>,
     /// Send `true` to stop the accept loop (graceful shutdown).
     shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
@@ -542,6 +542,22 @@ async fn start_proxy_server(
         }
     }
 
+    // Install reload ownership before exposing proxy/dashboard readiness.
+    // Policy hot-reload: file watcher + SIGHUP handler
+    let watcher = if immutable_policy {
+        reload::start_immutable_sighup_handler();
+        None
+    } else {
+        let watcher = reload::start_file_watcher(config_path.to_path_buf(), policy.clone())
+            .map_err(|e| {
+                warn!("Failed to start config file watcher: {}", e);
+                e
+            })
+            .ok();
+        reload::start_sighup_handler(config_path.to_path_buf(), policy.clone());
+        watcher
+    };
+
     let (addr, shutdown_tx) = match listener {
         Some(listener) => server.start_with_listener(listener).await?,
         None => server.start().await?,
@@ -593,21 +609,6 @@ async fn start_proxy_server(
             });
         }
     }
-
-    // Policy hot-reload: file watcher + SIGHUP handler
-    let watcher = if immutable_policy {
-        reload::start_immutable_sighup_handler();
-        None
-    } else {
-        let watcher = reload::start_file_watcher(config_path.to_path_buf(), policy.clone())
-            .map_err(|e| {
-                warn!("Failed to start config file watcher: {}", e);
-                e
-            })
-            .ok();
-        reload::start_sighup_handler(config_path.to_path_buf(), policy);
-        watcher
-    };
 
     Ok(ProxyHandle {
         addr,

@@ -8,8 +8,8 @@
 //!
 //! Reload triggers:
 //!
-//! - **File change**: [`start_file_watcher`] uses the [`notify`] crate
-//!   to detect modifications to `agentshield.toml`.
+//! - **File change**: [`start_file_watcher`] polls one path at bounded intervals
+//!   to observe modifications to `agentshield.toml`.
 //! - **SIGHUP** (Unix only): [`start_sighup_handler`] listens for the
 //!   HUP signal for manual reload via `kill -HUP <pid>`.
 //!
@@ -19,7 +19,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, SystemTime};
 use tracing::{info, warn};
 
 use super::config::{AppConfig, PolicyConfig};
@@ -44,32 +46,77 @@ pub fn reload_policy(
     Ok(())
 }
 
-/// Start a file-system watcher that triggers [`reload_policy`] on config changes.
-///
-/// Returns a [`RecommendedWatcher`] handle that must be kept alive for the
-/// duration of the watch. Dropping the handle stops the watcher.
+/// Retained, bounded polling of one policy path, including replacement files.
+/// Dropping this owner wakes and joins its worker; immutable mode never creates it.
+pub struct PolicyWatcher {
+    stop: mpsc::Sender<()>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for PolicyWatcher {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn file_stamp(path: &Path) -> Option<(SystemTime, Option<SystemTime>, u64)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    Some((
+        metadata.modified().ok()?,
+        metadata.created().ok(),
+        metadata.len(),
+    ))
+}
+
+/// Observe metadata changes at the original path every 250ms, not an old inode.
+/// High-resolution timestamps detect same-content writes after a dashboard edit.
+/// Reload errors retain the current policy; subsequent file changes retry.
 pub fn start_file_watcher(
     config_path: PathBuf,
     policy_lock: Arc<RwLock<PolicyConfig>>,
-) -> notify::Result<RecommendedWatcher> {
-    let path = config_path.clone();
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| match res {
-        Ok(event) => {
-            if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
-                info!("Config file changed, reloading policy...");
-                if let Err(e) = reload_policy(&policy_lock, &path) {
-                    warn!("Policy reload failed (keeping old policy): {}", e);
+) -> notify::Result<PolicyWatcher> {
+    let mut previous = file_stamp(&config_path).ok_or_else(|| {
+        notify::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "policy path must be an accessible regular file",
+        ))
+    })?;
+    let (stop, receiver) = mpsc::channel();
+    let worker = thread::Builder::new()
+        .name("agentshield-policy-watch".into())
+        .spawn(move || {
+            let mut missing = false;
+            loop {
+                match receiver.recv_timeout(Duration::from_millis(250)) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                let current = file_stamp(&config_path);
+                if current.is_none() {
+                    missing = true;
+                    continue;
+                }
+                let current = current.unwrap();
+                if missing || current != previous {
+                    missing = false;
+                    previous = current;
+                    if let Err(error) = reload_policy(&policy_lock, &config_path) {
+                        warn!("Policy reload failed (keeping old policy): {}", error);
+                    }
                 }
             }
-        }
-        Err(e) => {
-            warn!("File watcher error: {}", e);
-        }
-    })?;
-
-    watcher.watch(&config_path, RecursiveMode::NonRecursive)?;
-    info!("Watching {} for changes", config_path.display());
-    Ok(watcher)
+        })
+        .map_err(notify::Error::io)?;
+    Ok(PolicyWatcher {
+        stop,
+        worker: Some(worker),
+    })
 }
 
 /// Start a SIGHUP handler that reloads the policy on signal.
@@ -226,15 +273,20 @@ action = "allow"
         // Modify the file
         std::fs::write(&path, make_toml("allow", "reloaded.com")).unwrap();
 
-        // Give the watcher time to detect the change
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        // Check if policy was reloaded
-        let p = policy.read().unwrap();
-        // Note: file watcher events may not fire instantly on all platforms
-        // so this test is best-effort; the core reload_policy test above is authoritative
-        if p.rules[0].domains[0] == "reloaded.com" {
-            assert_eq!(p.default, Action::Allow);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            {
+                let current = policy.read().unwrap();
+                if current.rules[0].domains[0] == "reloaded.com" {
+                    assert_eq!(current.default, Action::Allow);
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "policy change not observed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
 
@@ -270,6 +322,34 @@ action = "allow"
         t1.join().unwrap();
         t2.join().unwrap();
 
+        assert_eq!(policy.read().unwrap().default, Action::Allow);
+    }
+    #[test]
+    fn file_replacement_is_observed_and_drop_stops_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, make_toml("deny", "old.example")).unwrap();
+        let policy = Arc::new(RwLock::new(
+            AppConfig::load_from_path(&path).unwrap().policy,
+        ));
+        let watcher = start_file_watcher(path.clone(), policy.clone()).unwrap();
+        let replacement = dir.path().join("replacement.toml");
+        std::fs::write(&replacement, make_toml("allow", "new.example")).unwrap();
+        // A remove/create transition must keep the original path watched,
+        // rather than retaining only the replaced file's identity.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while policy.read().unwrap().default != Action::Allow {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "replacement not observed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        drop(watcher);
+        std::fs::write(&path, make_toml("deny", "after-drop.example")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(350));
         assert_eq!(policy.read().unwrap().default, Action::Allow);
     }
 }

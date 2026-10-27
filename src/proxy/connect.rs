@@ -613,7 +613,8 @@ async fn handle_connect(
     // In MITM mode, CONNECT is only a transport preflight. Apply method rules
     // to the actual decrypted request, rather than authorizing the tunnel once.
     let system_allowed =
-        is_system_allowed(domain, ctx.system_allowlist.as_deref().map(Vec::as_slice));
+        is_system_allowed(domain, ctx.system_allowlist.as_deref().map(Vec::as_slice))
+            && !ctx.network.is_loopback_relay(domain, port);
     if ctx.mitm_enabled && !system_allowed {
         let possible = ctx.policy.as_ref().is_none_or(|lock| {
             let policy = lock.read().unwrap();
@@ -645,8 +646,7 @@ async fn handle_connect(
     }
 
     // System allowlist bypass: skip policy evaluation for internal services
-    let allowlist_slice = ctx.system_allowlist.as_ref().map(|v| v.as_slice());
-    if is_system_allowed(domain, allowlist_slice) {
+    if system_allowed {
         info!("SYSTEM-ALLOW CONNECT to (request details withheld)");
         log_to_db(
             ctx,
@@ -864,13 +864,12 @@ async fn handle_http_request(
         return Ok(());
     }
 
-    // System allowlist bypass: skip policy evaluation AND DLP scanning for internal services.
-    //
-    // SECURITY NOTE: Domains on the system allowlist bypass both policy and DLP checks.
-    // Only add trusted internal services (e.g., notification endpoints). Adding external
-    // domains here disables all outbound protection for that destination.
+    // The pinned local relay is an address exception only. It cannot inherit
+    // legacy system-allowlist policy, DLP or TLS-inspection bypasses.
+    // Other system allowlist traffic keeps its explicitly configured behavior.
     let allowlist_slice = ctx.system_allowlist.as_ref().map(|v| v.as_slice());
-    let system_allowed = is_system_allowed(&host, allowlist_slice);
+    let system_allowed =
+        is_system_allowed(&host, allowlist_slice) && !ctx.network.is_loopback_relay(&host, port);
     // DLP scan: check request body for sensitive data before forwarding.
     // System-allowed domains bypass DLP (they already bypass policy above).
     if !system_allowed || ctx.sensitive_approval.is_some() {

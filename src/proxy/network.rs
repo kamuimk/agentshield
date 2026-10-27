@@ -1,6 +1,6 @@
 //! Resolve once, validate every address, then connect only to those pinned addresses.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use tokio::net::{TcpStream, lookup_host};
 
 /// Destination constraints shared by HTTP and CONNECT (including allowlist traffic).
@@ -11,6 +11,9 @@ pub struct NetworkConfig {
     pub block_private_networks: bool,
     /// Explicit CONNECT ports. Empty lists deny every CONNECT request.
     pub connect_ports: Vec<u16>,
+    /// One trusted local relay destination; never a DNS name or a LAN exemption.
+    /// Policy, DLP and CONNECT-port checks still apply.
+    pub loopback_endpoint: Option<SocketAddrV4>,
 }
 
 impl Default for NetworkConfig {
@@ -18,6 +21,7 @@ impl Default for NetworkConfig {
         Self {
             block_private_networks: true,
             connect_ports: vec![443],
+            loopback_endpoint: None,
         }
     }
 }
@@ -39,6 +43,30 @@ fn private_v4(ip: Ipv4Addr) -> bool {
 }
 
 impl NetworkConfig {
+    pub fn validate_loopback_endpoint(&self) -> Result<(), &'static str> {
+        if self
+            .loopback_endpoint
+            .is_some_and(|endpoint| *endpoint.ip() != Ipv4Addr::LOCALHOST || endpoint.port() == 0)
+        {
+            return Err("network.loopback_endpoint requires 127.0.0.1 and a nonzero port");
+        }
+        Ok(())
+    }
+
+    fn pinned_loopback(&self, target: &str) -> Option<SocketAddrV4> {
+        self.loopback_endpoint
+            .filter(|endpoint| target == endpoint.to_string())
+    }
+
+    pub(super) fn is_loopback_relay(&self, host: &str, port: u16) -> bool {
+        self.loopback_endpoint.is_some_and(|endpoint| {
+            *endpoint.ip() == Ipv4Addr::LOCALHOST
+                && endpoint.port() != 0
+                && host == "127.0.0.1"
+                && port == endpoint.port()
+        })
+    }
+
     /// Metadata/link-local addresses are never allowed, even with LAN access enabled.
     pub fn allows_ip(&self, ip: IpAddr) -> bool {
         match ip {
@@ -78,6 +106,16 @@ pub(super) async fn connect(
     config: &NetworkConfig,
 ) -> Result<TcpStream, ConnectError> {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        // Recheck programmatic configurations as well as CLI validation.
+        if config.validate_loopback_endpoint().is_err() {
+            return Err(ConnectError::Denied);
+        }
+        if let Some(endpoint) = config.pinned_loopback(target) {
+            // Connect to the typed endpoint directly: no DNS lookup or fallback.
+            return TcpStream::connect(endpoint)
+                .await
+                .map_err(|_| ConnectError::Unavailable);
+        }
         let addresses: Vec<_> = lookup_host(target)
             .await
             .map_err(|_| ConnectError::Unavailable)?
@@ -148,6 +186,30 @@ mod tests {
                 &NetworkConfig::default()
             )
             .await,
+            Err(ConnectError::Denied)
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod loopback_validation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invalid_programmatic_exception_is_denied_before_connect() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = NetworkConfig {
+            block_private_networks: false,
+            loopback_endpoint: Some("169.254.169.254:80".parse().unwrap()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            connect(&listener.local_addr().unwrap().to_string(), &config).await,
             Err(ConnectError::Denied)
         ));
         assert!(

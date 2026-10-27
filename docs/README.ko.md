@@ -182,6 +182,12 @@ chat_id = "${AGENTSHIELD_TELEGRAM_CHAT_ID}"
 
 `[system] allowlist`의 도메인은 정책 평가 **및** DLP 스캔을 완전히 바이패스합니다. 프록시가 자체 알림 트래픽을 차단하는 것을 방지합니다.
 
+`[network] loopback_endpoint = "127.0.0.1:39001"`로 지정한 경로는 허용목록의
+정책·DLP·TLS 검사 생략을 적용하지 않습니다. 기본 사설망 차단을 유지하면서
+정확한 로컬 주소·포트 한 곳만 연결합니다. 다른 포트와 DNS 별칭은 허용하지
+않습니다. [설정과 수명 관리 범위](exact-loopback-relay.md)를 참고하세요.
+
+
 ```toml
 [system]
 allowlist = ["api.telegram.org"]
