@@ -43,7 +43,7 @@ jobs:
         run: cargo test --lib --locked regular_owner_pipe_is_rejected_before_any_frame_read -- --ignored
 
       - name: Build the native Windows engine
-        run: cargo build --release --locked --bin agentshield
+        run: cargo build --release --locked --bin agentshield --bin agentshield-inspect
 
       - name: Record exact source and binary identities
         shell: pwsh
@@ -51,7 +51,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $output = Join-Path $env:RUNNER_TEMP 'agentshield-windows-native'
           New-Item -ItemType Directory -Path $output | Out-Null
-          Copy-Item target/release/agentshield.exe, LICENSE -Destination $output
+          Copy-Item target/release/agentshield.exe, target/release/agentshield-inspect.exe, LICENSE -Destination $output
           $revision = (git rev-parse HEAD).Trim()
           $digest = (Get-FileHash (Join-Path $output 'agentshield.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
           @{
@@ -61,8 +61,10 @@ jobs:
             license = 'Apache-2.0'
             development = $true
           } | ConvertTo-Json | Set-Content (Join-Path $output 'source.json') -Encoding utf8
+          $offlineDigest = (Get-FileHash (Join-Path $output 'agentshield-inspect.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
           @{
             protocol = 'agentshield.dashboard.v1'
+            offlineSha256 = $offlineDigest
             revision = $revision
             sha256 = $digest
             target = 'x86_64-pc-windows-msvc'

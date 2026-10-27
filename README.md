@@ -549,3 +549,20 @@ cargo fmt            # Format
 ## License
 
 [Apache License 2.0](LICENSE)
+
+
+### Standalone offline inspection
+
+For a process that only needs stdin classification, use `agentshield-inspect`
+(or `agentshield-inspect inspect`). It calls the same bounded scanner and emits
+the same category-only JSON as `agentshield inspect`, without starting an async
+runtime or entering the server/configuration command path. It accepts no file,
+URL or configuration arguments. Callers must still enforce an I/O deadline and
+close stdin; a category report is not proof that arbitrary content is safe.
+
+```sh
+printf 'ordinary prose' | agentshield-inspect
+```
+
+Windows development artifacts include both executables and record the standalone
+binary's SHA256 as `offlineSha256` alongside the main engine identity.
