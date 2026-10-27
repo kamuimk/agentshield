@@ -401,6 +401,9 @@ impl ValidationResult {
 pub fn validate_config(config: &AppConfig) -> ValidationResult {
     let mut result = ValidationResult::default();
 
+    if let Err(error) = config.network.validate_loopback_endpoint() {
+        result.error(error);
+    }
     if config.network.connect_ports.contains(&0) {
         result.error("network.connect_ports must not contain port zero");
     }

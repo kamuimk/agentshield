@@ -204,7 +204,7 @@ Missing variables produce a clear error message at startup.
 
 ### System Allowlist
 
-Domains in `[system] allowlist` bypass policy evaluation **and** DLP scanning entirely. This prevents the proxy from blocking its own notification traffic.
+Legacy `[system] allowlist` entries bypass policy evaluation **and** DLP scanning for ordinary destinations. The exact local relay below keeps inspection enforced. This prevents the proxy from blocking its own notification traffic.
 
 ```toml
 [system]
@@ -212,6 +212,14 @@ allowlist = ["api.telegram.org"]
 ```
 
 > **Security Warning:** Allowlisted domains bypass **all** protection (policy + DLP). Only add trusted internal services. Adding external domains disables outbound protection for that destination.
+
+### Exact Local Relay
+
+`[network] loopback_endpoint = "127.0.0.1:39001"` permits one exact local destination
+while `block_private_networks = true` remains enabled. This route requires policy
+permission and configured DLP/TLS inspection even when a system allowlist matches.
+It does not grant access to other ports or DNS aliases. See
+[configuration and ownership boundaries](docs/exact-loopback-relay.md).
 
 ### Notifications
 

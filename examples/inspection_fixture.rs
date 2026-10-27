@@ -186,6 +186,7 @@ async fn main() -> anyhow::Result<()> {
         network: NetworkConfig {
             block_private_networks: false,
             connect_ports: vec![upstream_port],
+            loopback_endpoint: None,
         },
     });
     let listener = TcpListener::bind("127.0.0.1:0").await?;
