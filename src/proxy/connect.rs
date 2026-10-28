@@ -1388,11 +1388,12 @@ async fn handle_connect_mitm(
 
     // Step 7: Stream upstream response back to client
     let (mut remote_read, _remote_write) = tokio::io::split(remote_tls);
-    let (mut client_read, mut client_write) = tokio::io::split(client_tls);
+    let (_client_read, mut client_write) = tokio::io::split(client_tls);
     let _ = relay(&mut remote_read, &mut client_write).await;
 
-    // Drain any remaining client data (keep-alive cleanup)
-    let _ = client_read.read(&mut [0u8; 0]).await;
+    // This connection serves one inspected request. A zero-length TLS read is
+    // not a drain: it may wait for another client record and prevent shutdown
+    // after the upstream has already completed its response.
 
     info!("MITM (request details withheld)");
     log_to_db_audited(

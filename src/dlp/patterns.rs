@@ -243,11 +243,9 @@ impl DlpScanner for RegexScanner {
             .windows(4)
             .position(|w| w == b"\r\n\r\n")
             .map_or(payload, |offset| &payload[offset + 4..]);
-        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
-            if let Ok(json) = serde_json::to_string(&value) {
-                text.push('\n');
-                text.push_str(&json);
-            }
+        if let Some(json) = normalized_json(body) {
+            text.push('\n');
+            text.push_str(&String::from_utf8_lossy(&json));
         }
 
         // Inspect common transport encodings without executing payload content.
@@ -282,6 +280,37 @@ const MAX_ENCODED_TOKEN: usize = 65_536;
 const MAX_DECODED_BYTES: usize = 1_048_576;
 const MAX_ENCODED_CANDIDATES: usize = 2_048;
 
+// Normalize each JSON string token in place rather than rebuilding a Value map.
+// A map drops duplicate keys and can hide an earlier escaped secret. Validate
+// syntax/depth first, then preserve every field, array element and delimiter.
+fn normalized_json(input: &[u8]) -> Option<Vec<u8>> {
+    serde_json::from_slice::<serde_json::Value>(input).ok()?;
+    let mut output = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] != b'"' {
+            output.push(input[index]);
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while index < input.len() {
+            match input[index] {
+                b'\\' => index += 2,
+                b'"' => {
+                    index += 1;
+                    break;
+                }
+                _ => index += 1,
+            }
+        }
+        let value: String = serde_json::from_slice(&input[start..index]).ok()?;
+        output.extend_from_slice(&serde_json::to_vec(&value).ok()?);
+    }
+    Some(output)
+}
+
 fn append_json_view(input: &[u8], output: &mut Vec<u8>, budget: &mut usize) {
     if *budget == 0
         || !input
@@ -293,13 +322,11 @@ fn append_json_view(input: &[u8], output: &mut Vec<u8>, budget: &mut usize) {
     }
     // Each input is one bounded decoded token, not the concatenation of all
     // candidates. Combining tokens first can hide JSON behind unrelated bytes.
-    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(input) {
-        if let Ok(json) = serde_json::to_vec(&value) {
-            if json != input && json.len() < *budget {
-                *budget -= json.len() + 1;
-                output.extend_from_slice(&json);
-                output.push(b'\n');
-            }
+    if let Some(json) = normalized_json(input) {
+        if json != input && json.len() < *budget {
+            *budget -= json.len() + 1;
+            output.extend_from_slice(&json);
+            output.push(b'\n');
         }
     }
 }
@@ -394,6 +421,37 @@ fn percent_decode(bytes: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inspects_escaped_secrets_in_every_duplicate_json_field() {
+        let scanner = RegexScanner::new();
+        for payload in [
+            br#"{"value":"sk\u002dabcdefghijklmnopqrstuvwxyz1234567890","value":"harmless"}"#.as_slice(),
+            br#"{"outer":{"value":"sk\u002dabcdefghijklmnopqrstuvwxyz1234567890"},"outer":{}}"#.as_slice(),
+            br#"{"sk\u002dabcdefghijklmnopqrstuvwxyz1234567890":0,"sk-abcdefghijklmnopqrstuvwxyz1234567890":1}"#.as_slice(),
+        ] {
+            use base64::{Engine as _, engine::general_purpose::STANDARD};
+            for view in [payload.to_vec(), STANDARD.encode(payload).into_bytes(),
+                format!("POST / HTTP/1.1\r\nHost: example.test\r\n\r\n{}",
+                    String::from_utf8_lossy(payload)).into_bytes()] {
+                let findings = scanner.scan(&view);
+                assert!(findings.iter().any(|f| f.pattern_name == "openai-api-key"));
+                assert!(findings.iter().all(|f| f.matched_text == "[REDACTED...]"));
+            }
+        }
+    }
+
+    #[test]
+    fn json_normalization_preserves_duplicate_fields_and_string_boundaries() {
+        let raw = br#"{"x":"quote\" slash\\","x":"sk\u002dvalue","list":["\u0061",false,null,1]}"#;
+        let view = normalized_json(raw).unwrap();
+        assert_eq!(
+            view,
+            br#"{"x":"quote\" slash\\","x":"sk-value","list":["a",false,null,1]}"#
+        );
+        assert!(view.len() <= raw.len());
+        assert!(normalized_json(br#"{"x":"unterminated}"#).is_none());
+    }
 
     #[test]
     fn bounded_base64_transport_views_detect_secrets_without_leaking_values() {
