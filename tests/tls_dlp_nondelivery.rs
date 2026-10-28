@@ -43,6 +43,20 @@ async fn request(
 
 #[tokio::test]
 async fn inspected_tls_blocks_duplicate_field_secrets_before_upstream_connect() {
+    verify_tls("trusted").await;
+}
+
+#[tokio::test]
+async fn inspected_tls_rejects_untrusted_upstream_before_body_delivery() {
+    verify_tls("untrusted").await;
+}
+
+#[tokio::test]
+async fn inspected_tls_rejects_wrong_upstream_hostname_before_body_delivery() {
+    verify_tls("wrong-hostname").await;
+}
+
+async fn verify_tls(case: &'static str) {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     let directory = tempfile::tempdir().unwrap();
     let ca = directory.path().join("ca");
@@ -62,6 +76,19 @@ async fn inspected_tls_blocks_duplicate_field_secrets_before_upstream_connect() 
         .with_root_certificates(roots)
         .with_no_client_auth(),
     );
+    let upstream_client = if case == "untrusted" {
+        Arc::new(
+            rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::aws_lc_rs::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth(),
+        )
+    } else {
+        client.clone()
+    };
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let target = upstream.local_addr().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -86,7 +113,7 @@ async fn inspected_tls_blocks_duplicate_field_secrets_before_upstream_connect() 
         rate_limiter: None,
         mitm_enabled: true,
         cert_cache: Some(cache.clone()),
-        upstream_tls_config: Some(client.clone()),
+        upstream_tls_config: Some(upstream_client),
         logging_config: None,
         network: NetworkConfig {
             connect_ports: vec![target.port()],
@@ -112,19 +139,35 @@ async fn inspected_tls_blocks_duplicate_field_secrets_before_upstream_connect() 
                 .is_err()
         );
     }
-    let server_config = cache.get_or_create("127.0.0.1").unwrap();
+    let server_config = cache
+        .get_or_create(if case == "wrong-hostname" {
+            "wrong.example.test"
+        } else {
+            "127.0.0.1"
+        })
+        .unwrap();
     let receiver = tokio::spawn(async move {
         let (stream, _) = upstream.accept().await.unwrap();
-        let mut tls = tokio_rustls::TlsAcceptor::from(server_config)
+        let mut tls = match tokio_rustls::TlsAcceptor::from(server_config)
             .accept(stream)
             .await
-            .unwrap();
+        {
+            Ok(tls) => tls,
+            Err(_) => {
+                assert_ne!(case, "trusted");
+                return Vec::new();
+            }
+        };
         let mut raw = Vec::new();
         while !raw.ends_with(b"ordinary harmless prose") {
             let mut part = [0; 1024];
-            let n = tls.read(&mut part).await.unwrap();
-            assert!(n > 0);
-            raw.extend_from_slice(&part[..n]);
+            match tls.read(&mut part).await {
+                Ok(n) if n > 0 => raw.extend_from_slice(&part[..n]),
+                _ => {
+                    assert_ne!(case, "trusted");
+                    return raw;
+                }
+            }
         }
         tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
             .await
@@ -138,12 +181,23 @@ async fn inspected_tls_blocks_duplicate_field_secrets_before_upstream_connect() 
     )
     .await
     .unwrap();
-    assert!(response.starts_with(b"HTTP/1.1 200") && response.ends_with(b"OK"));
+    if case == "trusted" {
+        assert!(response.starts_with(b"HTTP/1.1 200") && response.ends_with(b"OK"));
+    } else {
+        assert!(response.starts_with(b"HTTP/1.1 502"));
+    }
     let received = tokio::time::timeout(Duration::from_secs(3), receiver)
         .await
         .unwrap()
         .unwrap();
-    assert!(received.ends_with(b"ordinary harmless prose"));
+    if case == "trusted" {
+        assert!(received.ends_with(b"ordinary harmless prose"));
+    } else {
+        assert!(
+            received.is_empty(),
+            "invalid certificate must prevent all HTTP bytes"
+        );
+    }
     stop.send(true).unwrap();
     accept.await.unwrap();
 }
