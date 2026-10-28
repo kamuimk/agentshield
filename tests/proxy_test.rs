@@ -742,3 +742,71 @@ async fn mitm_transparent_mode_unchanged() {
         response
     );
 }
+
+#[tokio::test]
+async fn duplicate_json_secrets_never_reach_upstream_but_clean_requests_do() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use std::time::Duration;
+    let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = upstream.local_addr().unwrap();
+    let server = ProxyServer::new("127.0.0.1:0".to_string())
+        .with_network_policy(agentshield::proxy::network::NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        })
+        .with_policy(Arc::new(RwLock::new(allow_localhost_policy())))
+        .with_dlp(Arc::new(RegexScanner::new()));
+    let (proxy, shutdown) = server.start().await.unwrap();
+    let hidden = r#"{"value":"sk\u002dabcdefghijklmnopqrstuvwxyz1234567890","value":"harmless"}"#;
+    for body in [hidden.to_string(), STANDARD.encode(hidden)] {
+        let request = format!(
+            "POST http://{target}/submit HTTP/1.1\r\nHost: {target}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let response =
+            tokio::time::timeout(Duration::from_secs(3), send_raw_request(proxy, &request))
+                .await
+                .unwrap();
+        assert!(response.starts_with("HTTP/1.1 403"));
+        assert!(!response.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), upstream.accept())
+                .await
+                .is_err(),
+            "a denied request must not even establish an upstream connection"
+        );
+    }
+    let receiver = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut part = [0; 1024];
+            let n = stream.read(&mut part).await.unwrap();
+            assert!(n > 0);
+            request.extend_from_slice(&part[..n]);
+            if request.ends_with(b"ordinary harmless prose") {
+                break;
+            }
+        }
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+            .await
+            .unwrap();
+        request
+    });
+    let body = "ordinary harmless prose";
+    let request = format!(
+        "POST http://{target}/submit HTTP/1.1\r\nHost: {target}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let response = tokio::time::timeout(Duration::from_secs(3), send_raw_request(proxy, &request))
+        .await
+        .unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"));
+    let received = tokio::time::timeout(Duration::from_secs(3), receiver)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(received.ends_with(body.as_bytes()));
+    shutdown.send(true).unwrap();
+}
