@@ -113,7 +113,9 @@ async fn main() -> anyhow::Result<()> {
     .with_root_certificates(roots)
     .with_no_client_auth();
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-    let mut approval = AskBroadcaster::new(10);
+    // Match the production sensitive-request broadcaster so the fixture can
+    // exercise the full bounded human decision window, including expiry.
+    let mut approval = AskBroadcaster::new(120);
     if args.len() == 5 {
         use agentshield::ask::workos::{WorkosApprovalConfig, WorkosApprovalResponder};
         use std::io::Read;
