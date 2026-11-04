@@ -9,3 +9,9 @@ The observer accepts bounded HTTP/1 headers and supports Content-Length, no-body
 Reporting is bounded to 2.5 seconds and does not retry the upstream request. Older connectors may refuse the observation without gaining any authority. Cancellation, process death, expiry or unavailable reporting can leave no terminal observation: absence must remain **unknown**, never be inferred as successful delivery or zero transmission. Durable crash/reconnect reporting is not implemented by this change.
 
 Validation includes real loopback approved HTTP requests, exact request-digest correlation and truncated-response controls; signed loopback reporting with wrong-digest rejection; framing tests including chunk boundaries and truncated terminals; and the existing real TLS non-delivery and network-security suites. These synthetic fixtures do not qualify an employee identity, a real human approval, a normally installed distribution or whole-system packet enforcement.
+
+A framed response now settles as soon as its exact complete frame has been
+forwarded, without waiting for peer TCP/TLS EOF. Close-delimited messages still
+require EOF, and truncated, conflicting or extra-byte frames cannot take this
+path. This avoids false post-completion errors and holding resources on peers
+that keep a completed connection open; certificate validation is unchanged.
