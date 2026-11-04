@@ -74,6 +74,24 @@ impl AskResponder for WorkosApprovalResponder {
                 && value["approved"].as_bool() == Some(true),
         )
     }
+    async fn notify_transport(
+        &self,
+        req_id: &str,
+        digest: &str,
+        outcome: &serde_json::Value,
+    ) -> bool {
+        let Some(mut value) = outcome.as_object().cloned() else {
+            return false;
+        };
+        value.insert("requestId".into(), serde_json::json!(req_id));
+        value.insert("requestSha256".into(), serde_json::json!(digest));
+        let Some(reply) = self.client.post("/outcome", &value, 4096).await else {
+            return false;
+        };
+        reply["requestId"].as_str() == Some(req_id)
+            && reply["requestSha256"].as_str() == Some(digest)
+            && reply["recorded"].as_bool() == Some(true)
+    }
     async fn notify_resolved(&self, _: &str, _: bool) {}
     fn name(&self) -> &str {
         "workos-slack-dm"
@@ -149,6 +167,34 @@ mod tests {
             };
             assert_eq!(responder.prompt(&request).await, Some(!wrong_digest));
             server.abort();
+        }
+    }
+    #[tokio::test]
+    async fn transport_reports_are_signed_path_and_digest_bound_metadata_only() {
+        use axum::{Json, Router, routing::post};
+        for wrong_digest in [false, true] {
+            let app=Router::new().route("/outcome",post(move |headers:axum::http::HeaderMap,raw:axum::body::Bytes|async move {
+                let value:serde_json::Value=serde_json::from_slice(&raw).unwrap();
+                assert_eq!(value.as_object().unwrap().len(),5);
+                let challenge=headers[crate::ask::metadata_bridge::CHALLENGE].to_str().unwrap();
+                assert_eq!(headers["authorization"],format!("AgentShield-Metadata {}",crate::ask::metadata_bridge::request_tag(&"t".repeat(40),"/outcome",challenge,&raw)));
+                let response=serde_json::json!({"requestId":value["requestId"],"requestSha256":if wrong_digest {serde_json::json!("b".repeat(64))}else{value["requestSha256"].clone()},"recorded":true});
+                let bytes=serde_json::to_vec(&response).unwrap();
+                let proof=crate::ask::metadata_bridge::response_tag(&"t".repeat(40),"/outcome",challenge,&raw,&bytes);
+                ([(crate::ask::metadata_bridge::PROOF,proof)],Json(response))
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/approve", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let responder = WorkosApprovalResponder::new(WorkosApprovalConfig {
+                endpoint,
+                token: "t".repeat(40),
+            })
+            .unwrap();
+            assert_eq!(responder.notify_transport(&uuid::Uuid::new_v4().to_string(),&"a".repeat(64),
+                &serde_json::json!({"phase":"response_complete","termination":"completed","httpStatus":200})).await,!wrong_digest);
+            server.abort();
+            let _ = server.await;
         }
     }
 }

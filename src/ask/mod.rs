@@ -59,8 +59,39 @@ pub trait AskResponder: Send + Sync {
     /// Used to update UI state (remove buttons, show result).
     async fn notify_resolved(&self, req_id: &str, allowed: bool);
 
+    /// Optional metadata-only observation of an already approved request.
+    /// This is telemetry, never a new permission or recipient processing receipt.
+    async fn notify_transport(
+        &self,
+        _req_id: &str,
+        _request_sha256: &str,
+        _outcome: &serde_json::Value,
+    ) -> bool {
+        false
+    }
+
     /// Human-readable name for logging (e.g., `"terminal"`, `"telegram"`).
     fn name(&self) -> &str;
+}
+
+/// One-shot correlation minted only after the broadcaster allowed exact bytes.
+/// Dropped/cancelled requests without a report remain unknown, not delivered.
+pub(crate) struct SensitiveApprovalTicket {
+    req_id: String,
+    request_sha256: String,
+    responders: Vec<Arc<dyn AskResponder>>,
+}
+impl SensitiveApprovalTicket {
+    pub(crate) async fn report(self, outcome: serde_json::Value) {
+        let _ = tokio::time::timeout(Duration::from_millis(2500), async {
+            for responder in self.responders {
+                responder
+                    .notify_transport(&self.req_id, &self.request_sha256, &outcome)
+                    .await;
+            }
+        })
+        .await;
+    }
 }
 
 /// Broadcasts ASK requests to multiple responders and adopts the first response.
@@ -97,7 +128,7 @@ impl AskBroadcaster {
         path: String,
         body: Option<String>,
     ) -> bool {
-        self.ask_with_metadata(domain, method, path, body, None)
+        self.ask_with_metadata(domain, method, path, body, None, None)
             .await
     }
 
@@ -115,8 +146,50 @@ impl AskBroadcaster {
             request_bytes: request.len(),
             categories,
         };
-        self.ask_with_metadata(domain, method, "[withheld]".into(), None, Some(metadata))
+        self.ask_with_metadata(
+            domain,
+            method,
+            "[withheld]".into(),
+            None,
+            Some(metadata),
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn ask_sensitive_ticket(
+        &self,
+        domain: String,
+        method: String,
+        request: &[u8],
+        categories: Vec<String>,
+    ) -> Option<SensitiveApprovalTicket> {
+        use sha2::{Digest, Sha256};
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let request_sha256 = format!("{:x}", Sha256::digest(request));
+        let metadata = SensitiveApprovalMetadata {
+            request_sha256: request_sha256.clone(),
+            request_bytes: request.len(),
+            categories,
+        };
+        if !self
+            .ask_with_metadata(
+                domain,
+                method,
+                "[withheld]".into(),
+                None,
+                Some(metadata),
+                Some(req_id.clone()),
+            )
             .await
+        {
+            return None;
+        }
+        Some(SensitiveApprovalTicket {
+            req_id,
+            request_sha256,
+            responders: self.responders.clone(),
+        })
     }
 
     async fn ask_with_metadata(
@@ -126,12 +199,13 @@ impl AskBroadcaster {
         path: String,
         body: Option<String>,
         approval: Option<SensitiveApprovalMetadata>,
+        req_id: Option<String>,
     ) -> bool {
         if self.responders.is_empty() {
             return false;
         }
 
-        let req_id = uuid::Uuid::new_v4().to_string();
+        let req_id = req_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let info = AskRequestInfo {
             req_id: req_id.clone(),

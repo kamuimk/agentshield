@@ -69,7 +69,7 @@ impl MetadataBridgeClient {
         value: &impl serde::Serialize,
         limit: usize,
     ) -> Option<serde_json::Value> {
-        if !matches!(path, "/approve" | "/authenticate") {
+        if !matches!(path, "/approve" | "/authenticate" | "/outcome") {
             return None;
         }
         let mut endpoint = reqwest::Url::parse(&self.config.endpoint).ok()?;
