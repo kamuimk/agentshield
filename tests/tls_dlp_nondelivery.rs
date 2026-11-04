@@ -124,7 +124,16 @@ async fn verify_tls(case: &'static str) {
     let (stop, rx) = tokio::sync::watch::channel(false);
     let accept = tokio::spawn(accept_loop(listener, Arc::new(ctx), rx));
     let hidden = r#"{"value":"sk\u002dabcdefghijklmnopqrstuvwxyz1234567890","value":"harmless"}"#;
-    for body in [hidden.to_string(), STANDARD.encode(hidden)] {
+    // An injected tool response can cause credentials to be repackaged as JSON,
+    // rather than sent in their original HTTP headers. Only synthetic values.
+    let auth = r#"{"headers":{"Authorization":"Bearer synthetic-opaque-token"}}"#;
+    let cookie = r#"{"context":{"Cookie":"session=synthetic-opaque-token"}}"#;
+    let escaped = r#"{"\u0061uthorization":"\u0042earer synthetic-opaque-token"}"#;
+    let bodies: Vec<String> = [hidden, auth, cookie, escaped]
+        .into_iter()
+        .flat_map(|value| [value.to_string(), STANDARD.encode(value)])
+        .collect();
+    for body in bodies {
         let response = tokio::time::timeout(
             Duration::from_secs(3),
             request(proxy, target, client.clone(), &body),

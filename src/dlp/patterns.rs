@@ -10,7 +10,7 @@
 //! | Credentials | Private key headers, GitHub PAT |
 //! | PII | Email addresses |
 //!
-//! All matched text is automatically **redacted** in findings (first 4 + last 4 chars)
+//! All matched text is replaced with a **constant redaction marker** in findings
 //! to avoid leaking secrets in logs.
 
 use std::collections::HashMap;
@@ -193,9 +193,12 @@ impl RegexScanner {
             ),
             (
                 "authorization",
-                r"(?im)^authorization:\s*(?:bearer|basic)\s+[^\r\n]{8,}",
+                r#"(?im)(?:^authorization:\s*(?:bearer|basic)\s+[^\r\n]{8,}|"authorization"\s*:\s*"(?:bearer|basic)\s+[^"\r\n]{8,})"#,
             ),
-            ("session-cookie", r"(?im)^cookie:\s*[^\r\n]{4,}"),
+            (
+                "session-cookie",
+                r#"(?im)(?:^cookie:\s*[^\r\n]{4,}|"cookie"\s*:\s*"[^"\r\n]{4,})"#,
+            ),
         ] {
             patterns.insert(
                 name.into(),
@@ -599,6 +602,50 @@ mod tests {
                 .iter()
                 .all(|finding| finding.matched_text == "[REDACTED...]")
         );
+    }
+
+    #[test]
+    fn structured_auth_exfiltration_is_critical_without_known_token_prefix() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        for (name, plain, escaped) in [
+            (
+                "authorization",
+                br#"{"headers":{"Authorization":"Bearer synthetic-opaque-token"}}"#.as_slice(),
+                br#"{"\u0061uthorization":"\u0042earer synthetic-opaque-token"}"#.as_slice(),
+            ),
+            (
+                "session-cookie",
+                br#"{"context":{"Cookie":"session=synthetic-opaque-token"}}"#.as_slice(),
+                br#"{"\u0063ookie":"session=synthetic-opaque-token"}"#.as_slice(),
+            ),
+        ] {
+            let scanner = RegexScanner::with_patterns(&[name.to_string()]);
+            let encoded = STANDARD.encode(plain);
+            for payload in [plain, escaped, encoded.as_bytes()] {
+                let findings = scanner.scan(payload);
+                assert!(
+                    findings
+                        .iter()
+                        .any(|f| f.pattern_name == name && f.severity == Severity::Critical),
+                    "structured credential escaped inspection: {name}"
+                );
+                assert!(findings.iter().all(|f| f.matched_text == "[REDACTED...]"));
+            }
+        }
+    }
+
+    #[test]
+    fn structured_auth_field_names_without_credentials_do_not_match() {
+        let scanner =
+            RegexScanner::with_patterns(&["authorization".into(), "session-cookie".into()]);
+        for payload in [
+            br#"{"authorization":false,"cookie":null}"#.as_slice(),
+            br#"{"authorization":"required","cookie":""}"#.as_slice(),
+            br#"{"authorization_status":"Bearer synthetic-opaque-token","cookie_count":2}"#
+                .as_slice(),
+        ] {
+            assert!(scanner.scan(payload).is_empty());
+        }
     }
 
     #[test]
