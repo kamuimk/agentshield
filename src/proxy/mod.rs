@@ -320,3 +320,5 @@ mod owned_listener_tests {
         shutdown.send(true).unwrap();
     }
 }
+
+pub(crate) mod observation;
