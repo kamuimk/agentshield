@@ -27,6 +27,11 @@ impl TransportObservation {
             ..Self::default()
         }
     }
+    /// A complete authenticated HTTP frame needs no transport EOF. Close-
+    /// delimited responses still require EOF; ambiguous/truncated frames never qualify.
+    pub(crate) fn framed_complete(&self) -> bool {
+        self.complete && !self.invalid && !self.close_delimited
+    }
     pub(crate) fn failure(&mut self) {
         self.failed = true;
     }

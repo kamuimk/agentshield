@@ -521,6 +521,11 @@ async fn relay_observed<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrit
         observation.feed(&buffer[..n]);
         write_bounded(writer, &buffer[..n]).await?;
         total += n as u64;
+        // One inspected request per connection: after its exact HTTP frame is
+        // forwarded, do not wait for peer closure or an unrelated TLS EOF.
+        if observation.framed_complete() {
+            return Ok(total);
+        }
     }
 }
 
@@ -1570,6 +1575,69 @@ mod tests {
             1,
             "ordinary approval positive control failed"
         );
+    }
+
+    #[tokio::test]
+    async fn framed_response_settles_without_waiting_for_peer_eof() {
+        for (method, response) in [
+            (
+                "POST",
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nabcd".as_slice(),
+            ),
+            (
+                "POST",
+                b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n",
+            ),
+            (
+                "POST",
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n",
+            ),
+            ("HEAD", b"HTTP/1.1 200 OK\r\nContent-Length: 999\r\n\r\n"),
+        ] {
+            let (mut read, mut producer) = tokio::io::duplex(1024);
+            producer.write_all(response).await.unwrap();
+            let mut writer = tokio::io::sink();
+            let mut observation = super::super::observation::TransportObservation::new(method);
+            observation.attempt();
+            let copied = tokio::time::timeout(
+                std::time::Duration::from_millis(250),
+                relay_observed(&mut read, &mut writer, &mut observation),
+            )
+            .await;
+            assert!(
+                copied.is_ok(),
+                "complete framed response still waits for peer EOF"
+            );
+            assert_eq!(copied.unwrap().unwrap(), response.len() as u64);
+            assert_eq!(observation.value()["phase"], "response_complete");
+            assert_eq!(observation.value()["termination"], "completed");
+            drop(producer); // The peer deliberately stayed open until after settlement.
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_ambiguous_and_close_delimited_responses_still_require_more_data() {
+        for response in [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nabc".as_slice(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n",
+            b"HTTP/1.1 200 OK\r\n\r\nbody",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nextra",
+        ] {
+            let (mut read, mut producer) = tokio::io::duplex(1024);
+            producer.write_all(response).await.unwrap();
+            let mut writer = tokio::io::sink();
+            let mut observation = super::super::observation::TransportObservation::new("POST");
+            observation.attempt();
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    relay_observed(&mut read, &mut writer, &mut observation)
+                )
+                .await
+                .is_err()
+            );
+            assert_ne!(observation.value()["phase"], "response_complete");
+        }
     }
 
     #[tokio::test]
