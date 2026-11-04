@@ -72,3 +72,15 @@ version can leave the older installed provider running despite a new app bundle.
 The controller accepts heartbeat/flow evidence only when the system extension's
 on-disk executable matches the current app's bundled provider bytes; an older
 provider cannot attest that a newly installed security fix is active.
+
+When updating an already enabled filter, the controller first saves its own
+filter as disabled, reloads preferences, checks ownership again, then installs
+the new policy/instance and saves it as enabled. This prevents a new preference
+instance from being mistaken for the older configuration still used by a live
+provider. Failed stop/reload/start operations report distinct bounded error codes;
+configuration success still does not imply runtime verification.
+Apple documents the provider stop/start behavior in
+[NEFilterManager.isEnabled](https://developer.apple.com/documentation/networkextension/nefiltermanager/isenabled).
+The brief reload interval is an observation gap; managed proxy/sandbox protection
+remains separate. A signed installation must still demonstrate the new
+instance's heartbeat and flows, and remote-session continuity.

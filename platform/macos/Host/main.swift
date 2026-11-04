@@ -94,18 +94,39 @@ final class Activation: NSObject, OSSystemExtensionRequestDelegate {
                existing != self.identifier {
                 output(["ok": false, "code": "filter_owner_conflict"], exitCode: 1)
             }
-            let config = NEFilterProviderConfiguration()
-            config.filterSockets = true
-            config.filterPackets = false
-            config.filterDataProviderBundleIdentifier = self.identifier
-            config.vendorConfiguration = ["policy": self.policy, "instance": UUID().uuidString]
-            manager.providerConfiguration = config
-            manager.localizedDescription = "WorkOS AgentShield service protection"
-            manager.isEnabled = true
-            manager.saveToPreferences { error in
-                guard error == nil else { output(["ok": false, "code": "filter_save_failed"], exitCode: 1) }
+            FilterReload.run(wasEnabled: manager.isEnabled, stop: { done in
+                manager.isEnabled = false
+                manager.saveToPreferences(completionHandler: done)
+            }, reload: { done in
+                manager.loadFromPreferences { error in
+                    guard error == nil else { done(error); return }
+                    // Re-check after the asynchronous stop/reload. Never replace
+                    // a configuration another controller took ownership of.
+                    if let existing = manager.providerConfiguration?.filterDataProviderBundleIdentifier,
+                       existing != self.identifier {
+                        output(["ok": false, "code": "filter_owner_conflict"], exitCode: 1)
+                    }
+                    done(nil)
+                }
+            }, start: { done in
+                let config = NEFilterProviderConfiguration()
+                config.filterSockets = true
+                config.filterPackets = false
+                config.filterDataProviderBundleIdentifier = self.identifier
+                config.vendorConfiguration = ["policy": self.policy, "instance": UUID().uuidString]
+                manager.providerConfiguration = config
+                manager.localizedDescription = "WorkOS AgentShield service protection"
+                manager.isEnabled = true
+                manager.saveToPreferences(completionHandler: done)
+            }, completion: { phase, error in
+                guard error == nil else {
+                    let code = phase == "stop" ? "filter_restart_stop_failed"
+                        : phase == "reload" ? "filter_reload_failed" : "filter_save_failed"
+                    output(["ok": false, "code": code], exitCode: 1)
+                }
+                // A saved configuration is still not heartbeat evidence.
                 output(["ok": true, "state": "configured", "runtime_verified": false])
-            }
+            })
         }
     }
 }
