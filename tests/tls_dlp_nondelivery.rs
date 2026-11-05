@@ -37,6 +37,9 @@ async fn request(
     let name = rustls::pki_types::ServerName::try_from("127.0.0.1".to_string()).unwrap();
     let mut tls = connector.connect(name, stream).await.unwrap();
     tls.write_all(format!("POST /submit HTTP/1.1\r\nHost: {target}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+    // Flush the final TLS record before waiting for a response. Large writes
+    // may leave encrypted output buffered, particularly with Windows IOCP.
+    tls.flush().await.unwrap();
     let mut response = Vec::new();
     // Some denial paths close without close_notify; still require the full
     // expected HTTP status/body below, rather than treating TLS EOF as success.
@@ -145,7 +148,12 @@ async fn verify_tls(case: &'static str) {
             request(proxy, target, client.clone(), &body),
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|_| {
+            panic!(
+                "TLS response timed out: case={case}, bodyBytes={}",
+                body.len()
+            )
+        });
         assert!(response.starts_with(b"HTTP/1.1 403"));
         assert!(!String::from_utf8_lossy(&response).contains("abcdefghijklmnopqrstuvwxyz"));
         assert!(
