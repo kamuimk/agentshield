@@ -1,4 +1,7 @@
 //! Real local TLS interception and upstream non-delivery, with in-memory trust only.
+#[path = "fixtures/encoded_coverage.rs"]
+mod encoded_coverage;
+
 use agentshield::dlp::patterns::RegexScanner;
 use agentshield::policy::config::{Action, PolicyConfig};
 use agentshield::proxy::{
@@ -129,13 +132,16 @@ async fn verify_tls(case: &'static str) {
     let auth = r#"{"headers":{"Authorization":"Bearer synthetic-opaque-token"}}"#;
     let cookie = r#"{"context":{"Cookie":"session=synthetic-opaque-token"}}"#;
     let escaped = r#"{"\u0061uthorization":"\u0042earer synthetic-opaque-token"}"#;
-    let bodies: Vec<String> = [hidden, auth, cookie, escaped]
+    let mut bodies: Vec<String> = [hidden, auth, cookie, escaped]
         .into_iter()
         .flat_map(|value| [value.to_string(), STANDARD.encode(value)])
         .collect();
+    bodies.extend(encoded_coverage::bodies());
     for body in bodies {
+        // The new multi-megabyte bodies exercise real TLS framing in parallel;
+        // keep a finite deadline without applying the tiny-fixture deadline.
         let response = tokio::time::timeout(
-            Duration::from_secs(3),
+            Duration::from_secs(if body.len() > 65_536 { 10 } else { 3 }),
             request(proxy, target, client.clone(), &body),
         )
         .await

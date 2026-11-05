@@ -402,6 +402,14 @@ When `[dlp] enabled = true`, AgentShield scans HTTP request bodies for sensitive
 | High | Generic API key | Log warning, allow |
 | Medium | Email address | Log warning, allow |
 
+Bounded inspection never treats skipped encoded content as a clean scan. If a base64 token,
+candidate/output budget, normalized JSON view or nested decoding depth cannot be fully
+inspected, the scanner adds the critical `inspection-incomplete` finding without copying
+payload text into the finding. The normal critical path denies forwarding; a configured
+sensitive-approval integration can release the exact request after approval. Large benign
+encoded content can also require this confirmation. This does not claim detection of
+arbitrary encryption or every possible encoding.
+
 > **Note:** In transparent mode, CONNECT tunnels (HTTPS) are encrypted and cannot be scanned by DLP. Use MITM mode to enable DLP on HTTPS traffic.
 
 ### Audit Logging

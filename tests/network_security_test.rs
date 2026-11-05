@@ -1,4 +1,7 @@
 //! Attack regressions use only loopback fixtures and never contact external services.
+#[path = "fixtures/encoded_coverage.rs"]
+mod encoded_coverage;
+
 use agentshield::{
     dlp::patterns::RegexScanner,
     policy::config::{Action, PolicyConfig, Rule},
@@ -571,4 +574,31 @@ async fn exact_loopback_allowlist_cannot_turn_mitm_into_an_opaque_tunnel() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn inspection_coverage_limits_block_before_upstream_connection() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = upstream.local_addr().unwrap();
+    let (proxy, _stop) = ProxyServer::new("127.0.0.1:0".into())
+        .with_policy(Arc::new(RwLock::new(allow())))
+        .with_network_policy(local_network())
+        .with_dlp(Arc::new(RegexScanner::new()))
+        .start()
+        .await
+        .unwrap();
+    for body in encoded_coverage::bodies() {
+        let wire = format!(
+            "POST http://{target}/submit HTTP/1.1\r\nHost: {target}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let response = raw(proxy, wire.as_bytes()).await;
+        assert!(response.starts_with("HTTP/1.1 403"));
+        assert!(!response.contains("SYNTHETICNOTAREALKEY"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), upstream.accept())
+                .await
+                .is_err()
+        );
+    }
 }
