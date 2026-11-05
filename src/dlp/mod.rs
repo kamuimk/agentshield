@@ -27,7 +27,7 @@ pub enum Severity {
     Medium,
     /// Significant concern (e.g., generic API key patterns).
     High,
-    /// Must block — confirmed secret or credential.
+    /// Must block — detected credential or incomplete bounded inspection.
     Critical,
 }
 

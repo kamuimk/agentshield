@@ -1,4 +1,7 @@
 //! Real local TLS interception and upstream non-delivery, with in-memory trust only.
+#[path = "fixtures/encoded_coverage.rs"]
+mod encoded_coverage;
+
 use agentshield::dlp::patterns::RegexScanner;
 use agentshield::policy::config::{Action, PolicyConfig};
 use agentshield::proxy::{
@@ -34,6 +37,9 @@ async fn request(
     let name = rustls::pki_types::ServerName::try_from("127.0.0.1".to_string()).unwrap();
     let mut tls = connector.connect(name, stream).await.unwrap();
     tls.write_all(format!("POST /submit HTTP/1.1\r\nHost: {target}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+    // Flush the final TLS record before waiting for a response. Large writes
+    // may leave encrypted output buffered, particularly with Windows IOCP.
+    tls.flush().await.unwrap();
     let mut response = Vec::new();
     // Some denial paths close without close_notify; still require the full
     // expected HTTP status/body below, rather than treating TLS EOF as success.
@@ -129,17 +135,25 @@ async fn verify_tls(case: &'static str) {
     let auth = r#"{"headers":{"Authorization":"Bearer synthetic-opaque-token"}}"#;
     let cookie = r#"{"context":{"Cookie":"session=synthetic-opaque-token"}}"#;
     let escaped = r#"{"\u0061uthorization":"\u0042earer synthetic-opaque-token"}"#;
-    let bodies: Vec<String> = [hidden, auth, cookie, escaped]
+    let mut bodies: Vec<String> = [hidden, auth, cookie, escaped]
         .into_iter()
         .flat_map(|value| [value.to_string(), STANDARD.encode(value)])
         .collect();
+    bodies.extend(encoded_coverage::bodies());
     for body in bodies {
+        // The new multi-megabyte bodies exercise real TLS framing in parallel;
+        // keep a finite deadline without applying the tiny-fixture deadline.
         let response = tokio::time::timeout(
-            Duration::from_secs(3),
+            Duration::from_secs(if body.len() > 65_536 { 10 } else { 3 }),
             request(proxy, target, client.clone(), &body),
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|_| {
+            panic!(
+                "TLS response timed out: case={case}, bodyBytes={}",
+                body.len()
+            )
+        });
         assert!(response.starts_with(b"HTTP/1.1 403"));
         assert!(!String::from_utf8_lossy(&response).contains("abcdefghijklmnopqrstuvwxyz"));
         assert!(

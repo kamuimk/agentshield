@@ -253,9 +253,18 @@ impl DlpScanner for RegexScanner {
 
         // Inspect common transport encodings without executing payload content.
         // Two layers and fixed work/output budgets bound adversarial expansion.
-        append_base64_views(&mut text);
+        let complete = append_base64_views(&mut text);
 
         let mut findings = Vec::new();
+        if !complete {
+            // Unknown is not a clean scan. The normal critical-finding path
+            // blocks, or holds this exact request for configured approval.
+            findings.push(DlpFinding {
+                pattern_name: "inspection-incomplete".to_string(),
+                matched_text: "[REDACTED...]".to_string(),
+                severity: Severity::Critical,
+            });
+        }
         for (name, def) in &self.patterns {
             for mat in def.regex.find_iter(&text).take(32) {
                 let matched = mat.as_str();
@@ -314,19 +323,21 @@ fn normalized_json(input: &[u8]) -> Option<Vec<u8>> {
     Some(output)
 }
 
-fn append_json_view(input: &[u8], output: &mut Vec<u8>, budget: &mut usize) {
-    if *budget == 0
-        || !input
-            .iter()
-            .find(|b| !b.is_ascii_whitespace())
-            .is_some_and(|b| matches!(*b, b'{' | b'[' | b'"'))
+fn append_json_view(input: &[u8], output: &mut Vec<u8>, budget: &mut usize, complete: &mut bool) {
+    if !input
+        .iter()
+        .find(|b| !b.is_ascii_whitespace())
+        .is_some_and(|b| matches!(*b, b'{' | b'[' | b'"'))
     {
         return;
     }
-    // Each input is one bounded decoded token, not the concatenation of all
-    // candidates. Combining tokens first can hide JSON behind unrelated bytes.
+    // Keep the normalization budget, but never clear a skipped view.
     if let Some(json) = normalized_json(input) {
-        if json != input && json.len() < *budget {
+        if json != input {
+            if json.len() + 1 > *budget {
+                *complete = false;
+                return;
+            }
             *budget -= json.len() + 1;
             output.extend_from_slice(&json);
             output.push(b'\n');
@@ -334,12 +345,17 @@ fn append_json_view(input: &[u8], output: &mut Vec<u8>, budget: &mut usize) {
     }
 }
 
-fn base64_views(input: &[u8], budget: &mut usize, candidates: &mut usize) -> Vec<u8> {
+fn base64_views(
+    input: &[u8],
+    budget: &mut usize,
+    candidates: &mut usize,
+    complete: &mut bool,
+) -> Vec<u8> {
     use base64::{Engine as _, engine::general_purpose};
     let mut output = Vec::new();
     let alphabet = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'-' | b'_');
     let mut index = 0;
-    while index < input.len() && *budget > 0 && *candidates > 0 {
+    while index < input.len() {
         if !alphabet(input[index]) {
             index += 1;
             continue;
@@ -352,8 +368,16 @@ fn base64_views(input: &[u8], budget: &mut usize, candidates: &mut usize) -> Vec
             index += 1;
         }
         let token = &input[start..index];
-        if !(8..=MAX_ENCODED_TOKEN).contains(&token.len()) {
+        if token.len() < 8 {
             continue;
+        }
+        if token.len() > MAX_ENCODED_TOKEN {
+            *complete = false;
+            continue;
+        }
+        if *budget == 0 || *candidates == 0 {
+            *complete = false;
+            break;
         }
         *candidates -= 1;
         for engine in [
@@ -364,15 +388,16 @@ fn base64_views(input: &[u8], budget: &mut usize, candidates: &mut usize) -> Vec
         ] {
             if let Ok(decoded) = engine.decode(token) {
                 if decoded.len() + 1 > *budget {
+                    *complete = false;
                     break;
                 }
                 *budget -= decoded.len() + 1;
                 output.extend_from_slice(&decoded);
                 output.push(b'\n');
-                append_json_view(&decoded, &mut output, budget);
+                append_json_view(&decoded, &mut output, budget, complete);
                 let percent = percent_decode(&decoded);
                 if percent != decoded {
-                    append_json_view(&percent, &mut output, budget);
+                    append_json_view(&percent, &mut output, budget, complete);
                 }
                 break;
             }
@@ -381,10 +406,11 @@ fn base64_views(input: &[u8], budget: &mut usize, candidates: &mut usize) -> Vec
     output
 }
 
-fn append_base64_views(text: &mut String) {
+fn append_base64_views(text: &mut String) -> bool {
     let mut budget = MAX_DECODED_BYTES;
     let mut candidates = MAX_ENCODED_CANDIDATES;
-    let mut layer = base64_views(text.as_bytes(), &mut budget, &mut candidates);
+    let mut complete = true;
+    let mut layer = base64_views(text.as_bytes(), &mut budget, &mut candidates, &mut complete);
     for depth in 0..2 {
         if layer.is_empty() {
             break;
@@ -392,15 +418,24 @@ fn append_base64_views(text: &mut String) {
         text.push('\n');
         text.push_str(&String::from_utf8_lossy(&layer));
         let percent = percent_decode(&layer);
-        if percent != layer && percent.len() < budget {
-            budget -= percent.len() + 1;
-            text.push('\n');
-            text.push_str(&String::from_utf8_lossy(&percent));
+        if percent != layer {
+            if percent.len() < budget {
+                budget -= percent.len() + 1;
+                text.push('\n');
+                text.push_str(&String::from_utf8_lossy(&percent));
+            } else {
+                complete = false;
+            }
         }
+        let next = base64_views(&percent, &mut budget, &mut candidates, &mut complete);
         if depth == 0 {
-            layer = base64_views(&percent, &mut budget, &mut candidates);
+            layer = next;
+        } else if !next.is_empty() {
+            // A further decodable layer remains beyond the supported depth.
+            complete = false;
         }
     }
+    complete
 }
 
 fn percent_decode(bytes: &[u8]) -> Vec<u8> {
@@ -424,6 +459,67 @@ fn percent_decode(bytes: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn coverage_encoded(value: impl AsRef<[u8]>) -> String {
+        use base64::{Engine as _, engine::general_purpose};
+        general_purpose::STANDARD.encode(value)
+    }
+
+    fn require_coverage_guard(payload: &str) {
+        let scanner = RegexScanner::new();
+        assert!(scanner.scan(b"ordinary harmless prose").is_empty());
+        assert!(
+            scanner
+                .scan(coverage_encoded("ordinary harmless prose").as_bytes())
+                .is_empty()
+        );
+        assert!(
+            scanner
+                .scan(payload.as_bytes())
+                .iter()
+                .any(|f| f.severity == Severity::Critical),
+            "uninspected encoded content must not silently clear the request"
+        );
+        let findings = scanner.scan(payload.as_bytes());
+        assert!(findings.iter().all(|f| f.matched_text == "[REDACTED...]"));
+        assert!(
+            !serde_json::to_string(&findings)
+                .unwrap()
+                .contains("SYNTHETICNOTAREALKEY")
+        );
+    }
+
+    #[test]
+    fn inspection_coverage_oversized_encoded_token() {
+        let decoded = "ordinary harmless prose ".repeat(4096)
+            + "sk-proj-SYNTHETICNOTAREALKEY000000000000000000000000";
+        require_coverage_guard(&coverage_encoded(decoded));
+    }
+
+    #[test]
+    fn inspection_coverage_candidate_starvation() {
+        let prefix = "ordinary ".repeat(MAX_ENCODED_CANDIDATES + 1);
+        require_coverage_guard(
+            &(prefix + &coverage_encoded("sk-proj-SYNTHETICNOTAREALKEY000000000000000000000000")),
+        );
+    }
+
+    #[test]
+    fn inspection_coverage_decoded_output_exhaustion() {
+        let prefix = (coverage_encoded(vec![b'a'; 48 * 1024]) + " ").repeat(21);
+        let hidden = "ordinary harmless prose ".repeat(1024)
+            + "sk-proj-SYNTHETICNOTAREALKEY000000000000000000000000";
+        require_coverage_guard(&(prefix + &coverage_encoded(hidden)));
+    }
+
+    #[test]
+    fn inspection_coverage_nested_encoding_past_depth() {
+        let mut hidden = "sk-proj-SYNTHETICNOTAREALKEY000000000000000000000000".to_string();
+        for _ in 0..3 {
+            hidden = coverage_encoded(hidden);
+        }
+        require_coverage_guard(&hidden);
+    }
 
     #[test]
     fn inspects_escaped_secrets_in_every_duplicate_json_field() {
@@ -555,10 +651,17 @@ mod tests {
         let input = (token + " ").repeat(100);
         let mut budget = 100;
         let mut candidates = 3;
-        let output = base64_views(input.as_bytes(), &mut budget, &mut candidates);
+        let mut complete = true;
+        let output = base64_views(
+            input.as_bytes(),
+            &mut budget,
+            &mut candidates,
+            &mut complete,
+        );
+        assert!(!complete);
         assert!(output.len() <= 100 && candidates <= 3);
         let huge = vec![b'A'; MAX_ENCODED_TOKEN + 1];
-        assert!(base64_views(&huge, &mut budget, &mut candidates).is_empty());
+        assert!(base64_views(&huge, &mut budget, &mut candidates, &mut complete).is_empty());
     }
 
     #[test]
@@ -569,9 +672,20 @@ mod tests {
         for limit in [0, json.len(), json.len() + 1, 256] {
             let mut budget = limit;
             let mut candidates = 1;
-            let output = base64_views(encoded.as_bytes(), &mut budget, &mut candidates);
+            let mut complete = true;
+            let output = base64_views(
+                encoded.as_bytes(),
+                &mut budget,
+                &mut candidates,
+                &mut complete,
+            );
             assert!(output.len() <= limit);
             assert_eq!(output.len() + budget, limit);
+            assert_eq!(
+                complete,
+                limit == 256,
+                "a skipped JSON view must mark inspection incomplete"
+            );
             if limit == 256 {
                 assert!(String::from_utf8_lossy(&output).contains("x@y.zz"));
             }
