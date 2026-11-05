@@ -292,6 +292,29 @@ const MAX_ENCODED_TOKEN: usize = 65_536;
 const MAX_DECODED_BYTES: usize = 1_048_576;
 const MAX_ENCODED_CANDIDATES: usize = 2_048;
 
+// ASCII-only matches require at least six consecutive text bytes (x@y.zz).
+// Keep every valid Unicode segment as well: case-insensitive credential labels
+// and credential values can contain Unicode, even inside binary-prefixed views.
+// JSON/percent/base64 wrappers contain ASCII runs. Never require the whole
+// decoded buffer to be UTF-8 or drop its original bytes from inspection.
+fn can_contain_pattern_or_transport(input: &[u8]) -> bool {
+    if input.utf8_chunks().any(|chunk| !chunk.valid().is_ascii()) {
+        return true;
+    }
+    let mut run = 0;
+    for byte in input {
+        if byte.is_ascii() && (!byte.is_ascii_control() || byte.is_ascii_whitespace()) {
+            run += 1;
+            if run == 6 {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
+}
+
 // Normalize each JSON string token in place rather than rebuilding a Value map.
 // A map drops duplicate keys and can hide an earlier escaped secret. Validate
 // syntax/depth first, then preserve every field, array element and delimiter.
@@ -375,11 +398,9 @@ fn base64_views(
             *complete = false;
             continue;
         }
-        if *budget == 0 || *candidates == 0 {
-            *complete = false;
-            break;
-        }
-        *candidates -= 1;
+        // Decode attempts are linear in the already bounded input. Spend the
+        // retained-view/output budgets only on bytes that can contain any
+        // supported pattern or another supported transport representation.
         for engine in [
             general_purpose::STANDARD,
             general_purpose::STANDARD_NO_PAD,
@@ -387,6 +408,14 @@ fn base64_views(
             general_purpose::URL_SAFE_NO_PAD,
         ] {
             if let Ok(decoded) = engine.decode(token) {
+                if !can_contain_pattern_or_transport(&decoded) {
+                    break;
+                }
+                if *budget == 0 || *candidates == 0 {
+                    *complete = false;
+                    return output;
+                }
+                *candidates -= 1;
                 if decoded.len() + 1 > *budget {
                     *complete = false;
                     break;
@@ -459,6 +488,78 @@ fn percent_decode(bytes: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_prefixed_unicode_credential_labels_are_not_discarded() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        for (value, category) in [
+            ("paſſword=密密密密", "password"),
+            (r#"{"cooKie":"密密密密"}"#, "session-cookie"),
+        ] {
+            let mut binary = vec![0xff, 0];
+            binary.extend_from_slice(value.as_bytes());
+            assert!(
+                RegexScanner::new()
+                    .scan(&binary)
+                    .iter()
+                    .any(|f| f.pattern_name == category)
+            );
+            let encoded = STANDARD.encode(binary);
+            for payload in [encoded.clone(), STANDARD.encode(encoded)] {
+                assert!(
+                    RegexScanner::new()
+                        .scan(payload.as_bytes())
+                        .iter()
+                        .any(|f| f.pattern_name == category)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_prose_does_not_consume_encoded_view_budget() {
+        let payload = "ordinary ".repeat(4096);
+        assert!(RegexScanner::new().scan(payload.as_bytes()).is_empty());
+    }
+
+    #[test]
+    fn encoded_key_after_plain_prose_is_actually_inspected() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let payload = "ordinary ".repeat(4096)
+            + &STANDARD.encode("sk-proj-SYNTHETICNOTAREALKEY000000000000000000000000");
+        let findings = RegexScanner::new().scan(payload.as_bytes());
+        assert!(findings.iter().any(|f| f.pattern_name == "openai-api-key"));
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.pattern_name == "inspection-incomplete")
+        );
+    }
+
+    #[test]
+    fn binary_prefixed_minimum_account_and_keys_keep_encoded_inspection() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        for (value, category) in [
+            ("x@y.zz", "email-address"),
+            (
+                "sk-proj-SYNTHETICNOTAREALKEY000000000000000000000000",
+                "openai-api-key",
+            ),
+        ] {
+            let mut binary = vec![0xff, 0, 0xfb];
+            binary.extend_from_slice(value.as_bytes());
+            binary.extend_from_slice(&[0xff, 0]);
+            let once = STANDARD.encode(binary);
+            for payload in [once.clone(), STANDARD.encode(once)] {
+                assert!(
+                    RegexScanner::new()
+                        .scan(payload.as_bytes())
+                        .iter()
+                        .any(|f| f.pattern_name == category)
+                );
+            }
+        }
+    }
 
     fn coverage_encoded(value: impl AsRef<[u8]>) -> String {
         use base64::{Engine as _, engine::general_purpose};
