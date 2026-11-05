@@ -474,9 +474,15 @@ async fn write_bounded<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
     bytes: &[u8],
 ) -> std::io::Result<()> {
-    tokio::time::timeout(std::time::Duration::from_secs(30), writer.write_all(bytes))
-        .await
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "upstream write timeout"))?
+    // A TLS/buffered writer can accept plaintext while ciphertext is still
+    // pending. Drain it before reporting success or awaiting the peer response,
+    // within the original single write deadline.
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        writer.write_all(bytes).await?;
+        writer.flush().await
+    })
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "upstream write timeout"))?
 }
 
 async fn relay<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin>(
@@ -1508,6 +1514,31 @@ fn parse_path(uri: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bounded_buffered_write_flushes_bytes_before_reporting_success() {
+        use tokio::io::AsyncReadExt;
+        let (sink, mut receiver) = tokio::io::duplex(64);
+        let mut buffered = tokio::io::BufWriter::new(sink);
+        write_bounded(&mut buffered, b"safe").await.unwrap();
+        let mut bytes = [0u8; 4];
+        tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            receiver.read_exact(&mut bytes),
+        )
+        .await
+        .expect("accepted buffered bytes were never delivered")
+        .unwrap();
+        assert_eq!(&bytes, b"safe");
+    }
+
+    #[tokio::test]
+    async fn bounded_buffered_write_does_not_hide_a_flush_failure() {
+        let (sink, receiver) = tokio::io::duplex(64);
+        drop(receiver);
+        let mut buffered = tokio::io::BufWriter::new(sink);
+        assert!(write_bounded(&mut buffered, b"safe").await.is_err());
+    }
 
     #[tokio::test]
     async fn aws_hostname_credentials_never_reach_approval_metadata() {
