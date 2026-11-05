@@ -253,7 +253,11 @@ impl DlpScanner for RegexScanner {
 
         // Inspect common transport encodings without executing payload content.
         // Two layers and fixed work/output budgets bound adversarial expansion.
-        let complete = append_base64_views(&mut text);
+        let unicode_complete = append_unicode_views(body, &mut text);
+        let percent_body = percent_decode(body);
+        let percent_complete =
+            percent_body == body || append_unicode_views(&percent_body, &mut text);
+        let complete = append_base64_views(&mut text) && unicode_complete && percent_complete;
 
         let mut findings = Vec::new();
         if !complete {
@@ -286,6 +290,85 @@ impl DlpScanner for RegexScanner {
         }
         findings
     }
+}
+
+// Inspect wide Unicode text in binary uploads as well as declared JSON bodies.
+// Original wire bytes remain unchanged for policy digests and forwarding.
+fn append_unicode_views(body: &[u8], text: &mut String) -> bool {
+    let mut budget = MAX_DECODED_BYTES;
+    for width in [2, 4] {
+        for little in [false, true] {
+            for offset in 0..width {
+                let Some(bytes) = body.get(offset..) else {
+                    continue;
+                };
+                let read_unit = |chunk: &[u8]| -> u32 {
+                    if width == 2 {
+                        let array = [chunk[0], chunk[1]];
+                        if little {
+                            u16::from_le_bytes(array) as u32
+                        } else {
+                            u16::from_be_bytes(array) as u32
+                        }
+                    } else {
+                        let array = [chunk[0], chunk[1], chunk[2], chunk[3]];
+                        if little {
+                            u32::from_le_bytes(array)
+                        } else {
+                            u32::from_be_bytes(array)
+                        }
+                    }
+                };
+                let units = bytes.chunks_exact(width).map(read_unit);
+                // Ordinary UTF-8/binary buffers must not become large, unrelated
+                // Unicode views. Four adjacent ASCII units cover credential labels,
+                // JSON wrappers and token prefixes, even with surrounding Unicode.
+                let mut run = 0;
+                let candidate = units.clone().any(|unit| {
+                    run = if matches!(unit, 9 | 10 | 13 | 32..=126) {
+                        run + 1
+                    } else {
+                        0
+                    };
+                    run >= 4
+                });
+                if !candidate {
+                    continue;
+                }
+                let chars: Box<dyn Iterator<Item = char> + '_> = if width == 2 {
+                    Box::new(
+                        char::decode_utf16(units.map(|u| u as u16))
+                            .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)),
+                    )
+                } else {
+                    Box::new(
+                        units.map(|u| char::from_u32(u).unwrap_or(char::REPLACEMENT_CHARACTER)),
+                    )
+                };
+                let mut decoded = String::new();
+                for character in chars {
+                    if decoded.len() + character.len_utf8() + 1 > budget {
+                        return false;
+                    }
+                    decoded.push(character);
+                }
+                budget -= decoded.len() + 1;
+                text.push('\n');
+                text.push_str(&decoded);
+                // JSON escape decoding must happen after the wire charset decoding.
+                let json_bytes = decoded.trim_start_matches('\u{feff}').as_bytes();
+                if let Some(json) = normalized_json(json_bytes) {
+                    if json.len() + 1 > budget {
+                        return false;
+                    }
+                    budget -= json.len() + 1;
+                    text.push('\n');
+                    text.push_str(&String::from_utf8_lossy(&json));
+                }
+            }
+        }
+    }
+    true
 }
 
 const MAX_ENCODED_TOKEN: usize = 65_536;
@@ -408,21 +491,34 @@ fn base64_views(
             general_purpose::URL_SAFE_NO_PAD,
         ] {
             if let Ok(decoded) = engine.decode(token) {
-                if !can_contain_pattern_or_transport(&decoded) {
+                let mut unicode = String::new();
+                let unicode_complete = append_unicode_views(&decoded, &mut unicode);
+                let percent = percent_decode(&decoded);
+                let percent_complete =
+                    percent == decoded || append_unicode_views(&percent, &mut unicode);
+                if !can_contain_pattern_or_transport(&decoded) && unicode.is_empty() {
+                    if !unicode_complete || !percent_complete {
+                        *complete = false;
+                    }
                     break;
+                }
+                if !unicode_complete || !percent_complete {
+                    *complete = false;
                 }
                 if *budget == 0 || *candidates == 0 {
                     *complete = false;
                     return output;
                 }
                 *candidates -= 1;
-                if decoded.len() + 1 > *budget {
+                let cost = decoded.len() + 1 + unicode.len();
+                if cost > *budget {
                     *complete = false;
                     break;
                 }
-                *budget -= decoded.len() + 1;
+                *budget -= cost;
                 output.extend_from_slice(&decoded);
                 output.push(b'\n');
+                output.extend_from_slice(unicode.as_bytes());
                 append_json_view(&decoded, &mut output, budget, complete);
                 let percent = percent_decode(&decoded);
                 if percent != decoded {
@@ -488,6 +584,110 @@ fn percent_decode(bytes: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unicode_body_credentials_are_not_forwardable_as_clean_text() {
+        let scanner = RegexScanner::new();
+        let value = r#"{"Authorization":"Bearer opaque-synthetic-credential-123456"}"#;
+        for width in [2, 4] {
+            for little in [false, true] {
+                let body: Vec<u8> = if width == 2 {
+                    value
+                        .encode_utf16()
+                        .flat_map(|u| {
+                            if little {
+                                u.to_le_bytes()
+                            } else {
+                                u.to_be_bytes()
+                            }
+                        })
+                        .collect()
+                } else {
+                    value
+                        .chars()
+                        .flat_map(|c| {
+                            if little {
+                                (c as u32).to_le_bytes()
+                            } else {
+                                (c as u32).to_be_bytes()
+                            }
+                        })
+                        .collect()
+                };
+                use base64::{Engine as _, engine::general_purpose::STANDARD};
+                let encoded = STANDARD.encode(&body);
+                let twice = STANDARD.encode(encoded.as_bytes());
+                for wire in [encoded.as_bytes(), twice.as_bytes()] {
+                    assert!(
+                        scanner
+                            .scan(wire)
+                            .iter()
+                            .any(|f| f.pattern_name == "authorization"
+                                && f.severity == Severity::Critical),
+                        "base64 wide credential escaped inspection"
+                    );
+                }
+                let percent: String = body.iter().map(|byte| format!("%{byte:02X}")).collect();
+                for wire in [percent.clone(), STANDARD.encode(percent.as_bytes())] {
+                    assert!(
+                        scanner
+                            .scan(wire.as_bytes())
+                            .iter()
+                            .any(|f| f.pattern_name == "authorization"
+                                && f.severity == Severity::Critical),
+                        "percent wide credential escaped inspection"
+                    );
+                }
+                for prefix in [vec![], vec![0xff]] {
+                    let mut wire =
+                        b"POST /upload HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n".to_vec();
+                    wire.extend_from_slice(&prefix);
+                    wire.extend_from_slice(&body);
+                    assert!(
+                        scanner
+                            .scan(&wire)
+                            .iter()
+                            .any(|f| f.pattern_name == "authorization"
+                                && f.severity == Severity::Critical),
+                        "width={width} little={little} prefix={}",
+                        prefix.len()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wide_json_escapes_and_normal_unicode_have_distinct_outcomes() {
+        let scanner = RegexScanner::new();
+        for (value, sensitive) in [
+            (
+                r#"{"Authorization":"Be\u0061rer opaque-synthetic-credential-123456"}"#,
+                true,
+            ),
+            (r#"{"message":"정상 개발 문서와 테스트 데이터"}"#, false),
+        ] {
+            let body: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            let findings = scanner.scan(&body);
+            assert_eq!(
+                findings.iter().any(|f| f.severity == Severity::Critical),
+                sensitive
+            );
+            assert!(findings.iter().all(|f| f.matched_text == "[REDACTED...]"));
+        }
+    }
+
+    #[test]
+    fn wide_text_budget_exhaustion_is_not_a_clean_scan() {
+        let value = "ordinary text ".repeat(MAX_DECODED_BYTES / 10);
+        let body: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert!(
+            RegexScanner::new()
+                .scan(&body)
+                .iter()
+                .any(|f| f.pattern_name == "inspection-incomplete")
+        );
+    }
 
     #[test]
     fn binary_prefixed_unicode_credential_labels_are_not_discarded() {
