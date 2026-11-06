@@ -119,3 +119,30 @@ fn quoted_api_key_json_is_detected_without_echo_or_state() {
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 }
+
+#[test]
+fn compressed_archives_are_reported_as_incomplete_without_unpacking() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let directory = tempfile::tempdir().unwrap();
+    for fixture in [
+        "H4sIAAAAAAAC/6tWSizIjM9OrVSyUkrLrCgpLUrNz8upTExKTklNS8/IzMrOyc3LLzA0MjYxNVOqBQBK8jSsLwAAAA==",
+        "UEsDBBQAAAAIABW8Zl1K8jSsMQAAAC8AAAAMAAAAZml4dHVyZS5qc29uq1ZKLMiMz06tVLJSSsusKCktSs3Py6lMTEpOSU1Lz8jMys7JzcsvMDQyNjE1U6oFAFBLAQIUAxQAAAAIABW8Zl1K8jSsMQAAAC8AAAAMAAAAAAAAAAAAAACAAQAAAABmaXh0dXJlLmpzb25QSwUGAAAAAAEAAQA6AAAAWwAAAAAA",
+    ] {
+        for standalone in [false, true] {
+            let output = inspect(
+                &STANDARD.decode(fixture).unwrap(),
+                directory.path(),
+                standalone,
+            );
+            assert!(output.status.success());
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(
+                report["categories"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|category| category == "inspection-incomplete")
+            );
+        }
+    }
+}

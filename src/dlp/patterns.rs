@@ -257,7 +257,12 @@ impl DlpScanner for RegexScanner {
         let percent_body = percent_decode(body);
         let percent_complete =
             percent_body == body || append_unicode_views(&percent_body, &mut text);
-        let complete = append_base64_views(&mut text) && unicode_complete && percent_complete;
+        let archive_complete =
+            !contains_opaque_archive(body) && !contains_opaque_archive(&percent_body);
+        let complete = append_base64_views(&mut text)
+            && unicode_complete
+            && percent_complete
+            && archive_complete;
 
         let mut findings = Vec::new();
         if !complete {
@@ -369,6 +374,22 @@ fn append_unicode_views(body: &[u8], text: &mut String) -> bool {
         }
     }
     true
+}
+
+// These recognized containers are not decompressed here. A bounded regex view
+// cannot establish that their contents are clean; use the existing unknown/hold
+// path, without adding archive expansion or trusting attacker-supplied MIME.
+fn contains_opaque_archive(input: &[u8]) -> bool {
+    fn at_start(value: &[u8]) -> bool {
+        (value.len() >= 18 && value.starts_with(b"\x1f\x8b\x08") && value[3] & 0xe0 == 0)
+            || (value.len() >= 30 && value.starts_with(b"PK\x03\x04"))
+            || (value.len() >= 22 && value.starts_with(b"PK\x05\x06"))
+    }
+    at_start(input)
+        || input
+            .windows(4)
+            .enumerate()
+            .any(|(offset, bytes)| bytes == b"\r\n\r\n" && at_start(&input[offset + 4..]))
 }
 
 const MAX_ENCODED_TOKEN: usize = 65_536;
@@ -491,6 +512,11 @@ fn base64_views(
             general_purpose::URL_SAFE_NO_PAD,
         ] {
             if let Ok(decoded) = engine.decode(token) {
+                if contains_opaque_archive(&decoded)
+                    || contains_opaque_archive(&percent_decode(&decoded))
+                {
+                    *complete = false;
+                }
                 let mut unicode = String::new();
                 let unicode_complete = append_unicode_views(&decoded, &mut unicode);
                 let percent = percent_decode(&decoded);
@@ -1437,5 +1463,58 @@ mod tests {
             .find(|f| f.pattern_name == "together-api-key")
             .expect("should detect together alphanumeric key");
         assert_eq!(finding.severity, Severity::Critical);
+    }
+}
+
+#[cfg(test)]
+mod opaque_archive_tests {
+    use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    #[test]
+    fn compressed_credentials_are_unknown_in_direct_multipart_and_encoded_views() {
+        for fixture in [
+            "H4sIAAAAAAAC/6tWSizIjM9OrVSyUkrLrCgpLUrNz8upTExKTklNS8/IzMrOyc3LLzA0MjYxNVOqBQBK8jSsLwAAAA==",
+            "UEsDBBQAAAAIABW8Zl1K8jSsMQAAAC8AAAAMAAAAZml4dHVyZS5qc29uq1ZKLMiMz06tVLJSSsusKCktSs3Py6lMTEpOSU1Lz8jMys7JzcsvMDQyNjE1U6oFAFBLAQIUAxQAAAAIABW8Zl1K8jSsMQAAAC8AAAAMAAAAAAAAAAAAAACAAQAAAABmaXh0dXJlLmpzb25QSwUGAAAAAAEAAQA6AAAAWwAAAAAA",
+        ] {
+            let archive = STANDARD.decode(fixture).unwrap();
+            let mut multipart =
+                b"--fixture\r\nContent-Disposition: form-data; name=upload\r\n\r\n".to_vec();
+            multipart.extend_from_slice(&archive);
+            multipart.extend_from_slice(b"\r\n--fixture--\r\n");
+            let percent = archive
+                .iter()
+                .map(|v| format!("%{v:02X}"))
+                .collect::<String>();
+            for value in [
+                archive,
+                multipart,
+                fixture.as_bytes().to_vec(),
+                STANDARD.encode(fixture).into_bytes(),
+                percent.into_bytes(),
+            ] {
+                assert!(
+                    RegexScanner::new()
+                        .scan(&value)
+                        .iter()
+                        .any(|finding| finding.pattern_name == "inspection-incomplete"
+                            && finding.severity == Severity::Critical)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_text_and_short_magic_are_not_classified_as_archives() {
+        for value in [
+            b"ordinary harmless prose".as_slice(),
+            b"PK",
+            b"PK\x03\x04",
+            b"\x1f\x8b\x08",
+            b"documentation about ZIP and gzip files",
+        ] {
+            assert!(!contains_opaque_archive(value));
+            assert!(RegexScanner::new().scan(value).is_empty());
+        }
     }
 }
