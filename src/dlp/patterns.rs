@@ -152,10 +152,10 @@ impl RegexScanner {
             "generic-api-key".to_string(),
             PatternDef {
                 regex: Regex::new(
-                    r##"(?i)(api[_-]?key|apikey)\s*[:=]\s*["']?([A-Za-z0-9_-]{20,})["']?"##,
+                    r##"(?i)(api[_-]?key|apikey)["']?\s*[:=]\s*["']?([A-Za-z0-9_-]{20,})["']?"##,
                 )
                 .unwrap(),
-                severity: Severity::High,
+                severity: Severity::Critical,
             },
         );
 
@@ -1182,6 +1182,57 @@ mod tests {
     }
 
     #[test]
+    fn detects_quoted_generic_api_key_fields_and_transport_views() {
+        use base64::{Engine as _, engine::general_purpose};
+        let scanner = RegexScanner::new();
+        let secret = "fixtureonlyabcdefghijklmnop123456";
+        for name in ["api_key", "api-key", "apiKey", "API_KEY"] {
+            let json = format!(r#"{{"{name}":"{secret}"}}"#);
+            let python = format!("{{'{name}': '{secret}'}}");
+            let percent = json
+                .bytes()
+                .map(|byte| format!("%{byte:02X}"))
+                .collect::<String>();
+            let base64 = general_purpose::STANDARD.encode(json.as_bytes());
+            let utf16 = json
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>();
+            for payload in [
+                json.into_bytes(),
+                python.into_bytes(),
+                percent.into_bytes(),
+                base64.into_bytes(),
+                utf16,
+            ] {
+                let findings = scanner.scan(&payload);
+                assert!(
+                    findings
+                        .iter()
+                        .any(|finding| finding.pattern_name == "generic-api-key"),
+                    "quoted key transport view must be inspected"
+                );
+                assert!(
+                    findings
+                        .iter()
+                        .all(|finding| !finding.matched_text.contains(secret))
+                );
+            }
+        }
+        for payload in [
+            br#"{"api_key_count":123,"api_key_hint":"short"}"#.as_slice(),
+            br#"{"api_key":""}"#.as_slice(),
+        ] {
+            assert!(
+                !scanner
+                    .scan(payload)
+                    .iter()
+                    .any(|finding| finding.pattern_name == "generic-api-key")
+            );
+        }
+    }
+
+    #[test]
     fn detects_generic_api_key() {
         let scanner = RegexScanner::new();
         let payload = b"api_key=abcdefghijklmnopqrstuvwxyz";
@@ -1190,7 +1241,7 @@ mod tests {
             .iter()
             .find(|f| f.pattern_name == "generic-api-key")
             .expect("should detect generic api key");
-        assert_eq!(finding.severity, Severity::High);
+        assert_eq!(finding.severity, Severity::Critical);
     }
 
     // === AI Provider Key Tests ===
