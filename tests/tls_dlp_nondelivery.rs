@@ -20,8 +20,9 @@ async fn request(
     proxy: std::net::SocketAddr,
     target: std::net::SocketAddr,
     config: Arc<rustls::ClientConfig>,
-    body: &str,
+    body: impl AsRef<[u8]>,
 ) -> Vec<u8> {
+    let body = body.as_ref();
     let mut stream = TcpStream::connect(proxy).await.unwrap();
     stream
         .write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
@@ -36,7 +37,8 @@ async fn request(
     let connector = tokio_rustls::TlsConnector::from(config);
     let name = rustls::pki_types::ServerName::try_from("127.0.0.1".to_string()).unwrap();
     let mut tls = connector.connect(name, stream).await.unwrap();
-    tls.write_all(format!("POST /submit HTTP/1.1\r\nHost: {target}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+    tls.write_all(format!("POST /submit HTTP/1.1\r\nHost: {target}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await.unwrap();
+    tls.write_all(body).await.unwrap();
     // Flush the final TLS record before waiting for a response. Large writes
     // may leave encrypted output buffered, particularly with Windows IOCP.
     tls.flush().await.unwrap();
@@ -140,6 +142,8 @@ async fn verify_tls(case: &'static str) {
         .flat_map(|value| [value.to_string(), STANDARD.encode(value)])
         .collect();
     bodies.extend(encoded_coverage::bodies());
+    // Valid compressed synthetic credentials are unknown, never clean.
+    bodies.extend(["H4sIAAAAAAAC/6tWSizIjM9OrVSyUkrLrCgpLUrNz8upTExKTklNS8/IzMrOyc3LLzA0MjYxNVOqBQBK8jSsLwAAAA==".to_string(),"UEsDBBQAAAAIABW8Zl1K8jSsMQAAAC8AAAAMAAAAZml4dHVyZS5qc29uq1ZKLMiMz06tVLJSSsusKCktSs3Py6lMTEpOSU1Lz8jMys7JzcsvMDQyNjE1U6oFAFBLAQIUAxQAAAAIABW8Zl1K8jSsMQAAAC8AAAAMAAAAAAAAAAAAAACAAQAAAABmaXh0dXJlLmpzb25QSwUGAAAAAAEAAQA6AAAAWwAAAAAA".to_string()]);
     let quoted_api_key = r#"{"api_key":"fixtureonlyabcdefghijklmnop123456"}"#;
     bodies.extend([quoted_api_key.to_string(), STANDARD.encode(quoted_api_key)]);
     for body in bodies {
@@ -158,6 +162,24 @@ async fn verify_tls(case: &'static str) {
         });
         assert!(response.starts_with(b"HTTP/1.1 403"));
         assert!(!String::from_utf8_lossy(&response).contains("abcdefghijklmnopqrstuvwxyz"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), upstream.accept())
+                .await
+                .is_err()
+        );
+    }
+    for fixture in [
+        "H4sIAAAAAAAC/6tWSizIjM9OrVSyUkrLrCgpLUrNz8upTExKTklNS8/IzMrOyc3LLzA0MjYxNVOqBQBK8jSsLwAAAA==",
+        "UEsDBBQAAAAIABW8Zl1K8jSsMQAAAC8AAAAMAAAAZml4dHVyZS5qc29uq1ZKLMiMz06tVLJSSsusKCktSs3Py6lMTEpOSU1Lz8jMys7JzcsvMDQyNjE1U6oFAFBLAQIUAxQAAAAIABW8Zl1K8jSsMQAAAC8AAAAMAAAAAAAAAAAAAACAAQAAAABmaXh0dXJlLmpzb25QSwUGAAAAAAEAAQA6AAAAWwAAAAAA",
+    ] {
+        let raw = STANDARD.decode(fixture).unwrap();
+        let response = tokio::time::timeout(
+            Duration::from_secs(3),
+            request(proxy, target, client.clone(), raw),
+        )
+        .await
+        .unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 403"));
         assert!(
             tokio::time::timeout(Duration::from_millis(50), upstream.accept())
                 .await
