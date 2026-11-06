@@ -140,6 +140,8 @@ async fn verify_tls(case: &'static str) {
         .flat_map(|value| [value.to_string(), STANDARD.encode(value)])
         .collect();
     bodies.extend(encoded_coverage::bodies());
+    let quoted_api_key = r#"{"api_key":"fixtureonlyabcdefghijklmnop123456"}"#;
+    bodies.extend([quoted_api_key.to_string(), STANDARD.encode(quoted_api_key)]);
     for body in bodies {
         // The new multi-megabyte bodies exercise real TLS framing in parallel;
         // keep a finite deadline without applying the tiny-fixture deadline.

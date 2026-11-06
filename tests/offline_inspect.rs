@@ -104,3 +104,18 @@ fn standalone_refuses_paths_and_arbitrary_arguments_without_echoing_them() {
     }
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn quoted_api_key_json_is_detected_without_echo_or_state() {
+    let payload = br#"{"api_key":"fixtureonlyabcdefghijklmnop123456"}"#;
+    for standalone in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let output = inspect(payload, directory.path(), standalone);
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["categories"], serde_json::json!(["generic-api-key"]));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("fixtureonly"));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+}
