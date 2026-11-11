@@ -79,6 +79,38 @@ impl NetworkConfig {
                 if let Some(ip) = ip.to_ipv4_mapped() {
                     return self.allows_ip(IpAddr::V4(ip));
                 }
+                // Apply the same IPv4 policy to known transition mechanisms;
+                // the outer prefix cannot make an embedded metadata/LAN target
+                // public. Preserve the existing outer IPv6 restrictions below.
+                let allowed_v4 = |high: u16, low: u16| {
+                    self.allows_ip(IpAddr::V4(Ipv4Addr::from(
+                        ((high as u32) << 16) | low as u32,
+                    )))
+                };
+                let embedded_allowed = match ip.segments() {
+                    // RFC 3056: 2002:V4ADDR::/48.
+                    [0x2002, high, low, ..] => allowed_v4(high, low),
+                    // RFC 4380: server IPv4 and one's-complement client IPv4.
+                    [
+                        0x2001,
+                        0,
+                        server_high,
+                        server_low,
+                        _,
+                        _,
+                        client_high,
+                        client_low,
+                    ] => {
+                        allowed_v4(server_high, server_low) && allowed_v4(!client_high, !client_low)
+                    }
+                    // RFC 6052 well-known NAT64 /96. Network-specific translation
+                    // prefixes cannot be inferred from an address alone.
+                    [0x64, 0xff9b, 0, 0, 0, 0, high, low] => allowed_v4(high, low),
+                    _ => true,
+                };
+                if !embedded_allowed {
+                    return false;
+                }
                 let [first, second, ..] = ip.segments();
                 let link_local = first & 0xffc0 == 0xfe80;
                 !link_local
@@ -175,6 +207,44 @@ mod tests {
         assert!(config.allows_ip("127.0.0.1".parse().unwrap()));
         assert!(!config.allows_ip("169.254.169.254".parse().unwrap()));
         assert!(!config.allows_ip("::ffff:169.254.169.254".parse().unwrap()));
+    }
+
+    #[test]
+    fn translated_private_destinations_are_not_public_ipv6() {
+        let config = NetworkConfig::default();
+        for ip in [
+            "2002:a9fe:a9fe::1",                    // 6to4 link-local metadata
+            "2002:7f00:1::1",                       // 6to4 loopback
+            "2002:a00:1::1",                        // 6to4 private
+            "2001:0:4136:e378:8000:63bf:5601:5601", // Teredo link-local client
+            "2001:0:a9fe:a9fe:8000:63bf:f7f7:f7f7", // Teredo link-local server
+        ] {
+            assert!(!config.allows_ip(ip.parse().unwrap()), "allowed {ip}");
+        }
+        for ip in ["2002:808:808::1", "2001:0:4136:e378:8000:63bf:f7f7:f7f7"] {
+            assert!(config.allows_ip(ip.parse().unwrap()), "refused public {ip}");
+        }
+    }
+
+    #[test]
+    fn lan_override_does_not_open_translated_metadata() {
+        let config = NetworkConfig {
+            block_private_networks: false,
+            ..Default::default()
+        };
+        for ip in [
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b::6464:64c8",
+            "2002:a9fe:a9fe::1",
+            "2001:0:4136:e378:8000:63bf:5601:5601",
+        ] {
+            assert!(
+                !config.allows_ip(ip.parse().unwrap()),
+                "allowed metadata {ip}"
+            );
+        }
+        assert!(config.allows_ip("64:ff9b::808:808".parse().unwrap()));
+        assert!(config.allows_ip("2002:a00:1::1".parse().unwrap()));
     }
 
     #[tokio::test]
