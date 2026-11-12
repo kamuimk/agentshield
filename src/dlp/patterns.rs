@@ -189,7 +189,7 @@ impl RegexScanner {
         for (name, expression) in [
             (
                 "password",
-                r#"(?i)(?:password|passwd|client_secret|secret_access_key|session_token)\s*["']?\s*[:=]\s*["']?[^\s"'&,;]{4,}"#,
+                r#"(?i)(?:password|passwd|client_secret|secret_?access_?key|session_?token)\s*["']?\s*[:=]\s*["']?[^\s"'&,;]{4,}"#,
             ),
             (
                 "authorization",
@@ -1017,6 +1017,32 @@ mod tests {
                 assert!(String::from_utf8_lossy(&output).contains("x@y.zz"));
             }
         }
+    }
+
+    #[test]
+    fn aws_sdk_credential_fields_require_critical_inspection() {
+        let scanner = RegexScanner::new();
+        for field in ["SecretAccessKey", "SessionToken", "AWS_SESSION_TOKEN"] {
+            let payload = format!(r#"{{"{field}":"synthetic-credential-value"}}"#);
+            let findings = scanner.scan(payload.as_bytes());
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.pattern_name == "password"
+                        && finding.severity == Severity::Critical),
+                "AWS credential field was not detected: {field}"
+            );
+            assert!(
+                findings
+                    .iter()
+                    .all(|finding| finding.matched_text == "[REDACTED...]")
+            );
+        }
+        assert!(
+            scanner
+                .scan(br#"{"secret_arn":"arn:aws:secretsmanager:fixture"}"#)
+                .is_empty()
+        );
     }
 
     #[test]
